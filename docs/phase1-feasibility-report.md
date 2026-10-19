@@ -469,3 +469,17 @@ Why this beats both earlier options:
   - the cave runs on an interpreter for all four flag combinations (`tools/test_mips.py`);
   - the full freemem/install/status/run/uninstall flow runs against a mock PINE with 32 MB RAM.
 - **Not yet tested on the device.**
+
+### 13.6 Device results for the override hook (2026-10-19)
+
+| Check | Result | Label |
+|---|---|---|
+| Hook installs and is called every frame | `install` at `0x00084000`, about 60 calls/s | Confirmed (device) |
+| Our camera reaches the screen | Yes | Confirmed (device, user) |
+| Whose camera | `0x48BF7D` ("our player number") = 0 offline, so slot 0 was the user's character all along | Confirmed (device) |
+| Facing vs heading field | `--yaw-offset 180` shows the character's back (screenshot). `0` puts the camera in front and steering feels mirrored. So he **faces heading + 180°** | Confirmed (device, visual) |
+| Framing | Default rig sits low and close (hip height, looking up). Being tuned with `--distance/--height/--target-height/--shoulder/--pitch` | In progress |
+| Free EE RAM | `0x00084000`–`0x00100000` stayed zero for 720 passes (60 s of play) | Confirmed (measured) |
+
+The f1_live travel fit (`atan2(dx, dz)`) matches the heading field to the direction of
+*travel* for the logged samples. Combined with the visual result, those samples were back-steps.
