@@ -12,3 +12,5 @@ Quick start (PC with the Odin attached over USB, PINE enabled, game booted, save
     python tools/phase2_check.py
 
 Results land in `results/`.
+- `tools/f1_live.py`: live read-only view of File #1's camera, players and pad, using the CC0
+  decomp's addresses (to verify them on your disc)

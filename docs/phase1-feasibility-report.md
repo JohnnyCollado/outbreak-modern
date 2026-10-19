@@ -228,6 +228,9 @@ docstrings and strings inside v1.2.0.
 
 ## 7. Recommended architecture
 
+> **Superseded on 2026-10-19 by §13.** A CC0 decompilation of both games turned up. It
+> makes Option C (in-game MIPS) the primary route. The text below is kept as the original reasoning.
+
 **Option A: a native Android companion app (Kotlin) using ARMSX2's loopback PINE
 server.** Keep **Option B as the fallback** if either of these turns out true:
 
@@ -362,3 +365,66 @@ Confirming test: move with the PC pad's left stick and check whether sprint work
 (left stick, D-pad, buttons, right stick) from the game's **raw** pad word in EE RAM,
 read before the cave applies its masks. Reading a host device won't work. On ARMSX2
 that raw word already carries the Odin's built-in controls.
+
+---
+
+## 13. The Outbreak decompilation changes the recommendation (2026-10-19)
+
+Source: [GalaxyNostalgia/Outbreak-decomp](https://github.com/GalaxyNostalgia/Outbreak-decomp),
+cloned at `eb6af38` (2026-10-19). Licence **CC0 1.0** (public domain). It contains no
+game code; you build it from your own disc.
+
+**Coverage.** It targets File #1 `SLPM-65428` VER **1.04** and File #2 `SLPM-65692` VER **1.03**,
+plus the English fan patch v2.1. Every target rebuilds byte-identical from asm. File #1 has
+238 functions decompiled and matching, plus 77 written but not yet matching. **File #2's C is
+not started** (`config/SLPM_656.92/symbol_addrs.txt` is empty), though about half its code is
+shared with File #1.
+
+### 13.1 Facts it gives us (File #1 VER 1.04)
+
+| Field | Address / offset | Type | Decomp source | Live-verified |
+|---|---|---|---|---|
+| Camera | `0x00306320` | `Camera` struct | `include/camera.h` | No, run `tools/f1_live.py` |
+| … position / target / up | `+0x18` / `+0x24` / `+0x3C` | `f32[3]` | same | No |
+| … far / near / FOV | `+0x58` / `+0x5C` / `+0x60` | `f32` (FOV in degrees) | same | No |
+| … roll | `+0x6C` | `s32` | same | No |
+| View matrix | `0x003062E0` | `Mat44` | same | No |
+| **Camera → renderer, once per frame** | `func_00345740` (SUBMAIN overlay); builds the view in `func_00345870` | code | `src/.../submain/ingame.c:79-113` | No |
+| Raw pad, this frame | `0x00292D40` | `PadData`: buttons `u16 +2` (active low), sticks `u8[4] +4` | `include/pad.h` | No |
+| Controls per pad | `0x00306410` | `Ctrl` (0x30): stick angle/magnitude, button history | `include/ctrl.h` | No |
+| Players | `0x00476DD0`, stride `0x10E0`, count at `0x0023BE14` | `DrawObjFull[]` | `include/object.h`, `game/talk.c` | No |
+| … position / heading / own controls | `+0x38` / `+0x92` / `+0xF78` | `f32[3]` / `s16` (0x10000 per turn) / `Ctrl` | `include/object.h` | No |
+| Camera cut this frame | `0x003AEF54` | `u8[]` | `game/charmove.c:2455` | No |
+| Room cameras | `RoomCam` (0x198 bytes), 32 per room, type 8 chains into paths | struct | `game/roomcams.c` | No |
+
+The game also has built-in "keep the stick direction across a camera cut" logic
+(`DrawObjFull.unkFA8/unkFAA`, `game/charmove.c:2560-2580`). Camera-relative movement would hook in there.
+
+### 13.2 Revised recommendation: Option C first, with a PC prototyping loop
+
+1. **Verify** the table above on the user's disc (`tools/f1_live.py`, read-only).
+2. **Prototype from the PC over PINE** (Python): compute an over-the-shoulder camera from
+   player 0's position and heading plus the right stick in the raw pad. To avoid racing the
+   engine, install one small hook at the top of `func_00345740`. When an "override" flag is
+   set, it copies our camera block into `0x00306320` just before the game hands the camera
+   to the renderer. The PC then writes only the override block, and timing no longer matters.
+3. **Move the camera math into the hook** as MIPS (C compiled for R5900, loaded with a PNACH).
+   The finished mod then runs entirely inside the game.
+
+Why this beats both earlier options:
+- No companion app, so Android can't freeze it (field-observed in §12).
+- No ADB or PINE latency.
+- It updates exactly once per rendered frame.
+- It reads the Odin's real controls, because the game itself reads them.
+- No ARMSX2 changes, and it works on any PS2 emulator.
+- No dependence on HeySnippy's code. Everything we use is CC0 or our own.
+
+### 13.3 New risks
+
+| Risk | Label |
+|---|---|
+| Decomp addresses assume VER 1.04 and an unmodified ELF. Fan-patched (English) builds change `SLPM_654.28` and `GAME.BIN` | Confirmed (`config/versions.json`) |
+| Online (obsrv) the server pushes a 0x7AA0-byte v1.01 code patch, so code addresses may move online | Confirmed (`config/versions.json` note); impact unverified |
+| The hook lives in the SUBMAIN overlay, so it must be re-applied or checked whenever that overlay loads (conditional PNACH) | Partially verified |
+| Free EE RAM for the code cave isn't identified yet | Unverified |
+| File #2 has no decompiled C or symbols yet | Confirmed |

@@ -83,6 +83,21 @@ class Pine:
         (v,) = struct.unpack("<I", self.call(MSG_READ32, struct.pack("<I", addr))[:4])
         return v
 
+    def read_block(self, addr, size):
+        """Read `size` bytes (rounded up to 4) as Read32s batched into ONE packet.
+
+        PINE runs every command in a packet back to back on its thread, so this is one
+        round trip and as close to one snapshot as PINE offers (it never pauses the EE).
+        """
+        words = (size + 3) // 4
+        body = b"".join(bytes([MSG_READ32]) + struct.pack("<I", addr + 4 * i) for i in range(words))
+        self.sock.sendall(struct.pack("<I", len(body) + 4) + body)
+        (total,) = struct.unpack("<I", self._recv_exact(4))
+        rest = self._recv_exact(total - 4)
+        if rest[0] != 0x00:
+            raise PineError(f"block read at 0x{addr:08X} failed (code 0x{rest[0]:02X})")
+        return rest[1:1 + size]
+
 
 BENCH_ADDR = 0x00100000  # start of the usual ELF load area; always backed RAM
 
