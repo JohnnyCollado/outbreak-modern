@@ -187,14 +187,23 @@ def main(argv=None):
     # 4. on-device cross-uid loopback probe: adb shell runs as uid 'shell', not ARMSX2's uid,
     #    so an answer here shows the loopback port is reachable from outside the ARMSX2 sandbox.
     s = Step(results, "on-device loopback (shell uid)")
-    probe = (f"printf '\\005\\000\\000\\000\\010' | nc -w 2 127.0.0.1 {a.port} | od -An -tx1")
+    # PINE serves ONE client at a time, so a probe that lingers locks everyone else out.
+    # Android's toybox nc treats -w as a connect timeout only and otherwise stays connected
+    # forever (an earlier version of this script did exactly that), so: kill any stale probe
+    # first, and bound this one with `timeout`, whose kill is also what lets od see EOF.
+    stale = run(adb + ["shell", "pkill -x nc && echo killed"])[1].strip()
+    if stale:
+        Step(results, "stale nc cleanup")("INFO", "killed a leftover on-device nc that was holding PINE")
+    probe = (f"printf '\\005\\000\\000\\000\\010' | timeout 3 nc 127.0.0.1 {a.port} | od -An -tx1")
     rc, out, err = run(adb + ["shell", probe], timeout=20)
+    run(adb + ["shell", "pkill -x nc"])  # belt and braces: never leave the slot held
     ok, text = decode_pine_string_reply(out) if out.strip() else (False, "")
     if ok:
         s("PASS", f"shell uid got a Version reply over 127.0.0.1:{a.port}: {text!r}", raw=out)
     else:
-        s("WARN", "no PINE reply from on-device nc (PINE off, no game, or toybox nc lacks -w). "
-                  "Not fatal; the forwarded test below is the one that matters.", raw=out, stderr=err)
+        s("WARN", "no PINE reply from on-device nc (PINE off, another client connected, or no "
+                  "toybox nc/timeout). Not fatal; the forwarded test below is the one that matters.",
+          raw=out, stderr=err)
 
     # 5. forward
     s = Step(results, "adb forward")
@@ -245,6 +254,11 @@ def main(argv=None):
         results["pine"]["bench_adb"] = r
         s("INFO", f"p50 {r['p50_ms']:.3f} ms, p95 {r['p95_ms']:.3f} ms, p99 {r['p99_ms']:.3f} ms, "
                   f"max {r['max_ms']:.3f} ms, ~{r['round_trips_per_s']:.0f} round trips/s")
+    except TimeoutError:
+        s("FAIL", "PINE accepted the connection but never answered. Something else holds the single "
+                  "PINE client slot (the camera mod, another tool, a stuck nc). Close it, or toggle "
+                  "Enable PINE off and on in ARMSX2, then re-run.")
+        return finish(results)
     except (pine_diag.PineError, OSError) as e:
         s("FAIL", f"PINE error: {e}")
         return finish(results)
