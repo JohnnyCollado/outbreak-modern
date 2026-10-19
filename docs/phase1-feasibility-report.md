@@ -478,7 +478,7 @@ Why this beats both earlier options:
 | Our camera reaches the screen | Yes | Confirmed (device, user) |
 | Whose camera | `0x48BF7D` ("our player number") = 0 offline, so slot 0 was the user's character all along | Confirmed (device) |
 | Facing vs heading field | `--yaw-offset 0` shows the character's back, `180` the face. He **faces along the heading field** (now the default) | Confirmed (device, user) |
-| Framing | Default rig sits low and close (hip height, looking up). Being tuned with `--distance/--height/--target-height/--shoulder/--pitch` | In progress |
+| Framing | Over-the-shoulder view confirmed in J's Bar with defaults at `--yaw-offset 0` (camera over the **left** shoulder; `--shoulder -35` gives the right). Right-stick orbit and recenter fixes (`97fe870`) not yet tested on the device | Confirmed (device, screenshot) |
 | Free EE RAM | `0x00084000`–`0x00100000` stayed zero for 720 passes (60 s of play) | Confirmed (measured) |
 
 This agrees with the f1_live travel fit (`atan2(dx, dz)`), so the "back-step" reinterpretation
