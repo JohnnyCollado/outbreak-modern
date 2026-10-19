@@ -42,7 +42,7 @@ import f1_hookcheck  # noqa: E402
 import mips  # noqa: E402
 import phase2_check  # noqa: E402
 import pine_diag  # noqa: E402
-from f1_live import CAMERA, PAD_NOW, PLAYERS  # noqa: E402
+from f1_live import CAMERA, PAD_NOW, our_player  # noqa: E402
 
 HOOK = 0x00345740
 FREE_LO, FREE_HI = 0x00080000, 0x00100000  # below the ELF (loads at 0x100000); verified by `freemem`
@@ -265,12 +265,29 @@ def cmd_run(a):
     yaw_off, pitch, last = 0.0, math.radians(a.pitch), time.perf_counter()
     smooth_heading = None
     flags = 1 | (2 if a.fov else 0)
-    print("camera live. Right stick orbits/tilts, Ctrl+C hands control back to the game.")
+    cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
+    t0, shown = time.perf_counter(), None
+    print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
+    print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
+          f"shoulder {a.shoulder:g}, follow {a.follow:g}s, fov {a.fov or 'game'}")
+    if cycle:
+        print("CALIBRATE: the camera visits 4 angles around her, 4 s each, twice. Stand still (stick and\n"
+              "D-pad untouched). Note the yaw-offset whose view shows HER BACK.")
+    else:
+        print("camera live. Right stick orbits/tilts, Ctrl+C hands control back to the game.")
     try:
         while True:
             now = time.perf_counter()
             dt, last = now - last, now
-            pl = pine.read_block(PLAYERS, 0x94)
+            if cycle:
+                step = int((now - t0) // 4)
+                if step >= 2 * len(cycle):
+                    break
+                a.yaw_offset = cycle[step % len(cycle)]
+                if a.yaw_offset != shown:
+                    shown = a.yaw_offset
+                    print(f"  now showing yaw-offset {shown:3}  (heading field 0x{struct.unpack_from('<h', pine.read_block(our_player(pine)[1] + 0x90, 4), 2)[0] & 0xFFFF:04X})", flush=True)
+            pl = pine.read_block(our_player(pine)[1], 0x94)
             pad = pine.read_block(PAD_NOW, 8)
             p = struct.unpack_from("<3f", pl, 0x38)
             heading = (struct.unpack_from("<h", pl, 0x92)[0] & 0xFFFF) * 2 * math.pi / 65536
@@ -313,6 +330,7 @@ def main(argv=None):
     sub.add_parser("status")
     sub.add_parser("uninstall")
     r = sub.add_parser("run")
+    sub_calibrate = sub.add_parser("calibrate", help="cycle the camera around her to find --yaw-offset")
     r.add_argument("--distance", type=float, default=220)
     r.add_argument("--height", type=float, default=150)
     r.add_argument("--target-height", type=float, default=140)
@@ -328,9 +346,11 @@ def main(argv=None):
     r.add_argument("--yaw-offset", type=float, default=180,
                    help="degrees between the heading field and where she faces (calibrated: 180)")
     r.add_argument("--hz", type=float, default=60)
+    for action in r._actions[1:]:   # calibrate takes the same camera options
+        sub_calibrate._add_action(action)
     a = ap.parse_args(argv)
     return {"freemem": cmd_freemem, "install": cmd_install, "status": cmd_status,
-            "uninstall": cmd_uninstall, "run": cmd_run}[a.cmd](a)
+            "uninstall": cmd_uninstall, "run": cmd_run, "calibrate": cmd_run}[a.cmd](a)
 
 
 if __name__ == "__main__":

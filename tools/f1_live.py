@@ -6,7 +6,7 @@ github.com/GalaxyNostalgia/Outbreak-decomp (File #1 = SLPM-65428 VER 1.04) are w
 says they are, before anything writes to them. Nothing here writes guest memory.
 
 What to do while it runs (each one checks one claim; answers go in the saved log):
-  1. Walk around       -> player 0 pos changes, heading turns, camera pos/target follow
+  1. Walk around       -> our player's pos changes, heading turns, camera pos/target follow
   2. Go through a door  -> camera pos/target jump (a new room camera)
   3. Push each stick    -> raw pad sticks move off 128; Ctrl angles/magnitudes change
   4. Press buttons      -> raw buttons (active low) and Ctrl.cur bits change
@@ -38,12 +38,16 @@ import pine_diag  # noqa: E402
 # include/object.h       players: DrawObjFull[] at 0x476DD0, stride 0x10E0; pos f32[3] +0x38,
 #                        heading s16 +0x92; count at 0x23BE14 (game/talk.c, roomitems.c)
 # game/charmove.c        "the camera cut this frame" u8[] at 0x3AEF54
+# Player slot 0 is NOT necessarily ours: on the device the camera followed an AI partner.
 CAMERA = 0x00306320
 PAD_NOW = 0x00292D40
 CTRL_PAD0 = 0x00306410
 PLAYERS = 0x00476DD0
 PLAYER_STRIDE = 0x10E0
 PLAYER_COUNT = 0x0023BE14
+# include/game.h + game/talk.c:29  D_0048BF60.unk1D (+0x1D) = "our player number", the index of
+#                        OUR character in the players array (slot 0 can be an AI partner)
+OUR_PLAYER = 0x0048BF7D
 CAM_CUT = 0x003AEF54
 EXPECTED = {"id": "SLPM-65428", "game_version": "1.04"}
 
@@ -66,13 +70,23 @@ def ctrl_fields(b):
     return {"cur": cur, "lmag": lmag, "langle": langle & 0xFFFF, "rmag": rmag, "rangle": rangle & 0xFFFF}
 
 
+def our_player(pine):
+    """(index, base address) of the character the local player controls."""
+    count = pine.read32(PLAYER_COUNT)
+    i = pine.read_block(OUR_PLAYER, 4)[0]
+    if not 0 <= i < max(1, min(count, 4)):
+        raise ValueError(f"our player number {i} is out of range (count {count})")
+    return i, PLAYERS + i * PLAYER_STRIDE
+
+
 def sample(pine):
     cam = pine.read_block(CAMERA, 0x70)
     pad = pine.read_block(PAD_NOW, 0x08)
     ctrl = pine.read_block(CTRL_PAD0, 0x30)
     count = pine.read32(PLAYER_COUNT)
-    p0 = pine.read_block(PLAYERS, 0x94)
-    p0ctrl = pine.read_block(PLAYERS + 0xF78, 0x30)
+    idx, base = our_player(pine)
+    p0 = pine.read_block(base, 0x94)
+    p0ctrl = pine.read_block(base + 0xF78, 0x30)
     cut = pine.read_block(CAM_CUT, 4)[0]
     return {
         "t": time.time(),
@@ -82,7 +96,8 @@ def sample(pine):
         "pad_status": pad[0], "pad_buttons_pressed": (~struct.unpack_from("<H", pad, 2)[0]) & 0xFFFF,
         "pad_sticks": list(pad[4:8]),
         "ctrl_pad0": ctrl_fields(ctrl), "ctrl_player0": ctrl_fields(p0ctrl),
-        "player_count": count, "p0_pos": f3(p0, 0x38),
+        # p0_* keys kept for older logs and f1_analyze; they now mean OUR player, not slot 0
+        "player_count": count, "our_index": idx, "p0_pos": f3(p0, 0x38),
         "p0_heading": struct.unpack_from("<h", p0, 0x92)[0] & 0xFFFF, "cam_cut": cut,
     }
 
@@ -94,7 +109,7 @@ def checks(s):
         "fov looks like degrees (1..120)": 1 <= s["cam_fov"] <= 120,
         "near < far": 0 < s["cam_near"] < s["cam_far"],
         "player count 1..4": 1 <= s["player_count"] <= 4,
-        "player 0 position finite": sane(s["p0_pos"]),
+        "our player position finite": sane(s["p0_pos"]),
         "pad status read (not 0xFF)": s["pad_status"] != 0xFF,
     }
 
@@ -105,12 +120,12 @@ def render(s):
         f"camera   pos {fmt3(s['cam_pos'])}  target {fmt3(s['cam_target'])}",
         f"         up  {fmt3(s['cam_up'])}  fov {s['cam_fov']:.2f}  near {s['cam_near']:.1f}  far {s['cam_far']:.1f}"
         f"  roll {s['cam_roll']}  cut {s['cam_cut']}",
-        f"players  count {s['player_count']}  p0 pos {fmt3(s['p0_pos'])}  heading 0x{s['p0_heading']:04X}"
+        f"players  count {s['player_count']}  ours = #{s['our_index']}  pos {fmt3(s['p0_pos'])}  heading 0x{s['p0_heading']:04X}"
         f" ({s['p0_heading'] * 360 / 65536:6.1f} deg)",
         f"raw pad  status 0x{s['pad_status']:02X}  pressed 0x{s['pad_buttons_pressed']:04X}"
         f"  sticks lx {s['pad_sticks'][0]:3} ly {s['pad_sticks'][1]:3} rx {s['pad_sticks'][2]:3} ry {s['pad_sticks'][3]:3}",
         f"ctrl pad0     cur 0x{c['cur']:08X}  L mag {c['lmag']:4} ang 0x{c['langle']:04X}  R mag {c['rmag']:4} ang 0x{c['rangle']:04X}",
-        f"ctrl player0  cur 0x{pc['cur']:08X}  L mag {pc['lmag']:4} ang 0x{pc['langle']:04X}  R mag {pc['rmag']:4} ang 0x{pc['rangle']:04X}",
+        f"ctrl ours     cur 0x{pc['cur']:08X}  L mag {pc['lmag']:4} ang 0x{pc['langle']:04X}  R mag {pc['rmag']:4} ang 0x{pc['rangle']:04X}",
         "checks   " + "  ".join(("OK " if v else "BAD ") + k for k, v in checks(s).items()),
     ]
     return "\n".join(lines)
