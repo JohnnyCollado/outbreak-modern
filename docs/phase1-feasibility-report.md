@@ -162,7 +162,7 @@ docstrings and strings inside v1.2.0.
 | PINE ops used | Read8/16/32/64, Write8/16/32/64 (batched), Version, Title, ID, GameVersion, Status | Confirmed |
 | Update loop | "runs as fast as PINE answers (200+ Hz)", camera thread at ~250 Hz, frame-rate-independent smoothing | Confirmed (docstrings) |
 | Continuous writes? | Yes: writes the camera source buffer (`CAM_SRC`) every iteration | Confirmed |
-| Injects PS2 code? | Patches existing code: NOPs and early `jr ra` returns on engine camera handlers (`ro_patch.CodePatcher`). I saw no new routines injected | Partially verified |
+| Injects PS2 code? | Yes, two kinds. (1) Patches existing code: NOPs and early `jr ra` returns on engine camera handlers (`ro_patch.CodePatcher`). (2) An injected **button code cave** (`VBTN_CAVE`) that the game's pad mapper runs on every read: it ANDs a keep mask (suppress) and ORs a press mask into the raw pad word. That is how the mod strips the native dash and presses its own synthetic one. *Corrected 2026-10-19; the first version of this report said no new routines were injected.* | Confirmed (docstrings) |
 | Persists after exit? | Restores originals on Stop. If it crashes or the connection drops, the patches **stay in EE RAM** until you load a state or reboot. Originals are saved under `%LOCALAPPDATA%` for recovery | Confirmed |
 | Input capture | Host devices: XInput, SDL2 GameController, Raw Input mouse, `GetAsyncKeyState`. It does **not** read the PS2 pad from RAM for camera control | Confirmed |
 | Game-state gating | Takes over "only after a live character is confirmed", hands back on menus and loads (v1.1 changelog) | Confirmed (changelog) |
@@ -321,7 +321,7 @@ reason), or blocked.
 | 4 | Camera logic public? | No | Confirmed (none found) |
 | 5 | Continuous memory manipulation required? | Yes, ~200–250 Hz camera writes plus one-time code patches | Confirmed |
 | 6 | Controller input without Windows app? | Possibly, by reading the game's pad RAM via PINE (A) or hooking `applyPadButton` (B) | Unverified |
-| 7 | Injected routines to port? | Code patches (NOP / `jr ra`), no new routines seen | Partially verified |
+| 7 | Injected routines to port? | Code patches (NOP / `jr ra`) **and** the `VBTN_CAVE` button-mask cave | Confirmed (docstrings) |
 | 8 | Can a native Android app access the IPC endpoint? | Expected yes (loopback TCP plus INTERNET permission) | Partially verified |
 | 9 | Could a game-side patch replace the controller? | Only the camera freeze, realistically; the rig would be a MIPS rewrite | Unverified |
 | 10 | Fork maintenance cost? | High: daily nightlies, large active tree. Avoided by Option A | Confirmed (tag history) |
@@ -337,3 +337,28 @@ reason), or blocked.
 - HeySnippy's position on an Android port.
 - Whether File #2 addresses are fully calibrated: one mod docstring marks a File #2
   field `[TODO] calibrate live`.
+
+---
+
+## 12. Phase 2 field observations (2026-10-19, user's Odin 3 Max, ARMSX2 2.8.4, Android 15)
+
+| Observation | Result | Label |
+|---|---|---|
+| PC → `adb forward` → ARMSX2 PINE | Works after the on-device probe fix (earlier failures came from this repo's own probe holding PINE's single client slot) | Confirmed (user run) |
+| Mod connects and drives the camera | Yes, but described as "wonky". Symptom not classified yet | Partially verified |
+| Running / sprint | **Does not work** | Confirmed (user report) |
+
+**Running: probable cause (Partially verified, from mod docstrings).** The mod strips the
+game's native dash bit through `VBTN_CAVE`. It then presses a synthetic dash only while
+its sprint toggle is on **and** it sees the player moving. It judges "moving" from the
+**host (PC) pad's** left stick and D-pad. In this setup, movement comes from the Odin's
+stick straight into the game, so the mod thinks the player is standing still. The
+synthetic dash never fires, and the native one is suppressed. The mod's own notes
+describe the same failure for D-pad players before v1.1.
+
+Confirming test: move with the PC pad's left stick and check whether sprint works.
+
+**Design consequence for Option A:** the companion app must source *all* player input
+(left stick, D-pad, buttons, right stick) from the game's **raw** pad word in EE RAM,
+read before the cave applies its masks. Reading a host device won't work. On ARMSX2
+that raw word already carries the Odin's built-in controls.
