@@ -27,18 +27,23 @@ def main(path):
         dx, dz = b["p0_pos"][0] - a["p0_pos"][0], b["p0_pos"][2] - a["p0_pos"][2]
         if math.hypot(dx, dz) >= 2 and a["p0_heading"] == b["p0_heading"]:
             rows.append((a["p0_heading"] * 2 * math.pi / 65536, dx, dz))
-    candidates = {
-        "atan2(dx, dz)": lambda dx, dz: math.atan2(dx, dz),
-        "atan2(-dx, dz)": lambda dx, dz: math.atan2(-dx, dz),
-        "atan2(dz, dx)": lambda dx, dz: math.atan2(dz, dx),
-        "atan2(-dz, dx)": lambda dx, dz: math.atan2(-dz, dx),
-    }
-    print(f"\nheading vs travel ({len(rows)} moving samples; ~180 deg outliers = walking backwards):")
+    # All 8 ways an angle can map onto the floor plane: which axis is 0, and which way it turns.
+    candidates = {}
+    for sx in (1, -1):
+        for sz in (1, -1):
+            nx, nz = ("" if sx > 0 else "-") + "dx", ("" if sz > 0 else "-") + "dz"
+            candidates[f"atan2({nx}, {nz})"] = lambda dx, dz, sx=sx, sz=sz: math.atan2(sx * dx, sz * dz)
+            candidates[f"atan2({nz}, {nx})"] = lambda dx, dz, sx=sx, sz=sz: math.atan2(sz * dz, sx * dx)
+    print(f"\nheading vs travel ({len(rows)} moving samples; record walking FORWARD in circles; ~180 deg outliers"
+          " = back-steps). The best row is the facing convention:")
+    results = []
     for name, f in candidates.items():
         if rows:
             err = sorted(abs(wrap(f(dx, dz) - h)) * 180 / math.pi for h, dx, dz in rows)
             fwd = sum(e < 10 for e in err)
-            print(f"  heading = {name:15} median err {err[len(err) // 2]:6.2f} deg, within 10 deg: {fwd}/{len(err)}")
+            results.append((-fwd, err[len(err) // 2], name, len(err)))
+    for nfwd, med, name, n in sorted(results):
+        print(f"  heading = {name:16} median err {med:6.2f} deg, within 10 deg: {-nfwd}/{n}")
 
     # Right stick -> the game's angle/magnitude.
     print("\nright stick (raw rx, ry) -> Ctrl rangle / rmag:")
