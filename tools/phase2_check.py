@@ -78,6 +78,34 @@ def parse_version(s):
     return tuple(int(n) for n in nums[:4]) if nums else None
 
 
+def pick_device(adb_exe, serials):
+    """Choose the device to test when --serial was not given. Returns (serial or None, reason).
+
+    Keeps only devices with an ARMSX2 package. One handset can show up twice (USB plus
+    wireless debugging); those share ro.serialno, and the USB entry is preferred because
+    it is the faster link and the one the forward is meant to ride.
+    """
+    if len(serials) == 1:
+        return serials[0], "only device attached"
+    if not serials:
+        return None, "no authorized devices (unlock the Odin and accept the USB debugging prompt)"
+    by_hw = {}
+    for serial in serials:
+        pkgs = run([adb_exe, "-s", serial, "shell", "pm", "list", "packages"])[1].lower()
+        if "armsx2" not in pkgs:
+            continue
+        hw = run([adb_exe, "-s", serial, "shell", "getprop", "ro.serialno"])[1].strip() or serial
+        is_network = ":" in serial or "._adb" in serial
+        if hw not in by_hw or (by_hw[hw][1] and not is_network):
+            by_hw[hw] = (serial, is_network)
+    if len(by_hw) == 1:
+        serial, is_network = next(iter(by_hw.values()))
+        return serial, "the only device with ARMSX2 installed" + (" (wireless)" if is_network else "")
+    if not by_hw:
+        return None, f"{len(serials)} devices attached and none has ARMSX2 installed"
+    return None, f"{len(by_hw)} different devices have ARMSX2 installed"
+
+
 def decode_pine_string_reply(hexdump):
     """Decode an `od -An -tx1` dump of a PINE string reply. Returns (ok, text)."""
     b = bytes(int(h, 16) for h in hexdump.split())
@@ -107,10 +135,16 @@ def main(argv=None):
         s("FAIL", f"adb not runnable ({err.strip() or rc}). Install platform-tools or pass --adb.")
         return finish(results)
     devices = [l for l in out.splitlines()[1:] if l.strip() and "device" in l.split()[1:2]]
-    if not a.serial and len(devices) != 1:
-        s("FAIL", f"{len(devices)} authorized devices; need exactly one (or --serial)", raw=out)
-        return finish(results)
-    s("PASS", devices[0] if devices else a.serial, raw=out)
+    if not a.serial:
+        a.serial, why = pick_device(a.adb, [l.split()[0] for l in devices])
+        if not a.serial:
+            listing = "\n".join("    " + l for l in devices) or "    (none)"
+            s("FAIL", f"{why}. Attached devices:\n{listing}\n  Re-run with --serial <first column>", raw=out)
+            return finish(results)
+        adb = [a.adb, "-s", a.serial]
+        s("PASS", f"using {a.serial} ({why})", raw=out)
+    else:
+        s("PASS", f"using {a.serial} (--serial)", raw=out)
 
     # 2. device facts
     s = Step(results, "device info")
