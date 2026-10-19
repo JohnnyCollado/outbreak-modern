@@ -267,7 +267,8 @@ def cmd_run(a):
     t0, shown = time.perf_counter(), None
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
     print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
-          f"shoulder {a.shoulder:g}, follow {a.follow:g}s, fov {a.fov or 'game'}")
+          f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
+          f"invert-x {a.invert_x}, fov {a.fov or 'game'}")
     if cycle:
         print("CALIBRATE: the camera visits 4 angles around her, 4 s each, twice. Stand still (stick and\n"
               "D-pad untouched). Note the yaw-offset whose view shows HER BACK.")
@@ -294,7 +295,8 @@ def cmd_run(a):
             k = 1 - math.exp(-dt / a.follow) if a.follow > 0 else 1
             smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
             sx, sy = stick(pad[6]), stick(pad[7])
-            yaw_off += sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
+            # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
+            yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
             pitch = max(math.radians(-30), min(math.radians(60),
                         pitch + sy * math.radians(a.orbit_speed * 0.6) * dt * (-1 if a.invert_y else 1)))
             if sx == 0 and a.recenter > 0:
@@ -338,8 +340,9 @@ def main(argv=None):
     r.add_argument("--fov", type=float, default=0, help="override FOV in degrees (0 = keep the game's)")
     r.add_argument("--follow", type=float, default=0.15, help="seconds to swing behind a turn (0 = rigid)")
     r.add_argument("--orbit-speed", type=float, default=150, help="degrees/s at full right stick")
-    r.add_argument("--recenter", type=float, default=0, help="seconds to drift back behind (0 = never)")
-    r.add_argument("--invert-x", action="store_true")
+    r.add_argument("--recenter", type=float, default=1.0,
+                   help="seconds to ease back behind once the right stick is released (0 = stay put)")
+    r.add_argument("--invert-x", action="store_true", help="stick right turns the view left")
     r.add_argument("--invert-y", action="store_true")
     r.add_argument("--yaw-offset", type=float, default=0,
                    help="degrees between the heading field and where she faces (device-confirmed: 0)")
