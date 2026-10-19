@@ -49,35 +49,64 @@ FREE_LO, FREE_HI = 0x00080000, 0x00100000  # below the ELF (loads at 0x100000); 
 MAGIC = 0x434D424F  # "OBMC"
 
 # Block layout (data first, code at +0x40)
-B_FLAGS, B_POS, B_TARGET, B_FOV, B_COUNT, B_ORIG1, B_ORIG2, B_MAGIC, B_CODE = (
-    0x00, 0x04, 0x10, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x40)
-BLOCK_SIZE = 0x100
+B_FLAGS, B_POS, B_TARGET, B_FOV, B_COUNT, B_ORIG1, B_ORIG2, B_MAGIC, B_PLAYER, B_CODE = (
+    0x00, 0x04, 0x10, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x40)
+BLOCK_SIZE = 0x200
+# flags: bit 0 override pos/target, bit 1 override fov, bit 2 pos/target are OFFSETS from the
+# player at B_PLAYER (the cave adds that frame's player position, so the camera moves with her
+# every frame however late the PC's update is)
+F_POS, F_FOV, F_RELATIVE = 1, 2, 4
+PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
 STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "f1hook-state.json")
 
 
 def build_cave(block, orig1, orig2, hook=HOOK, camera=CAMERA):
-    """The cave's machine code, to be written at block + B_CODE. Returns a list of u32."""
-    code = []
-    pc = lambda: block + B_CODE + 4 * len(code)  # noqa: E731
+    """The cave's machine code, to be written at block + B_CODE. Returns a list of u32.
+
+    Registers: t0-t3 and $f0-$f2 only. All are caller-saved, and the hooked function takes no
+    arguments, so nothing live is clobbered at its entry.
+    """
+    code, fixups, labels = [], [], {}
+    base = block + B_CODE
+
+    def emit(*words):
+        code.extend(words)
+
+    def branch(rs, rt, label):     # beq + delay-slot nop, resolved at the end
+        fixups.append((len(code), rs, rt, label))
+        emit(None, mips.NOP)
+
+    def label(name):
+        labels[name] = base + 4 * len(code)
+
     bh, bl = mips.hi_lo(block)
     ch, cl = mips.hi_lo(camera)
-    code += [mips.lui("t0", bh), mips.addiu("t0", "t0", bl)]                    # t0 = block
-    code += [mips.lw("t1", B_COUNT, "t0"), mips.addiu("t1", "t1", 1), mips.sw("t1", B_COUNT, "t0")]
-    code += [mips.lw("t1", B_FLAGS, "t0"), mips.lui("t2", ch), mips.addiu("t2", "t2", cl)]  # t2 = camera
-    code += [mips.andi("t3", "t1", 1)]
-    skip_pos_at = len(code)
-    code += [None, mips.NOP]                                                   # beq t3, zero, skip_pos
+    emit(mips.lui("t0", bh), mips.addiu("t0", "t0", bl))                       # t0 = block
+    emit(mips.lw("t1", B_COUNT, "t0"), mips.addiu("t1", "t1", 1), mips.sw("t1", B_COUNT, "t0"))
+    emit(mips.lw("t1", B_FLAGS, "t0"), mips.lui("t2", ch), mips.addiu("t2", "t2", cl))  # t2 = camera
+    emit(mips.andi("t3", "t1", F_POS))
+    branch("t3", "zero", "fov")
+    emit(mips.andi("t3", "t1", F_RELATIVE))
+    branch("t3", "zero", "absolute")
+    emit(mips.lw("t3", B_PLAYER, "t0"))
+    branch("t3", "zero", "fov")                                                # no player: leave the game's
+    for i in range(3):                                                         # camera = player + offsets
+        emit(mips.lwc1(0, PLAYER_POS + 4 * i, "t3"),
+             mips.lwc1(1, B_POS + 4 * i, "t0"), mips.add_s(2, 0, 1), mips.swc1(2, 0x18 + 4 * i, "t2"),
+             mips.lwc1(1, B_TARGET + 4 * i, "t0"), mips.add_s(2, 0, 1), mips.swc1(2, 0x24 + 4 * i, "t2"))
+    branch("zero", "zero", "fov")                                              # always
+    label("absolute")
     for i in range(6):                                                         # pos[3] + target[3]
-        code += [mips.lw("t3", B_POS + 4 * i, "t0"), mips.sw("t3", 0x18 + 4 * i, "t2")]
-    skip_pos = pc()
-    code[skip_pos_at] = mips.beq("t3", "zero", block + B_CODE + 4 * skip_pos_at, skip_pos)
-    code += [mips.andi("t3", "t1", 2)]
-    skip_fov_at = len(code)
-    code += [None, mips.NOP]
-    code += [mips.lw("t3", B_FOV, "t0"), mips.sw("t3", 0x60, "t2")]
-    code[skip_fov_at] = mips.beq("t3", "zero", block + B_CODE + 4 * skip_fov_at, pc())
-    code += [orig1, orig2]                                                     # the displaced prologue
-    code += [mips.j(hook + 8, pc()), mips.NOP]
+        emit(mips.lw("t3", B_POS + 4 * i, "t0"), mips.sw("t3", 0x18 + 4 * i, "t2"))
+    label("fov")
+    emit(mips.andi("t3", "t1", F_FOV))
+    branch("t3", "zero", "replay")
+    emit(mips.lw("t3", B_FOV, "t0"), mips.sw("t3", 0x60, "t2"))
+    label("replay")
+    emit(orig1, orig2)                                                         # the displaced prologue
+    emit(mips.j(hook + 8, base + 4 * len(code)), mips.NOP)
+    for at, rs, rt, name in fixups:
+        code[at] = mips.beq(rs, rt, base + 4 * at, labels[name])
     return code
 
 
@@ -164,8 +193,11 @@ def cmd_install(a):
                 raise SystemExit(f"refusing: displaced instruction 0x{w:08X} is control flow")
         if not f1_hookcheck.is_prologue(orig1):
             raise SystemExit(f"refusing: first instruction 0x{orig1:08X} is not a prologue")
-        if any(words_at(pine, block, BLOCK_SIZE // 4)):
+        old = words_at(pine, block, BLOCK_SIZE // 4)
+        if any(old) and old[B_MAGIC // 4] != MAGIC:
             raise SystemExit(f"refusing: 0x{block:08X}..+0x{BLOCK_SIZE:X} is not all zero any more")
+        if any(old):
+            print(f"reusing our own earlier block at 0x{block:08X}")
 
         cave = build_cave(block, orig1, orig2)
         header = [0] * (B_CODE // 4)
@@ -230,6 +262,26 @@ def cmd_uninstall(a):
     return 0
 
 
+def cmd_reinstall(a):
+    """Swap an installed hook for the current version, at the same address."""
+    pine, _ = connect()
+    try:
+        block, _ = find_block(pine)
+    finally:
+        pine.close()
+    if block is None:
+        raise SystemExit("hook not installed: use `install --at <address>`")
+    cmd_uninstall(a)
+    a.at = block
+    return cmd_install(a)
+
+
+def hook_is_current(pine, block):
+    hdr = words_at(pine, block, B_CODE // 4)
+    want = build_cave(block, hdr[B_ORIG1 // 4], hdr[B_ORIG2 // 4])
+    return words_at(pine, block + B_CODE, len(want)) == want
+
+
 # ---------------------------------------------------------------- run
 def stick(v, dead=0.15):
     x = (v - 127.5) / 127.5
@@ -260,9 +312,13 @@ def cmd_run(a):
     block, _ = find_block(pine)
     if block is None:
         raise SystemExit("hook not installed: run `install` first")
+    if not hook_is_current(pine, block):
+        raise SystemExit("the installed hook is an older version: python tools\\f1_camtest.py reinstall")
     yaw_off, pitch, last = 0.0, math.radians(a.pitch), time.perf_counter()
     smooth_heading = None
-    flags = 1 | (2 if a.fov else 0)
+    flags = F_POS | F_RELATIVE | (F_FOV if a.fov else 0)
+    idx, player = our_player(pine)
+    t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
     t0, shown = time.perf_counter(), None
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
@@ -286,8 +342,11 @@ def cmd_run(a):
                 if a.yaw_offset != shown:
                     shown = a.yaw_offset
                     print(f"  now showing yaw-offset {shown:3}  (heading field 0x{struct.unpack_from('<h', pine.read_block(our_player(pine)[1] + 0x90, 4), 2)[0] & 0xFFFF:04X})", flush=True)
-            pl = pine.read_block(our_player(pine)[1], 0x94)
-            pad = pine.read_block(PAD_NOW, 8)
+            if now - t_player > 0.5:                      # who we follow can change (death, swap)
+                idx, player = our_player(pine)
+                t_player = now
+            pl, pad, cnt = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4)])
+            count = struct.unpack("<I", cnt)[0]
             p = struct.unpack_from("<3f", pl, 0x38)
             heading = (struct.unpack_from("<h", pl, 0x92)[0] & 0xFFFF) * 2 * math.pi / 65536
             if smooth_heading is None:
@@ -302,8 +361,20 @@ def cmd_run(a):
             if sx == 0 and a.recenter > 0:
                 yaw_off *= math.exp(-dt / a.recenter)
             eye, look = ots_camera(p, smooth_heading, yaw_off, pitch, a)
-            pine.write_words(block + B_POS, [*map(f2u, eye), *map(f2u, look), f2u(a.fov or 0.0)])
-            pine.write_words(block + B_FLAGS, [flags])
+            # Offsets from the player: the hook adds HER position for the frame it draws, so a late
+            # update only delays rotation, never makes the camera lag behind her movement.
+            rel = [eye[i] - p[i] for i in range(3)] + [look[i] - p[i] for i in range(3)]
+            pine.write_multi([(block + B_POS, [*map(f2u, rel), f2u(a.fov or 0.0)]),
+                              (block + B_PLAYER, [player]),
+                              (block + B_FLAGS, [flags])])          # flags last
+            loops += 1
+            if count0 is None:
+                count0 = count
+            if now - t_stats >= 2 and not cycle:
+                fps = (count - count0) / (now - t_stats)
+                print(f"  {loops / (now - t_stats):5.1f} updates/s, game {fps:5.1f} frames/s, "
+                      f"{fps / max(loops / (now - t_stats), 1e-9):4.2f} frames per update", flush=True)
+                t_stats, loops, count0 = now, 0, count
             time.sleep(max(0.0, 1 / a.hz - (time.perf_counter() - now)))
     except KeyboardInterrupt:
         pass
@@ -329,6 +400,7 @@ def main(argv=None):
     i.add_argument("--at", type=lambda s: int(s, 0), required=True, help="address suggested by `freemem`")
     sub.add_parser("status")
     sub.add_parser("uninstall")
+    sub.add_parser("reinstall", help="replace the installed hook with this version, same address")
     r = sub.add_parser("run")
     sub_calibrate = sub.add_parser("calibrate", help="cycle the camera around her to find --yaw-offset")
     r.add_argument("--distance", type=float, default=220)
@@ -351,7 +423,7 @@ def main(argv=None):
         sub_calibrate._add_action(action)
     a = ap.parse_args(argv)
     return {"freemem": cmd_freemem, "install": cmd_install, "status": cmd_status,
-            "uninstall": cmd_uninstall, "run": cmd_run, "calibrate": cmd_run}[a.cmd](a)
+            "uninstall": cmd_uninstall, "reinstall": cmd_reinstall, "run": cmd_run, "calibrate": cmd_run}[a.cmd](a)
 
 
 if __name__ == "__main__":

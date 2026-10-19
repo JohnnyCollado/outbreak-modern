@@ -40,6 +40,27 @@ def sw(rt, off, base):
     return _i(0x2B, base, rt, off)
 
 
+def lbu(rt, off, base):
+    assert -0x8000 <= off < 0x8000
+    return _i(0x24, base, rt, off)
+
+
+def lwc1(ft, off, base):
+    """Load a float into $f<ft> (ft is the register number)."""
+    assert 0 <= ft < 32 and -0x8000 <= off < 0x8000
+    return (0x31 << 26) | (REG[base] << 21) | (ft << 16) | (off & 0xFFFF)
+
+
+def swc1(ft, off, base):
+    assert 0 <= ft < 32 and -0x8000 <= off < 0x8000
+    return (0x39 << 26) | (REG[base] << 21) | (ft << 16) | (off & 0xFFFF)
+
+
+def add_s(fd, fs, ft):
+    """$f<fd> = $f<fs> + $f<ft> (single precision)."""
+    return (0x11 << 26) | (0x10 << 21) | (ft << 16) | (fs << 11) | (fd << 6)
+
+
 def beq(rs, rt, from_addr, to_addr):
     """Branch from the instruction at from_addr to to_addr (offset counts from the delay slot)."""
     off = (to_addr - (from_addr + 4)) // 4

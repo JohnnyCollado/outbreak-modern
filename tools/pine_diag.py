@@ -95,6 +95,33 @@ class Pine:
         if rest[0] != 0x00:
             raise PineError(f"block write at 0x{addr:08X} failed (code 0x{rest[0]:02X})")
 
+    def _batch(self, body, what):
+        self.sock.sendall(struct.pack("<I", len(body) + 4) + body)
+        (total,) = struct.unpack("<I", self._recv_exact(4))
+        rest = self._recv_exact(total - 4)
+        if rest[0] != 0x00:
+            raise PineError(f"{what} failed (code 0x{rest[0]:02X})")
+        return rest[1:]
+
+    def read_multi(self, regions):
+        """Several (addr, size) regions in ONE round trip. Returns a list of bytes, one per region."""
+        body, sizes = b"", []
+        for addr, size in regions:
+            words = (size + 3) // 4
+            body += b"".join(bytes([MSG_READ32]) + struct.pack("<I", addr + 4 * i) for i in range(words))
+            sizes.append((words * 4, size))
+        data, out, at = self._batch(body, "multi-read"), [], 0
+        for padded, size in sizes:
+            out.append(data[at:at + size])
+            at += padded
+        return out
+
+    def write_multi(self, writes):
+        """Several (addr, [u32, ...]) writes in ONE round trip, applied in the order given."""
+        body = b"".join(bytes([MSG_WRITE32]) + struct.pack("<II", addr + 4 * i, w & 0xFFFFFFFF)
+                        for addr, words in writes for i, w in enumerate(words))
+        self._batch(body, "multi-write")
+
     def write64(self, addr, value):
         """One aligned 8-byte write: on ARM64 a single store, so the EE never sees half of it."""
         if addr % 8:

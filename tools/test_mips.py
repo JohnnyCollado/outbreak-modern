@@ -47,6 +47,10 @@ def test_encodings():
         (mips.beq("t3", "zero", 0x1000, 0x1010), "beqz $11, 16"),
         (mips.j(0x00090040, 0x00345740), "j 589888"),
         (mips.NOP, "nop"),
+        (mips.lwc1(0, 56, "t3"), "lwc1 $f0, 56($11)"),
+        (mips.swc1(2, 24, "t2"), "swc1 $f2, 24($10)"),
+        (mips.add_s(2, 0, 1), "add.s $f2, $f0, $f1"),
+        (mips.lbu("t3", 0, "t0"), "lbu $11, 0($8)"),
     ]
     for word, want in cases:
         got = llvm_disasm(word)
@@ -58,8 +62,10 @@ def run_cave(code, base, mem, prologue):
 
     Instructions outside the cave's own vocabulary (the displaced prologue) are not interpreted,
     only recorded: they are the game's, and what they do is the game's business."""
-    reg = [0] * 32
+    reg, freg = [0] * 32, [0.0] * 32
     pc, steps, trace, delay_target = base, 0, [], None
+    f32 = lambda bits: struct.unpack("<f", struct.pack("<I", bits))[0]  # noqa: E731
+    u32 = lambda x: struct.unpack("<I", struct.pack("<f", x))[0]  # noqa: E731
     code_words = {base + 4 * i: w for i, w in enumerate(code)}
     while steps < 200:
         w = code_words[pc]
@@ -81,6 +87,12 @@ def run_cave(code, base, mem, prologue):
             reg[rt] = mem.get((reg[rs] + simm) & 0xFFFFFFFF, 0)
         elif op == 0x2B:
             mem[(reg[rs] + simm) & 0xFFFFFFFF] = reg[rt]
+        elif op == 0x31:
+            freg[rt] = f32(mem.get((reg[rs] + simm) & 0xFFFFFFFF, 0))
+        elif op == 0x39:
+            mem[(reg[rs] + simm) & 0xFFFFFFFF] = u32(freg[rt])
+        elif op == 0x11 and rs == 0x10 and w & 0x3F == 0:
+            freg[(w >> 6) & 31] = f32(u32(freg[(w >> 11) & 31] + freg[rt]))  # single precision
         elif op == 0x04:
             if reg[rs] == reg[rt]:
                 target = pc + 4 + (simm << 2)
@@ -100,26 +112,44 @@ def run_cave(code, base, mem, prologue):
     raise AssertionError("cave did not exit")
 
 
+def f2u(x):
+    return struct.unpack("<I", struct.pack("<f", x))[0]
+
+
 def test_cave():
     print("cave behaviour:")
     block, orig1, orig2 = 0x00090000, 0x27BDFFF0, 0xFFBF0000  # addiu sp,-16 ; sd ra,0(sp) (shape only)
+    player = 0x00476DD0
     code = C.build_cave(block, orig1, orig2)
-    ours = [0x11111111 * (i + 1) for i in range(6)]
-    for flags in (0, 1, 2, 3):
-        mem = {block + C.B_FLAGS: flags, block + C.B_COUNT: 41, block + C.B_FOV: 0xAAAAAAAA}
-        for i, v in enumerate(ours):
-            mem[block + C.B_POS + 4 * i] = v
-        exit_to, trace = run_cave(code, block + C.B_CODE, mem, (orig1, orig2))
-        cam = [mem.get(C.CAMERA + 0x18 + 4 * i) for i in range(6)]
-        expect(mem[block + C.B_COUNT] == 42, f"flags {flags}: counter incremented")
-        expect((cam == ours) == bool(flags & 1), f"flags {flags}: pos/target copied only when bit 0 set")
-        expect((mem.get(C.CAMERA + 0x60) == 0xAAAAAAAA) == bool(flags & 2), f"flags {flags}: fov copied only when bit 1 set")
-        expect([w for w in trace if w in (orig1, orig2)] == [orig1, orig2] and trace[-4:-2] == [orig1, orig2],
-               f"flags {flags}: original prologue replayed once, in order, right before the jump back")
-        expect(exit_to == C.HOOK + 8, f"flags {flags}: returns to hook+8 (0x{exit_to:08X})")
-        touched = {a for a in mem if not (block <= a < block + C.BLOCK_SIZE)}
-        allowed = {C.CAMERA + 0x18 + 4 * i for i in range(6)} | {C.CAMERA + 0x60}
-        expect(touched <= allowed, f"flags {flags}: writes only the block and camera pos/target/fov")
+    ours = [f2u(v) for v in (10.0, 20.0, 30.0, 1.5, 2.5, 3.5)]
+    for flags in range(8):
+        for has_player in (True, False):
+            mem = {block + C.B_FLAGS: flags, block + C.B_COUNT: 41, block + C.B_FOV: 0xAAAAAAAA,
+                   block + C.B_PLAYER: player if has_player else 0}
+            for i, v in enumerate((100.0, 200.0, 300.0)):
+                mem[player + C.PLAYER_POS + 4 * i] = f2u(v)
+            for i, v in enumerate(ours):
+                mem[block + C.B_POS + 4 * i] = v
+            exit_to, trace = run_cave(code, block + C.B_CODE, mem, (orig1, orig2))
+            cam = [mem.get(C.CAMERA + 0x18 + 4 * i) for i in range(6)]
+            tag = f"flags {flags} player {'set' if has_player else 'none'}"
+            if not flags & C.F_POS:
+                want = [None] * 6
+            elif flags & C.F_RELATIVE:
+                want = ([f2u(v) for v in (110.0, 220.0, 330.0, 101.5, 202.5, 303.5)] if has_player
+                        else [None] * 6)
+            else:
+                want = ours
+            expect(mem[block + C.B_COUNT] == 42, f"{tag}: counter incremented")
+            expect(cam == want, f"{tag}: camera pos/target = {'player + offsets' if flags & 5 == 5 else 'copy' if flags & 1 else 'untouched'}")
+            expect((mem.get(C.CAMERA + 0x60) == 0xAAAAAAAA) == bool(flags & C.F_FOV), f"{tag}: fov only with bit 1")
+            expect([w for w in trace if w in (orig1, orig2)] == [orig1, orig2] and trace[-4:-2] == [orig1, orig2],
+                   f"{tag}: original prologue replayed once, in order, right before the jump back")
+            expect(exit_to == C.HOOK + 8, f"{tag}: returns to hook+8")
+            touched = {a for a in mem if not (block <= a < block + C.BLOCK_SIZE)} - {
+                player + C.PLAYER_POS + 4 * i for i in range(3)}
+            allowed = {C.CAMERA + 0x18 + 4 * i for i in range(6)} | {C.CAMERA + 0x60}
+            expect(touched <= allowed, f"{tag}: writes only the block and camera pos/target/fov")
     tw = C.trampoline(block)
     expect(tw >> 32 == 0 and (tw & 0xFFFFFFFF) == mips.j(block + C.B_CODE, C.HOOK), "trampoline = j cave ; nop")
     expect(len(code) * 4 + C.B_CODE <= C.BLOCK_SIZE, f"cave fits its block ({len(code) * 4 + C.B_CODE} bytes)")
