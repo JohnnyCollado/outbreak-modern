@@ -237,8 +237,14 @@ def stick(v, dead=0.15):
 
 
 def ots_camera(p, heading, yaw_off, pitch, a):
-    """Eye and look-at behind/over the shoulder. heading convention: atan2(dx, dz) (verified)."""
-    yaw = heading + yaw_off
+    """Eye and look-at behind/over the shoulder.
+
+    `heading` (player +0x92) points out of her BACK: on the device, a camera placed along
+    -(sin h, cos h) ended up in front of her (user report, 2026-10-19). The f1_live travel fit
+    that suggested otherwise was dominated by back-steps (D-pad down, button 0x40). So she
+    faces heading + 180 degrees, which is --yaw-offset's default.
+    """
+    yaw = heading + yaw_off + math.radians(a.yaw_offset)
     fx, fz = math.sin(yaw), math.cos(yaw)           # where the camera looks, on the floor plane
     rx, rz = fz, -fx                                # perpendicular; sign of "right" set by --shoulder
     cp, sp = math.cos(pitch), math.sin(pitch)
@@ -319,6 +325,8 @@ def main(argv=None):
     r.add_argument("--recenter", type=float, default=0, help="seconds to drift back behind (0 = never)")
     r.add_argument("--invert-x", action="store_true")
     r.add_argument("--invert-y", action="store_true")
+    r.add_argument("--yaw-offset", type=float, default=180,
+                   help="degrees between the heading field and where she faces (calibrated: 180)")
     r.add_argument("--hz", type=float, default=60)
     a = ap.parse_args(argv)
     return {"freemem": cmd_freemem, "install": cmd_install, "status": cmd_status,

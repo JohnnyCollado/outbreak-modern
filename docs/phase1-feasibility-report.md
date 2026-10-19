@@ -436,9 +436,11 @@ Why this beats both earlier options:
   English patch leaves that main-ELF data where it was. The patch does change the ELF code,
   `DEMO.BIN`, `GAME.BIN` and `NETWK.BIN`, but **not `SUBMAIN.BIN`**, which holds the camera hook
   (`config/versions.json`). `tools/f1_hookcheck.py` checks the hook site in the running build.
-- **Heading convention (Confirmed):** `heading_rad = atan2(dx, dz)`, i.e. 0 = +Z and
-  0x4000 = +X, 0x10000 per turn. Median error 0.00° over the forward-moving samples; the ~180°
-  outliers are steps backwards.
+- **Heading convention (corrected 2026-10-19):** the heading field (0x10000 per turn, 0 = +Z,
+  0x4000 = +X) points out of the character's **back**. She *faces* `heading + 180°`. The first
+  analysis matched travel to `atan2(dx, dz)` and called it forward motion, but those samples were
+  taken with button `0x40` held (D-pad down, a back-step). The first `f1_camtest run` then put the
+  camera in front of her. The visual result is the evidence here: **Confirmed (visual, device)**.
 - **Right-stick angle (Partially verified, few samples):** `Ctrl.rangle` is 0 = up, 0x8000 = down,
   counter-clockwise positive. The game computes it from the raw stick, so it can drive the
   camera directly.
