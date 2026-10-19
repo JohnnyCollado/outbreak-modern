@@ -384,16 +384,16 @@ shared with File #1.
 
 | Field | Address / offset | Type | Decomp source | Live-verified |
 |---|---|---|---|---|
-| Camera | `0x00306320` | `Camera` struct | `include/camera.h` | No, run `tools/f1_live.py` |
-| … position / target / up | `+0x18` / `+0x24` / `+0x3C` | `f32[3]` | same | No |
-| … far / near / FOV | `+0x58` / `+0x5C` / `+0x60` | `f32` (FOV in degrees) | same | No |
+| Camera | `0x00306320` | `Camera` struct | `include/camera.h` | Yes (live run 2026-10-19, 598 samples) |
+| … position / target / up | `+0x18` / `+0x24` / `+0x3C` | `f32[3]` | same | Yes (live run 2026-10-19, 598 samples): 272 distinct positions, up = (0,1,0), target at the player's head |
+| … far / near / FOV | `+0x58` / `+0x5C` / `+0x60` | `f32` (FOV in degrees) | same | Yes (live run 2026-10-19, 598 samples): 50000 / 1.0 / 55 |
 | … roll | `+0x6C` | `s32` | same | No |
 | View matrix | `0x003062E0` | `Mat44` | same | No |
 | **Camera → renderer, once per frame** | `func_00345740` (SUBMAIN overlay); builds the view in `func_00345870` | code | `src/.../submain/ingame.c:79-113` | No |
-| Raw pad, this frame | `0x00292D40` | `PadData`: buttons `u16 +2` (active low), sticks `u8[4] +4` | `include/pad.h` | No |
+| Raw pad, this frame | `0x00292D40` | `PadData`: buttons `u16 +2` (active low), sticks `u8[4] +4` | `include/pad.h` | Sticks yes (127 at rest, 65 distinct). Button encoding not yet understood |
 | Controls per pad | `0x00306410` | `Ctrl` (0x30): stick angle/magnitude, button history | `include/ctrl.h` | No |
-| Players | `0x00476DD0`, stride `0x10E0`, count at `0x0023BE14` | `DrawObjFull[]` | `include/object.h`, `game/talk.c` | No |
-| … position / heading / own controls | `+0x38` / `+0x92` / `+0xF78` | `f32[3]` / `s16` (0x10000 per turn) / `Ctrl` | `include/object.h` | No |
+| Players | `0x00476DD0`, stride `0x10E0`, count at `0x0023BE14` | `DrawObjFull[]` | `include/object.h`, `game/talk.c` | Yes (live run 2026-10-19, 598 samples): count 3 offline |
+| … position / heading / own controls | `+0x38` / `+0x92` / `+0xF78` | `f32[3]` / `s16` (0x10000 per turn) / `Ctrl` | `include/object.h` | Position and heading yes (254 / 203 distinct). Controls pending analysis |
 | Camera cut this frame | `0x003AEF54` | `u8[]` | `game/charmove.c:2455` | No |
 | Room cameras | `RoomCam` (0x198 bytes), 32 per room, type 8 chains into paths | struct | `game/roomcams.c` | No |
 
