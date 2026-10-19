@@ -114,6 +114,26 @@ def pick_device(adb_exe, serials):
     return None, f"{len(by_hw)} different devices have ARMSX2 installed"
 
 
+def ensure_forward(adb_exe, port, serial=None):
+    """Make 127.0.0.1:<port> on this PC reach PINE on the device. Returns (ok, message).
+
+    adb forwards die whenever the adb server restarts or the device reconnects, so tools
+    that only need the link call this instead of asking the user to re-run phase2_check.
+    """
+    rc, out, err = run([adb_exe, "devices"])
+    if rc != 0:
+        return False, f"adb not runnable ({err.strip() or rc}); install platform-tools or pass --adb"
+    if not serial:
+        serials = [l.split()[0] for l in out.splitlines()[1:] if l.strip() and "device" in l.split()[1:2]]
+        serial, why = pick_device(adb_exe, serials)
+        if not serial:
+            return False, why + "; pass --serial"
+    rc, _, err = run([adb_exe, "-s", serial, "forward", f"tcp:{port}", f"tcp:{port}"])
+    if rc != 0:
+        return False, f"adb forward failed: {err.strip()}"
+    return True, f"forwarded tcp:{port} to {serial}"
+
+
 TCP_STATES = {"01": "ESTABLISHED", "06": "TIME_WAIT", "08": "CLOSE_WAIT", "0A": "LISTEN"}
 
 

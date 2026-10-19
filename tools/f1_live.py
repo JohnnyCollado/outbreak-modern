@@ -25,6 +25,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import phase2_check  # noqa: E402
 import pine_diag  # noqa: E402
 
 # --- Addresses: all from the decomp, File #1 JP VER 1.04 (SLPM-65428). NOT yet verified live. ---
@@ -118,15 +119,25 @@ def render(s):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=28011)
+    ap.add_argument("--adb", default=phase2_check.shutil.which("adb") or "adb")
+    ap.add_argument("--serial", help="adb device serial when several are attached")
     ap.add_argument("--hz", type=float, default=10.0)
     ap.add_argument("--seconds", type=float, help="stop after this long (default: until Ctrl+C)")
     a = ap.parse_args(argv)
 
+    ok, msg = phase2_check.ensure_forward(a.adb, a.port, a.serial)
+    print(("adb: " if ok else "adb problem: ") + msg)
     try:
         pine = pine_diag.Pine("127.0.0.1", a.port, 5.0)
         info = pine_diag.identify(pine)
+    except TimeoutError:
+        print("PINE accepted the connection but never answered. Keep ARMSX2 on screen with the game "
+              "running (Android freezes it otherwise), close the camera mod and any other PINE tool, "
+              "toggle Enable PINE off/on, then retry. tools/phase2_check.py prints a full diagnosis.")
+        return 1
     except (OSError, pine_diag.PineError) as e:
-        print(f"PINE not reachable: {e}. Run tools/phase2_check.py first.")
+        print(f"PINE not reachable: {e}. Is Enable PINE on in ARMSX2 (Settings > Advanced)? "
+              "tools/phase2_check.py prints a full diagnosis.")
         return 1
     print(f"{info['version']} | {info['id']} | CRC {info['crc']} | disc version {info['game_version']}")
     mismatch = [k for k, v in EXPECTED.items() if (info.get(k) or "").strip() != v]
