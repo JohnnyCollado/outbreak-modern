@@ -14,3 +14,5 @@ Quick start (PC with the Odin attached over USB, PINE enabled, game booted, save
 Results land in `results/`.
 - `tools/f1_live.py`: live read-only view of File #1's camera, players and pad, using the CC0
   decomp's addresses (to verify them on your disc)
+- `tools/f1_analyze.py <log>`: angle conventions, input encoding and camera behaviour from an `f1_live` log
+- `tools/f1_hookcheck.py`: read-only check that the camera hook functions sit at the decomp's addresses in the running build

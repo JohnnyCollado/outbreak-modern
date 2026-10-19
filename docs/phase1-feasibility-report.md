@@ -428,3 +428,23 @@ Why this beats both earlier options:
 | The hook lives in the SUBMAIN overlay, so it must be re-applied or checked whenever that overlay loads (conditional PNACH) | Partially verified |
 | Free EE RAM for the code cave isn't identified yet | Unverified |
 | File #2 has no decompiled C or symbols yet | Confirmed |
+
+### 13.4 First live run (results/f1live-20261019-191951.json, 598 samples / 60 s)
+
+- **Build:** `SLPM-65428`, disc version 1.04, CRC **`32088394`**, which the bundled PNACH labels as
+  *English patched*. The camera, pad and player data addresses still matched (§13.1), so the
+  English patch leaves that main-ELF data where it was. The patch does change the ELF code,
+  `DEMO.BIN`, `GAME.BIN` and `NETWK.BIN`, but **not `SUBMAIN.BIN`**, which holds the camera hook
+  (`config/versions.json`). `tools/f1_hookcheck.py` checks the hook site in the running build.
+- **Heading convention (Confirmed):** `heading_rad = atan2(dx, dz)`, i.e. 0 = +Z and
+  0x4000 = +X, 0x10000 per turn. Median error 0.00° over the forward-moving samples; the ~180°
+  outliers are steps backwards.
+- **Right-stick angle (Partially verified, few samples):** `Ctrl.rangle` is 0 = up, 0x8000 = down,
+  counter-clockwise positive. The game computes it from the raw stick, so it can drive the
+  camera directly.
+- **Raw button field (Confirmed):** reads 0 at rest, so as *stored* it is active-high. The header's
+  "active low as read" describes the hardware read before the game flips it. Bit-to-button mapping not done yet.
+- **Camera:** 465 units from the player (median, fixed room cameras), target ~100 above the
+  player's origin. 10 cuts in 60 s. The "camera cut" flag at `0x3AEF54` read 0 throughout:
+  **Unverified** (wrong address, or a one-frame pulse that 10 Hz sampling misses).
+- **PINE through ADB:** one full sample (7 batched reads) took about 5 ms.
