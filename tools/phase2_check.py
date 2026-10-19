@@ -42,6 +42,14 @@ KNOWN = {
     "SLPM-65692": {"name": "File #2 (JP)", "crc": {"6fca6fbd": "retail (per PNACH label)",
                                                    "70c1fe97": "English fan patch",
                                                    "dc0bfb60": "English fan patch"}},
+    # US releases: a secondary goal of this project, but NOT supported by HeySnippy's mod, whose
+    # address maps are JP-only and which refuses any other serial. PINE/latency results from these
+    # are still valid. CRCs are from ARMSX2's GameIndex.yaml patches and bundled PNACH filenames;
+    # which one is the retail print is not established.
+    "SLUS-20765": {"name": "File #1 (US)", "mod_supported": False,
+                   "crc": {"0245ef6d": "listed in GameIndex.yaml", "02445b50": "bundled PNACH"}},
+    "SLUS-20984": {"name": "File #2 (US)", "mod_supported": False,
+                   "crc": {"1e65a50e": "listed in GameIndex.yaml", "1e65a59b": "bundled PNACH"}},
 }
 
 MANUAL_CHECKS = [
@@ -218,9 +226,14 @@ def main(argv=None):
 
         s = Step(results, "game identity")
         gid, crc = info.get("id"), (info.get("crc") or "").lower()
+        mod_supported = False
         if gid in KNOWN:
             label = KNOWN[gid]["crc"].get(crc, "UNKNOWN CRC - record it")
+            mod_supported = KNOWN[gid].get("mod_supported", True)
             outcome = "PASS" if "retail" in label else "WARN"
+            if not mod_supported:
+                outcome = "WARN"
+                label += "; HeySnippy's mod does not support this serial (JP only), manual mod checks skipped"
             s(outcome, f"{gid} {KNOWN[gid]['name']}, CRC {crc} -> {label}; title={info.get('title')!r}, "
                        f"version={info.get('game_version')!r}")
         else:
@@ -239,7 +252,7 @@ def main(argv=None):
         pine.close()  # release the single PINE client slot for the mod
 
     # 9. manual mod checks
-    if not a.no_interactive:
+    if not a.no_interactive and mod_supported:
         print("\n--- Manual checks with Outbreak-ModernCam.exe (this script has released PINE) ---")
         print("Leave this window open. Answer y / n / s(kip); a note after the letter is saved, e.g. 'n light stays red'.")
         for key, q in MANUAL_CHECKS:
