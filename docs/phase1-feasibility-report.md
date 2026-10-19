@@ -436,11 +436,11 @@ Why this beats both earlier options:
   English patch leaves that main-ELF data where it was. The patch does change the ELF code,
   `DEMO.BIN`, `GAME.BIN` and `NETWK.BIN`, but **not `SUBMAIN.BIN`**, which holds the camera hook
   (`config/versions.json`). `tools/f1_hookcheck.py` checks the hook site in the running build.
-- **Heading convention (corrected 2026-10-19):** the heading field (0x10000 per turn, 0 = +Z,
-  0x4000 = +X) points out of the character's **back**. She *faces* `heading + 180°`. The first
-  analysis matched travel to `atan2(dx, dz)` and called it forward motion, but those samples were
-  taken with button `0x40` held (D-pad down, a back-step). The first `f1_camtest run` then put the
-  camera in front of her. The visual result is the evidence here: **Confirmed (visual, device)**.
+- **Heading convention (Confirmed, device + data):** characters face along the heading field,
+  `heading_rad = atan2(dx, dz)` (0 = +Z, 0x4000 = +X, 0x10000 per turn). On the device,
+  `f1_camtest run --yaw-offset 0` shows the character's back and `180` shows the face. *History:
+  an interim "faces heading + 180°" correction was wrong. It came from an early test that was
+  probably a stale `run` process, before the tool printed its settings.*
 - **Right-stick angle (Partially verified, few samples):** `Ctrl.rangle` is 0 = up, 0x8000 = down,
   counter-clockwise positive. The game computes it from the raw stick, so it can drive the
   camera directly.
@@ -477,9 +477,10 @@ Why this beats both earlier options:
 | Hook installs and is called every frame | `install` at `0x00084000`, about 60 calls/s | Confirmed (device) |
 | Our camera reaches the screen | Yes | Confirmed (device, user) |
 | Whose camera | `0x48BF7D` ("our player number") = 0 offline, so slot 0 was the user's character all along | Confirmed (device) |
-| Facing vs heading field | `--yaw-offset 180` shows the character's back (screenshot). `0` puts the camera in front and steering feels mirrored. So he **faces heading + 180°** | Confirmed (device, visual) |
+| Facing vs heading field | `--yaw-offset 0` shows the character's back, `180` the face. He **faces along the heading field** (now the default) | Confirmed (device, user) |
 | Framing | Default rig sits low and close (hip height, looking up). Being tuned with `--distance/--height/--target-height/--shoulder/--pitch` | In progress |
 | Free EE RAM | `0x00084000`–`0x00100000` stayed zero for 720 passes (60 s of play) | Confirmed (measured) |
 
-The f1_live travel fit (`atan2(dx, dz)`) matches the heading field to the direction of
-*travel* for the logged samples. Combined with the visual result, those samples were back-steps.
+This agrees with the f1_live travel fit (`atan2(dx, dz)`), so the "back-step" reinterpretation
+in an interim commit was wrong. At offset 0 the right stick felt reversed ("southpaw"):
+`--invert-x` is being checked.

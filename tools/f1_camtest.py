@@ -239,10 +239,8 @@ def stick(v, dead=0.15):
 def ots_camera(p, heading, yaw_off, pitch, a):
     """Eye and look-at behind/over the shoulder.
 
-    `heading` (player +0x92) points out of her BACK: on the device, a camera placed along
-    -(sin h, cos h) ended up in front of her (user report, 2026-10-19). The f1_live travel fit
-    that suggested otherwise was dominated by back-steps (D-pad down, button 0x40). So she
-    faces heading + 180 degrees, which is --yaw-offset's default.
+    She faces along the heading field (player +0x92), atan2(dx, dz): on the device,
+    --yaw-offset 0 shows her back and 180 her face (user, 2026-10-19).
     """
     yaw = heading + yaw_off + math.radians(a.yaw_offset)
     fx, fz = math.sin(yaw), math.cos(yaw)           # where the camera looks, on the floor plane
@@ -343,8 +341,8 @@ def main(argv=None):
     r.add_argument("--recenter", type=float, default=0, help="seconds to drift back behind (0 = never)")
     r.add_argument("--invert-x", action="store_true")
     r.add_argument("--invert-y", action="store_true")
-    r.add_argument("--yaw-offset", type=float, default=180,
-                   help="degrees between the heading field and where she faces (calibrated: 180)")
+    r.add_argument("--yaw-offset", type=float, default=0,
+                   help="degrees between the heading field and where she faces (device-confirmed: 0)")
     r.add_argument("--hz", type=float, default=60)
     for action in r._actions[1:]:   # calibrate takes the same camera options
         sub_calibrate._add_action(action)
