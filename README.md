@@ -16,3 +16,7 @@ Results land in `results/`.
   decomp's addresses (to verify them on your disc)
 - `tools/f1_analyze.py <log>`: angle conventions, input encoding and camera behaviour from an `f1_live` log
 - `tools/f1_hookcheck.py`: read-only check that the camera hook functions sit at the decomp's addresses in the running build
+- `tools/f1_camtest.py`: first write test. Installs a render-time camera override hook in File #1
+  and drives an over-the-shoulder camera from the PC (`freemem` → `install` → `run` → `uninstall`).
+  **Make a save state first**; loading it undoes everything.
+- `tools/test_mips.py`: checks the hook's machine code against LLVM and simulates it

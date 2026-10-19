@@ -26,6 +26,8 @@ import sys
 import time
 
 MSG_READ32 = 0x02
+MSG_WRITE32 = 0x06
+MSG_WRITE64 = 0x07
 MSG_VERSION = 0x08
 MSG_TITLE = 0x0B
 MSG_ID = 0x0C
@@ -82,6 +84,22 @@ class Pine:
     def read32(self, addr):
         (v,) = struct.unpack("<I", self.call(MSG_READ32, struct.pack("<I", addr))[:4])
         return v
+
+    def write_words(self, addr, words):
+        """Write u32s to consecutive addresses as Write32s batched into ONE packet."""
+        body = b"".join(bytes([MSG_WRITE32]) + struct.pack("<II", addr + 4 * i, w & 0xFFFFFFFF)
+                        for i, w in enumerate(words))
+        self.sock.sendall(struct.pack("<I", len(body) + 4) + body)
+        (total,) = struct.unpack("<I", self._recv_exact(4))
+        rest = self._recv_exact(total - 4)
+        if rest[0] != 0x00:
+            raise PineError(f"block write at 0x{addr:08X} failed (code 0x{rest[0]:02X})")
+
+    def write64(self, addr, value):
+        """One aligned 8-byte write: on ARM64 a single store, so the EE never sees half of it."""
+        if addr % 8:
+            raise ValueError("write64 needs an 8-byte aligned address")
+        self.call(MSG_WRITE64, struct.pack("<IQ", addr, value))
 
     def read_block(self, addr, size):
         """Read `size` bytes (rounded up to 4) as Read32s batched into ONE packet.

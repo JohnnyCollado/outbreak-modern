@@ -448,3 +448,22 @@ Why this beats both earlier options:
   player's origin. 10 cuts in 60 s. The "camera cut" flag at `0x3AEF54` read 0 throughout:
   **Unverified** (wrong address, or a one-frame pulse that 10 Hz sampling misses).
 - **PINE through ADB:** one full sample (7 batched reads) took about 5 ms.
+
+### 13.5 First write test: render-time override hook (`tools/f1_camtest.py`)
+
+- **Hook site:** `func_00345740` (SUBMAIN), verified in the user's build by `f1_hookcheck.py`:
+  prologue `0x27BDFFF0`, calls in the order the decomp gives.
+- **Mechanism:** the first two instructions are relocated into a cave, and the site becomes
+  `j cave ; nop`, written as one aligned 8-byte store. The cave does three things:
+  - increments a call counter;
+  - when its flags say so, copies our pos/target (and optionally FOV) into the camera at `0x306320`;
+  - replays the two original instructions and jumps to `func_00345740 + 8`.
+- **Registers:** the cave uses only `t0`–`t3`. The function takes no arguments, and the MIPS
+  calling convention doesn't preserve `t` registers across a call.
+- **Where the cave lives:** `freemem` samples `0x80000`–`0x100000` during play and picks a
+  region that stayed zero. That this region is unused is **measured, not assumed**.
+- **Verification before the device:**
+  - every encoding is cross-checked against LLVM `llvm-mc`;
+  - the cave runs on an interpreter for all four flag combinations (`tools/test_mips.py`);
+  - the full freemem/install/status/run/uninstall flow runs against a mock PINE with 32 MB RAM.
+- **Not yet tested on the device.**
