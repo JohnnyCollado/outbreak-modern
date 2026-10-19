@@ -114,6 +114,72 @@ def pick_device(adb_exe, serials):
     return None, f"{len(by_hw)} different devices have ARMSX2 installed"
 
 
+TCP_STATES = {"01": "ESTABLISHED", "06": "TIME_WAIT", "08": "CLOSE_WAIT", "0A": "LISTEN"}
+
+
+def parse_proc_net_tcp(text, port):
+    """Rows of /proc/net/tcp{,6} touching `port`: local, remote, state, rx_queue, uid."""
+    rows = []
+    for line in text.splitlines()[1:]:
+        f = line.split()
+        if len(f) < 8 or ":" not in f[1]:
+            continue
+        lport, rport = int(f[1].rsplit(":", 1)[1], 16), int(f[2].rsplit(":", 1)[1], 16)
+        if port not in (lport, rport):
+            continue
+        rx = int(f[4].split(":")[1], 16)
+        rows.append({"local_port": lport, "remote_port": rport, "state": TCP_STATES.get(f[3], f[3]),
+                     "rx_queue": rx, "uid": int(f[7]), "server_side": lport == port})
+    return rows
+
+
+def diagnose_pine(adb, pkgs, port):
+    """Device-side evidence for "PINE accepted but never answered". Returns (summary lines, raw dict)."""
+    raw, notes = {}, []
+    raw["wakefulness"] = run(adb + ["shell", "dumpsys power | grep -m1 mWakefulness="])[1].strip()
+    raw["focus"] = run(adb + ["shell", "dumpsys window | grep -m2 -E 'mCurrentFocus|mFocusedApp'"])[1].strip()
+    notes.append(f"screen: {raw['wakefulness'] or 'unknown'}")
+    in_front = any(p in raw["focus"] for p in pkgs)
+    notes.append("ARMSX2 is the focused app" if in_front else f"ARMSX2 is NOT in front ({raw['focus'] or 'unknown'})")
+
+    uids = {}
+    for line in run(adb + ["shell", "pm list packages -U"])[1].splitlines():
+        m = re.match(r"package:(\S+) uid:(\d+)", line.strip())
+        if m:
+            uids[int(m[2])] = m[1]
+    uids.setdefault(2000, "shell/adbd")
+
+    for pkg in pkgs:
+        pid = run(adb + ["shell", f"pidof {pkg}"])[1].strip()
+        raw[f"pid:{pkg}"] = pid
+        if not pid:
+            notes.append(f"{pkg} is NOT running")
+            continue
+        procs = run(adb + ["shell", "dumpsys activity processes"], timeout=30)[1]
+        frozen = [l.strip() for l in procs.splitlines() if pkg in l and "froz" in l.lower()]
+        frozen += [l.strip() for l in procs.splitlines() if pid.split()[0] in l and "froz" in l.lower()]
+        raw[f"frozen:{pkg}"] = frozen
+        notes.append(f"{pkg} pid {pid}: " + ("FROZEN by Android (" + frozen[0] + ")" if frozen
+                                               else "no 'frozen' marker in dumpsys activity processes"))
+
+    tcp = run(adb + ["shell", "cat /proc/net/tcp /proc/net/tcp6"])[1]
+    rows = parse_proc_net_tcp(tcp, port)
+    raw["tcp"] = rows
+    if not rows:
+        notes.append(f"nothing on port {port} in /proc/net/tcp (PINE not listening, or /proc/net hidden)")
+    for r in rows:
+        who = uids.get(r["uid"], f"uid {r['uid']}")
+        if r["state"] == "LISTEN":
+            notes.append(f"LISTEN by {who}; accept backlog waiting = {r['rx_queue']}"
+                         + ("  <- connections queued that PINE has not accept()ed" if r["rx_queue"] else ""))
+        elif r["server_side"]:
+            notes.append(f"PINE-side socket {r['state']} (owner {who}) to client port {r['remote_port']}, "
+                         f"unread bytes = {r['rx_queue']}" + ("  <- PINE is not reading" if r["rx_queue"] else ""))
+        else:
+            notes.append(f"client socket {r['state']} owned by {who} (local port {r['local_port']})")
+    return notes, raw
+
+
 def decode_pine_string_reply(hexdump):
     """Decode an `od -An -tx1` dump of a PINE string reply. Returns (ok, text)."""
     b = bytes(int(h, 16) for h in hexdump.split())
@@ -219,6 +285,8 @@ def main(argv=None):
     lines = [l for l in out.splitlines() if "PINE:" in l][-15:]
     s("INFO" if lines else "WARN", f"{len(lines)} recent line(s)" if lines else
       "no 'PINE:' lines in logcat buffer (may have rotated out; not fatal)", raw="\n".join(lines))
+    for l in lines:
+        print("         " + l)
 
     # 7. identify over the forward
     s = Step(results, "PINE identify")
@@ -255,9 +323,13 @@ def main(argv=None):
         s("INFO", f"p50 {r['p50_ms']:.3f} ms, p95 {r['p95_ms']:.3f} ms, p99 {r['p99_ms']:.3f} ms, "
                   f"max {r['max_ms']:.3f} ms, ~{r['round_trips_per_s']:.0f} round trips/s")
     except TimeoutError:
-        s("FAIL", "PINE accepted the connection but never answered. Something else holds the single "
-                  "PINE client slot (the camera mod, another tool, a stuck nc). Close it, or toggle "
-                  "Enable PINE off and on in ARMSX2, then re-run.")
+        # Gather evidence while our connection is still open, so it shows up in /proc/net/tcp.
+        notes, raw = diagnose_pine(adb, pkgs, a.port)
+        s("FAIL", "PINE accepted the connection but never answered. Device evidence:\n"
+                  + "\n".join("         - " + n for n in notes)
+                  + "\n         Usual causes: ARMSX2 not in front / screen off (Android froze it), or another "
+                    "client holds PINE's single slot (camera mod, another tool). Keep ARMSX2 on screen with "
+                    "the game running, toggle Enable PINE off/on, re-run.", diagnosis=raw)
         return finish(results)
     except (pine_diag.PineError, OSError) as e:
         s("FAIL", f"PINE error: {e}")
@@ -285,7 +357,8 @@ def finish(results):
     with open(base + ".md", "w", encoding="utf-8") as f:
         f.write(f"# Phase 2 run {results['timestamp']}\n\n| Step | Outcome | Detail |\n|---|---|---|\n")
         for st in results["steps"]:
-            f.write(f"| {st['step']} | {st['outcome']} | {st['detail'].replace('|', '/')} |\n")
+            detail = re.sub(r"\n\s*", "<br>", st["detail"].replace("|", "/"))
+            f.write(f"| {st['step']} | {st['outcome']} | {detail} |\n")
         if results["manual"]:
             f.write("\n## Manual checks\n\n| Check | Outcome | Note |\n|---|---|---|\n")
             for k, m in results["manual"].items():
