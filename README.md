@@ -53,7 +53,9 @@ ld.lld into `patches/SLPM-65428_32088394.pnach` by `python mod/build.py`, with e
 [Outbreak decomp](https://github.com/GalaxyNostalgia/Outbreak-decomp) and were checked on the
 device with the tools below. `docs/phase1-feasibility-report.md` is the full research and
 device-test record. `docs/android-port-map.md` maps what a native Android build of the game
-(rather than this patch) would have to implement: rendering, sound, files, input, saves, timing.
+(rather than this patch) would have to implement: rendering, sound, files, input, saves, timing;
+`docs/native-port-design.md` proposes a design for native Windows + Android builds that can
+cross-play online with each other and with PS2/PCSX2.
 
 ## Development tools (PC → adb → ARMSX2 PINE)
 
