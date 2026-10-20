@@ -66,11 +66,15 @@ BLOCK_SIZE = 0x200
 # gets a whole tick to re-lock or turn her (from the PC it would be a race).
 # bit 4: strafe. Each call, add (B_VEL_X, B_VEL_Z) to the player's position (File #1 roots her
 # while aiming; HeySnippy's notes: the engine still resolves her against walls afterwards).
-F_POS, F_FOV, F_RELATIVE, F_AIM, F_STRAFE = 1, 2, 4, 8, 16
+# bit 5: face. Each call, set the player's heading (+0x92) to B_AIM_HEADING, nothing else. Used
+# while walking with the stick: the game walks straight when her heading already matches the
+# stick direction, instead of arcing or turning on the spot first (func_006307E0's sectors).
+F_POS, F_FOV, F_RELATIVE, F_AIM, F_STRAFE, F_FACE = 1, 2, 4, 8, 16, 32
 P_TARGET, P_TARGET_IDX, P_HEADING, P_ELEV = 0x24, 0xCDC, 0x92, 0xBC8
 PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
 PLAYER_ACT = 0x08  # act[0]: the current action; 2 = aiming (game/charmove.c func_0061CE50)
 ACT_AIM = 2
+WALK_ACTS = (0, 1)    # standing / the movement steps (charmove.c: action 1 = walk, run, turn, back)
 RIG = ("distance", "height", "target_height", "shoulder", "lookahead")
 # Raw DualShock 2 report (PadData at PAD_NOW): +4 RIGHT x, +5 RIGHT y, +6 LEFT x, +7 LEFT y. The
 # decomp's pad.h comment says left first; the device says otherwise (the camera orbit read +6/+7
@@ -145,18 +149,24 @@ def build_cave(block, orig1, orig2, hook=HOOK, camera=CAMERA):
         emit(mips.lw("t3", B_POS + 4 * i, "t0"), mips.sw("t3", 0x18 + 4 * i, "t2"))
     label("aim")
     emit(mips.andi("t3", "t1", F_AIM))
-    branch("t3", "zero", "fov")
+    branch("t3", "zero", "face")
     emit(mips.lw("t3", B_PLAYER, "t0"))
-    branch("t3", "zero", "fov")
+    branch("t3", "zero", "face")
     emit(mips.sw("zero", P_TARGET, "t3"),                                      # no lock-on target
          mips.addiu("t4", "zero", 0xFF), mips.sb("t4", P_TARGET_IDX, "t3"),
          mips.lh("t4", B_AIM_HEADING, "t0"), mips.sh("t4", P_HEADING, "t3"),
          mips.lh("t4", B_AIM_ELEV, "t0"), mips.sh("t4", P_ELEV, "t3"))
     emit(mips.andi("t4", "t1", F_STRAFE))                                      # t3 = player still
-    branch("t4", "zero", "fov")
+    branch("t4", "zero", "face")
     for off, vel in ((0, B_VEL_X), (8, B_VEL_Z)):                              # pos.x, pos.z += step
         emit(mips.lwc1(0, PLAYER_POS + off, "t3"), mips.lwc1(1, vel, "t0"),
              mips.add_s(2, 0, 1), mips.swc1(2, PLAYER_POS + off, "t3"))
+    label("face")
+    emit(mips.andi("t4", "t1", F_FACE))
+    branch("t4", "zero", "fov")
+    emit(mips.lw("t3", B_PLAYER, "t0"))
+    branch("t3", "zero", "fov")
+    emit(mips.lh("t4", B_AIM_HEADING, "t0"), mips.sh("t4", P_HEADING, "t3"))
     label("fov")
     emit(mips.andi("t3", "t1", F_FOV))
     branch("t3", "zero", "replay")
@@ -438,6 +448,7 @@ def cmd_run(a):
     free_aiming = False
     t_move = 0.0
     hook_rate = 60.0                                      # hook calls/s, measured below
+    face_dir = None                                       # modern walking: her facing, radians
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -503,6 +514,7 @@ def cmd_run(a):
             pl, pad, cnt, mv, mstick = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4),
                                                         (player + P_MOVE_DIR, 2), (player + P_CTRL_STICK, 4)])
             count = struct.unpack("<I", cnt)[0]
+            mag, ang = struct.unpack("<hH", mstick)               # the movement stick, as the game reads it
             p = struct.unpack_from("<3f", pl, 0x38)
             heading = (struct.unpack_from("<h", pl, 0x92)[0] & 0xFFFF) * 2 * math.pi / 65536
             if smooth_heading is None:
@@ -536,7 +548,9 @@ def cmd_run(a):
             # that chases her facing makes a sideways push turn her forever (device: "the left
             # stick keeps rotating"). Hold the camera while the stick is pushed; follow again
             # once it's released (or with the D-pad, which is tank control).
-            stick_moving = bool(stick(pad[PAD_LX]) or stick(pad[PAD_LY]))
+            # Same signal as the facing below uses (the game's own stick reading, mag >= 0x10), or the
+            # raw stick: if they ever disagreed, following while facing would feed back and spin.
+            stick_moving = bool(stick(pad[PAD_LX]) or stick(pad[PAD_LY]) or mag >= 0x10)
             if not free_aiming and not (stick_moving and not aiming and not a.follow_while_moving):
                 tau = a.aim_follow if (aiming and target) else a.follow
                 k = 1 - math.exp(-dt / tau) if tau > 0 else 1
@@ -588,6 +602,21 @@ def cmd_run(a):
                     vz = (scr_right[1] * lx - fwd[1] * ly) * per_call
                     writes.append((block + B_VEL_X, [f2u(vx), f2u(vz)]))
                     strafing = True
+            facing = False
+            if (not aiming and a.turn_speed > 0 and mag >= 0x10 and pl[PLAYER_ACT] in WALK_ACTS):
+                # Modern walking: face her straight down the stick (camera yaw + stick angle, the
+                # same target func_006307E0 computes), turning at most --turn-speed. The game then
+                # sees "straight ahead" and walks, instead of arcing or turning on the spot.
+                cam_units = math.atan2(look[0] - eye[0], look[2] - eye[2]) / (2 * math.pi) * 65536
+                want = (cam_units + (ang & 0xFFF0)) * 2 * math.pi / 65536
+                if face_dir is None:
+                    face_dir = heading
+                step = math.radians(a.turn_speed) * dt
+                face_dir += max(-step, min(step, (want - face_dir + math.pi) % (2 * math.pi) - math.pi))
+                writes.append((block + B_AIM_HEADING, [round(face_dir / (2 * math.pi) * 65536) & 0xFFFF], 2))
+                facing = True
+            else:
+                face_dir = None
             if free_aiming:
                 # She faces where the camera looks and the gun takes its elevation, so the shot
                 # lines up with the view (0x10000 per turn). The hook applies these every frame.
@@ -598,11 +627,11 @@ def cmd_run(a):
                                [round(face / (2 * math.pi) * 65536) & 0xFFFF,
                                 max(-lim, min(lim, round(elev / (2 * math.pi) * 65536))) & 0xFFFF], 2))
             writes.append((block + B_FLAGS, [flags | (F_AIM if free_aiming else 0)
-                                             | (F_STRAFE if strafing else 0)]))   # flags last
+                                             | (F_STRAFE if strafing else 0)
+                                             | (F_FACE if facing and not free_aiming else 0)]))   # flags last
             pine.write_multi(writes)
             # Which camera does the game's camera-relative movement use? wanted dir = camera yaw +
             # stick angle (&0xFFF0 both, as func_006307E0 does), so camera yaw = wanted - stick.
-            mag, ang = struct.unpack("<hH", mstick)
             # Only meaningful while walking: not while aiming (free aim holds her facing and the stick
             # isn't movement) nor while the game is paused or loading (its value goes stale).
             if mag >= 0x10 and now - t_move > 3.0 and not aiming and hook_rate > 30:
@@ -680,6 +709,8 @@ def main(argv=None):
     r.add_argument("--fov", type=float, default=0, help="override FOV in degrees (0 = keep the game's)")
     r.add_argument("--follow", type=float, default=0.15, help="seconds to swing behind a turn (0 = rigid)")
     r.add_argument("--orbit-speed", type=float, default=100, help="degrees/s at full right stick (device: 150 felt fast)")
+    r.add_argument("--turn-speed", type=float, default=900,
+                   help="modern walking: deg/s she turns toward the stick direction (0 = the game's own arcs)")
     r.add_argument("--strafe-speed", type=float, default=0,
                    help="units/s at full left stick while free-aiming (0 = stand still, RE5 style; ~150 = half her walk)")
     r.add_argument("--follow-while-moving", action="store_true",

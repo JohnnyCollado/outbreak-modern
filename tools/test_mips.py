@@ -135,7 +135,7 @@ def test_cave():
     player = 0x00476DD0
     code = C.build_cave(block, orig1, orig2)
     ours = [f2u(v) for v in (10.0, 20.0, 30.0, 1.5, 2.5, 3.5)]
-    for flags in range(32):
+    for flags in range(64):
         for has_player in (True, False):
             mem = {block + C.B_FLAGS: flags, block + C.B_COUNT: 41, block + C.B_FOV: 0xAAAAAAAA,
                    block + C.B_PLAYER: player if has_player else 0,
@@ -171,8 +171,9 @@ def test_cave():
             expect((mem[player + C.P_TARGET] == 0) == aim_on, f"{tag}: lock-on cleared only with bit 3")
             expect(mem[player + 0xCDC] == (0x112233FF if aim_on else 0x11223305),
                    f"{tag}: target index byte set to 0xFF only with bit 3, neighbours untouched")
-            expect(mem[player + 0x90] == (0x1234AAAA if aim_on else 0x7777AAAA),
-                   f"{tag}: heading (+0x92, s16) written only with bit 3, +0x90 untouched")
+            face_on = aim_on or (bool(flags & C.F_FACE) and has_player)
+            expect(mem[player + 0x90] == (0x1234AAAA if face_on else 0x7777AAAA),
+                   f"{tag}: heading (+0x92, s16) written with bit 3 or bit 5, +0x90 untouched")
             expect(mem[player + 0xBC8] == (0x5555F000 if aim_on else 0x55550000),
                    f"{tag}: elevation (+0xBC8, s16) written only with bit 3, +0xBCA untouched")
             touched = {a for a in mem if not (block <= a < block + C.BLOCK_SIZE)} - {
