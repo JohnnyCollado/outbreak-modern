@@ -22,17 +22,53 @@ def read(pine):
     return struct.unpack("<4I3fI", pine.read_block(STATUS, 32))
 
 
+PNACH = os.path.join(os.path.dirname(SITES), "..", "patches", "SLPM-65428_32088394.pnach")
+
+
+def check_patch(pine):
+    """What the patch file says vs what is in memory: its D-code conditions, its writes."""
+    conds, writes = [], []
+    for line in open(PNACH):
+        if line.startswith("patch=1,EE,"):
+            _, _, addr, _, data = line.strip().split(",")
+            a, d = int(addr, 16), int(data, 16)
+            (conds if a >> 28 == 0xD else writes).append((a & 0x0FFFFFFF, d))
+    seen = {}
+    for a, d in conds:
+        if a not in seen:
+            seen[a] = (struct.unpack("<H", pine.read_block(a & ~3, 4)[a & 2:(a & 2) + 2])[0], d & 0xFFFF)
+    anchor = conds[0][0]                      # the file's first condition is the anchor's low half
+    anchor_ok = all(seen[a][0] == seen[a][1] for a in (anchor, anchor + 2))
+    code = [(a, d) for a, d in writes if a < 0x00100000]
+    hooks = [(a, d) for a, d in writes if a >= 0x00100000]
+    bad = sum(1 for a, d in code if struct.unpack("<I", pine.read_block(a, 4))[0] != d) if code else 0
+    print(f"patch file: {len(code)} code words, {len(hooks)} call sites")
+    print(f"  anchor 0x{anchor:08X}: {'present (gameplay overlay loaded)' if anchor_ok else 'NOT present: are you in gameplay?'}")
+    print(f"  our code at 0x{code[0][0]:08X}: " + ("all there" if bad == 0 else f"{bad} of {len(code)} words differ"))
+    for a, d in hooks:
+        w = struct.unpack("<I", pine.read_block(a, 4))[0]
+        state = "calls us" if w == d else "still the game's call" if w == 0x0C000000 | (0x00345740 >> 2) else f"0x{w:08X}"
+        print(f"  call site 0x{a:08X}: {state}")
+    return anchor_ok, bad == 0 and bool(code)
+
+
 def main():
     pine, _ = phase2_check.connect_game()
     try:
+        patch = check_patch(pine) if os.path.exists(PNACH) else None
         a = read(pine)
         time.sleep(1.0)
         b = read(pine)
     finally:
         pine.close()
     if b[0] != MAGIC:
-        print(f"not running: no status at 0x{STATUS:08X} (magic 0x{b[0]:08X}). Is the patch enabled in "
-              "ARMSX2 (Patch Manager), and are you in gameplay?")
+        print(f"not running: no status at 0x{STATUS:08X} (magic 0x{b[0]:08X}).")
+        if patch and patch[0] and not patch[1]:
+            print("  The overlay is loaded but our code isn't in memory: ARMSX2 isn't applying the patch.\n"
+                  "  Check it is enabled in Patch Manager for THIS game, then restart the game (patches are\n"
+                  "  read when it boots).")
+        elif patch and not patch[0]:
+            print("  Get into gameplay (a room you can walk around in) and run this again.")
         return 2
     rate = (b[2] - a[2]) & 0xFFFFFFFF
     sites = []
