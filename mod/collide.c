@@ -52,6 +52,26 @@ static float seg_tri(const float *a, const float *d, const float *v) {
     return t >= 0.0f && t <= 1.0f ? t : -1.0f;
 }
 
+/* What f1_collide.tri_is_sane accepts (the PC tool used only these; device: in the PC version the
+   camera never "started zoomed in"): a unit normal at +0x28 (v + 9), and every vertex on the plane
+   n.x + d = 0 or n.x = d, d at +0x34. Anything else in a list is not a wall to stop at. */
+static int tri_sane(const float *v) {
+    const float *n = v + 9, d = v[12];
+    float ln = n[0] * n[0] + n[1] * n[1] + n[2] * n[2], dots[3], m = 0.0f, tol;
+    int i, plus = 1, minus = 1;
+    if (!(ln > 0.9604f && ln < 1.0404f)) return 0;          /* |n| in (0.98, 1.02) */
+    for (i = 0; i < 3; i++) {
+        dots[i] = n[0] * v[3 * i] + n[1] * v[3 * i + 1] + n[2] * v[3 * i + 2];
+        if (absf(dots[i]) > m) m = absf(dots[i]);
+    }
+    tol = 0.5f + 1e-4f * m;
+    for (i = 0; i < 3; i++) {
+        if (!(absf(dots[i] + d) < tol)) plus = 0;
+        if (!(absf(dots[i] - d) < tol)) minus = 0;
+    }
+    return plus || minus;
+}
+
 /* The nearest hit along a->b in one cell's list, below `best`. */
 static float cell_hit(u32 list, const float *a, const float *d, float best) {
     const u32 *ptr = (const u32 *)list;
@@ -60,7 +80,7 @@ static float cell_hit(u32 list, const float *a, const float *d, float best) {
         u32 tri = ptr[k];
         float t;
         if (tri == 0xFFFFFFFFu) break;
-        if (tri == 0 || tri >= RAM_TOP || (tri & 3)) continue;
+        if (tri == 0 || tri >= RAM_TOP || (tri & 3) || !tri_sane((const float *)(tri + 4))) continue;
         t = seg_tri(a, d, (const float *)(tri + 4));
         if (t >= 0.0f && (best < 0.0f || t < best)) best = t;
     }

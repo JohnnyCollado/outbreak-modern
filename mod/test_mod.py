@@ -139,7 +139,7 @@ def milestone2(uc):
     t += 1 / 60
     frame(uc, t)
     fov = struct.unpack("<f", uc.mem_read(0x00306320 + 0x60, 4))[0]
-    expect(fov == 60.0, f"FOV held at 60 deg whatever the shot sets (shot 27 -> {fov:g})")
+    expect(fov == 27.0, f"FOV: the shot's own, left alone as in the PC tool ({fov:g})")
     for i in range(60):                                                    # 1 s full right
         t += 1 / 60
         frame(uc, t, (0, 255, 128, 128, 128))
@@ -185,7 +185,6 @@ def milestone2(uc):
     t += 1 / 60
     frame(uc, t)
     expect(cam(uc)[0] == (1.0, 2.0, 3.0), "...and the camera left alone while off")
-    expect(struct.unpack("<f", uc.mem_read(0x00306320 + 0x60, 4))[0] == 27.0, "...and the shot's own FOV given back")
     for i in range(72):
         t += 1 / 60
         frame(uc, t, (0x0500, 128, 128, 128, 128))
@@ -208,7 +207,14 @@ def room(uc, walls=(), floors=()):
             continue
         ptrs = []
         for tri in tris:
-            uc.mem_write(addr, struct.pack("<I9f", 0, *[c for v in tri for c in v]) + b"\0" * 0x10)
+            # with its unit normal and plane (n.x + d = 0), as the game's are: the patch skips others
+            e1 = [tri[1][i] - tri[0][i] for i in range(3)]
+            e2 = [tri[2][i] - tri[0][i] for i in range(3)]
+            n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+            ln = sum(c * c for c in n) ** 0.5
+            n = [c / ln for c in n]
+            d = -sum(n[i] * tri[0][i] for i in range(3))
+            uc.mem_write(addr, struct.pack("<I9f3ff", 0, *[c for v in tri for c in v], *n, d))
             ptrs.append(addr)
             addr += 0x40
         lst = addr
@@ -254,6 +260,15 @@ def milestone3(uc):
         frame(uc, t)
     eye3, _ = cam(uc)
     expect(abs(eye3[2] - free_eye[2]) < 2.0, f"...and is back after 2 s (z {eye3[2]:.1f})")
+    # something in the wall lists that isn't a proper triangle (no unit normal): not a wall
+    room(uc, walls=quad(-1500, 1500, -500, 1500, 2400.0))
+    for a in range(TRIS, TRIS + 0x80, 0x40):
+        uc.mem_write(a + 0x28, b"\0" * 16)
+    for i in range(60):
+        t += 1 / 60
+        frame(uc, t)
+    eye5, _ = cam(uc)
+    expect(abs(eye5[2] - free_eye[2]) < 2.0, f"an entry that isn't a real triangle doesn't pull the camera in (z {eye5[2]:.1f})")
     room(uc, floors=flat(-1500, 1500, 1000, 3500, -200.0))      # the floor far below (a stairwell)
     t += 1 / 60
     frame(uc, t)
@@ -342,9 +357,51 @@ def milestone4(uc):
         guns.append((cam_elev, gun))
     worst = max(abs(c - g) for c, g in guns)
     jump = max(abs(guns[i + 1][1] - guns[i][1]) for i in range(len(guns) - 1))
-    expect(worst < 0.05, f"the gun follows the camera's elevation 1:1 over a floor (worst {worst:.3f} deg)")
+    expect(worst < 2.0, f"the gun follows the camera's elevation over a floor, the floor ignored (worst {worst:.2f} deg: "
+                        "the camera sits above her chest)")
     expect(jump < 1.5, f"...with no jump crossing the horizon (largest step {jump:.2f} deg per frame)")
     room(uc)
+    # an enemy on the crosshair, 500 out: the shot must go from her chest through the point on
+    # the camera ray where the enemy is (device: "off a bit diagonally bottom right")
+    for i in range(200):                                                        # level the view
+        pitch = math.degrees(status(uc)[10])
+        if abs(pitch) < 0.6:
+            break
+        t += 1 / 60
+        frame(uc, t, (0, 128, 255 if pitch < 0 else 0, 128, 128))
+    for i in range(30):
+        t += 1 / 60
+        frame(uc, t)                                                            # settle
+    eye, look = cam(uc)
+    dvec = [look[i] - eye[i] for i in range(3)]
+    n = math.sqrt(sum(c * c for c in dvec))
+    dvec = [c / n for c in dvec]
+    hit = [eye[i] + dvec[i] * 500 for i in range(3)]
+    p = struct.unpack("<3f", uc.mem_read(PLAYER + 0x38, 12))
+    scen = struct.unpack("<H", uc.mem_read(PLAYER + 0x1E2, 2))[0]
+    thing = 0x003FFCA0 + 7 * 0xD90
+    uc.mem_write(thing, b"\x01\x01\x02\x01")
+    uc.mem_write(thing + 0x38, struct.pack("<3f", hit[0] + 20, hit[1] - 100, hit[2]))   # its feet; the ray at chest height
+    uc.mem_write(thing + 0x1E2, struct.pack("<H", scen))
+    uc.mem_write(thing + 0x544, struct.pack("<h", 100))
+    for i in range(30):
+        t += 1 / 60
+        frame(uc, t)
+    conv = struct.unpack("<f", uc.mem_read(0x000AFF68, 4))[0]
+    chest = (p[0], p[1] + 150, p[2])
+    want_face = math.degrees(math.atan2(hit[0] - chest[0], hit[2] - chest[2]))
+    want_elev = math.degrees(math.atan2(hit[1] - chest[1], math.hypot(hit[0] - chest[0], hit[2] - chest[2])))
+    gun = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
+    h = heading(uc)
+    expect(abs(conv - 500) < 5, f"an enemy on the crosshair: converges on it ({conv:.0f} out)")
+    expect(abs(((h - want_face) + 180) % 360 - 180) < 0.3 and abs(gun - want_elev) < 0.3,
+           f"...her heading and gun go from her chest through it ({h:.2f}/{want_face:.2f}, {gun:.2f}/{want_elev:.2f} deg)")
+    uc.mem_write(thing + 0x544, struct.pack("<h", 0))                          # dead
+    t += 1 / 60
+    frame(uc, t)
+    conv = struct.unpack("<f", uc.mem_read(0x000AFF68, 4))[0]
+    expect(abs(conv - 1500) < 5, f"...a dead one is ignored ({conv:.0f})")
+    uc.mem_write(thing, b"\0")
     uc.mem_write(PLAYER + 0x08, b"\x00")
     t += 1 / 60
     frame(uc, t)
@@ -388,7 +445,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 5 and st[2] == 1 and st[7] == 1, "status: magic, version 5, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 6 and st[2] == 1 and st[7] == 1, "status: magic, version 6, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):

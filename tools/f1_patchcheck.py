@@ -68,6 +68,7 @@ def main():
         pull = struct.unpack("<f", pine.read_block(STATUS + 0x50, 4))[0] if b[1] >= 3 else None
         aim = struct.unpack("<IIIf", pine.read_block(STATUS + 0x54, 16)) if b[1] >= 4 else None
         game_fov = struct.unpack("<f", pine.read_block(STATUS + 0x64, 4))[0] if b[1] >= 5 else None
+        converge = struct.unpack("<f", pine.read_block(STATUS + 0x68, 4))[0] if b[1] >= 6 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -99,14 +100,15 @@ def main():
     if pull is not None:
         print(f"  walls: camera at {pull * 100:.0f}% of its distance" + (" (pulled in by a wall)" if pull < 0.99 else ""))
     if game_fov is not None:
-        print(f"  FOV: held at 60 deg (the current shot's own: {game_fov:g} deg)")
+        print(f"  FOV: {game_fov:g} deg (the game's, left alone)")
     if aim is not None:
         import math
         servo = aim[2] & ~3
         print(f"  aim servo: " + (f"0x{servo:08X}, " + ("switched off (free aim ready)" if aim[2] & 1 else "found, not off")
                                   if servo else "not found yet (it scans GAME.BIN for about a second after gameplay starts)"))
         if aim[0]:
-            print(f"  aiming: " + (f"free aim, gun at {math.degrees(aim[3]):+.1f} deg" if aim[1] else "the game's own aim (no servo)"))
+            print(f"  aiming: " + (f"free aim, gun at {math.degrees(aim[3]):+.1f} deg" if aim[1] else "the game's own aim (no servo)")
+                  + (f", converging {converge:.0f} out" if aim[1] and converge else ""))
     return 0 if rate > 0 else 2
 
 

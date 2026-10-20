@@ -39,6 +39,17 @@ typedef float f32;
 #define GAME_BIN_HI     0x00900000u
 #define SERVO_RATE_STEP 0x24060492u
 #define SERVO_RATE_BACK 0x24060AAAu
+/* The room's enemies (D_003FFCA0, 50 things of 0xD90; include/thing.h): active +0, visible +1,
+   position f32[3] +0x38, scenario u16 +0x1E2 (the game matches it against the player's own,
+   relations.c), health s16 +0x544; the game skips one with +0xC94 & 0x100. */
+#define THINGS          0x003FFCA0u
+#define THING_COUNT     50
+#define THING_SIZE      0xD90
+#define T_POS           0x38
+#define T_SCENARIO      0x1E2
+#define T_HP            0x544
+#define T_FLAGS         0xC94
+#define P_SCENARIO      0x1E2
 #define SCREEN_W        640
 #define SCREEN_H        448
 #define CAM_FOV         (CAMERA + 0x60) /* f32, degrees (ingame.c: x pi/180 for the projection; default 27) */
