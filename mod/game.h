@@ -28,6 +28,19 @@ typedef float f32;
 #define ACT_AIM         2
 #define P_STICK_MAG     (0xF78 + 0x20)  /* her Ctrl: the movement stick as the game reads it, s16 0-127 */
 #define P_STICK_ANG     (0xF78 + 0x22)  /* u16, 0x10000 per turn, relative to the camera (func_006307E0) */
+#define P_TARGET        0x24        /* u32: the aim's target (set by func_0062D6A0 on a lock-on aim) */
+#define P_TARGET_IDX    0xCDC       /* u8: 0xFF = none, as the game's own "aim at nothing" sets it */
+#define P_ELEV          0xBC8       /* s16: gun elevation, 0x10000 per turn (+-8191 = the game's 45 deg) */
+/* The aim servo: a GAME.BIN function that steps P_ELEV each tick for our player (found on the
+   device by its contents, 2026-10-20: 0x556800 in the English patch; tools/f1_freeaim.py). Found
+   here the same way: `addiu a2, zero, 2730` with two `addiu a2, zero, 1170` in the 24 words
+   before it, inside a function with at least five `sh` to +0xBC8. */
+#define GAME_BIN_LO     0x00540000u
+#define GAME_BIN_HI     0x00900000u
+#define SERVO_RATE_STEP 0x24060492u
+#define SERVO_RATE_BACK 0x24060AAAu
+#define SCREEN_W        640
+#define SCREEN_H        448
 #define CAM_POS         (CAMERA + 0x18) /* f32[3] */
 #define CAM_TARGET      (CAMERA + 0x24) /* f32[3]; the game's movement uses pos -> target as "forward" */
 /* The pad this frame (D_00292D40): buttons u16 +2, active-high as the game leaves it, bytes

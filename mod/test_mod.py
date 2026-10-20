@@ -26,7 +26,7 @@ except ImportError:
     sys.exit(0)
 
 FAILS = []
-RAM = 8 << 20
+RAM = 32 << 20            # the EE has 32 MB
 # A fake caller: load every FPU register from FP_IN (unicorn can't set them directly), the patched
 # call site (jal mod_entry; nop), then store them all to FP_OUT. k0 holds the table address: no C
 # code uses k0/k1.
@@ -57,6 +57,8 @@ def mips32(w):
     sq/lq (EE-only, opcodes 0x1F/0x1E) as sw/lw of the low word: unicorn's CPU has no 128-bit
     registers. The EE requires 16-byte alignment for them: the stub saves at sp + r*16 with sp
     16-aligned, so the offset must be too."""
+    if w == 0x0000000C:                         # syscall (FlushCache): nothing to flush here
+        return 0
     if w & 0xFFE0FFFF == 0x40004800:
         return 0x8C000000 | (w & 0x001F0000) | COUNT_AT
     if w >> 26 in (0x1E, 0x1F):
@@ -254,6 +256,92 @@ def milestone3(uc):
     room(uc)
 
 
+SERVO = 0x00556800
+JR_RA, RATE_STEP, RATE_BACK = 0x03E00008, 0x24060492, 0x24060AAA
+
+
+def plant_servo(uc):
+    """A function shaped like the servo, built from the signature alone (its step constants and
+    stores to +0xBC8), not from game code."""
+    sh = lambda rt: 0xA4000000 | (4 << 21) | (rt << 16) | 0x0BC8               # sh rt, 0xBC8(a0)
+    words = [0x27BDFFC0, 0x03E00008 ^ 0x10] + [sh(r) for r in range(2, 7)]     # prologue, filler, 5 stores
+    words += [RATE_STEP, 0, RATE_STEP, 0, RATE_BACK, 0, JR_RA, 0]
+    uc.mem_write(SERVO - 8, struct.pack("<2I", JR_RA, 0))                      # the previous function's end
+    uc.mem_write(SERVO, struct.pack(f"<{len(words)}I", *words))
+    return words[:2]
+
+
+def milestone4(uc):
+    import math
+    orig = plant_servo(uc)
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", 0))
+    uc.mem_write(PLAYER + 0x08, b"\x00")
+    uc.mem_write(0x000AFF04, struct.pack("<I", 0))
+    t = 200.0
+    room(uc)
+    for i in range(70):                                       # the scan covers GAME.BIN in ~60 frames
+        t += 1 / 60
+        frame(uc, t)
+    words = struct.unpack("<2I", uc.mem_read(SERVO, 8))
+    srv = struct.unpack("<I", uc.mem_read(0x000AFF5C, 4))[0]
+    expect(words == (JR_RA, 0) and srv == SERVO | 1, f"servo found and switched off within ~1 s (status 0x{srv:08X})")
+    yaw0 = status(uc)[9]
+    uc.mem_write(PLAYER + 0x24, struct.pack("<I", 0x00412345))                # a lock-on the game made
+    uc.mem_write(PLAYER + 0xCDC, b"\x03")
+    uc.mem_write(PLAYER + 0x08, b"\x02")                                     # aim
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", 0x4000))                    # she faces 90 deg off the view
+    t += 1 / 60
+    frame(uc, t)
+    a = struct.unpack("<IIIf", uc.mem_read(0x000AFF54, 16))
+    expect(a[0] == 1 and a[1] == 1, "aiming with the servo off: free aim")
+    expect(abs(status(uc)[9] - yaw0) < 1e-6, "RE5 style: the view doesn't move when the aim starts")
+    expect(struct.unpack("<I", uc.mem_read(PLAYER + 0x24, 4))[0] == 0 and uc.mem_read(PLAYER + 0xCDC, 1)[0] == 0xFF,
+           "the game's lock-on is cleared")
+    h1 = heading(uc)
+    expect(abs(((h1 - 90) + 180) % 360 - 180) - 12.0 < 0.5, f"she turns into the aim at 720 deg/s (one frame: 90 -> {h1:.1f})")
+    for i in range(40):
+        t += 1 / 60
+        frame(uc, t)
+    eye, look = cam(uc)
+    view = math.degrees(math.atan2(look[0] - eye[0], look[2] - eye[2]))
+    h2 = heading(uc)
+    expect(abs(((h2 - view) + 180) % 360 - 180) < 3.0, f"...then faces where the camera looks ({h2:.1f} vs view {view:.1f}; convergence adds a little)")
+    p = struct.unpack("<3f", uc.mem_read(PLAYER + 0x38, 12))
+    pivot_d = math.dist(eye, (p[0] + math.cos(math.radians(view)) * 50, p[1] + 160, p[2] - math.sin(math.radians(view)) * 50))
+    expect(abs(pivot_d - 120) < 2.0, f"aim rig: the camera 120 behind her aim shoulder ({pivot_d:.1f})")
+    for i in range(30):                                                         # tilt up (stick up = y 0)
+        t += 1 / 60
+        frame(uc, t, (0, 128, 0, 128, 128))
+    elev = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
+    pitch = math.degrees(status(uc)[10])
+    expect(elev > 5 and pitch < 0, f"looking up raises the gun (camera pitch {pitch:.1f}, gun {elev:+.1f} deg)")
+    for i in range(120):
+        t += 1 / 60
+        frame(uc, t, (0, 128, 0, 128, 128))
+    elev = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
+    expect(elev <= 45.01, f"...up to 45 deg ({elev:.1f})")
+    line = uc.mem_read(0x002F7450 + 30 * 0x8C, 0x10)
+    used, x, y = struct.unpack_from("<3h", line, 0)
+    expect(used == 1 and (x, y) == (308, 212) and bytes(line[0x0C:0x0E]) == b"\x81\x7b",
+           f"crosshair: the square plus, centred ({x}, {y})")
+    uc.mem_write(PLAYER + 0x08, b"\x00")
+    t += 1 / 60
+    frame(uc, t)
+    expect(struct.unpack("<h", uc.mem_read(0x002F7450 + 30 * 0x8C, 2))[0] == 0, "aim released: crosshair gone")
+    for i in range(72):
+        t += 1 / 60
+        frame(uc, t, (0x0500, 128, 128, 128, 128))
+    expect(list(struct.unpack("<2I", uc.mem_read(SERVO, 8))) == orig, "SELECT + R3 off: the servo's own words are back")
+    t += 1 / 60
+    frame(uc, t)                                                                # let go
+    for i in range(72):
+        t += 1 / 60
+        frame(uc, t, (0x0500, 128, 128, 128, 128))
+    t += 1 / 60
+    frame(uc, t)
+    expect(struct.unpack("<2I", uc.mem_read(SERVO, 8)) == (JR_RA, 0), "on again: switched off again (GAME.BIN 'reloaded')")
+
+
 def main():
     words, syms, notes = build.build()
     uc = machine(words)
@@ -279,7 +367,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 3 and st[2] == 1 and st[7] == 1, "status: magic, version 3, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 4 and st[2] == 1 and st[7] == 1, "status: magic, version 4, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):
@@ -295,6 +383,7 @@ def main():
     expect(uc.mem_read(0x002F7450 + 31 * 0x8C + 0x0B, 1)[0] == 0x10, "a line the game is using is left alone")
     milestone2(uc)
     milestone3(uc)
+    milestone4(uc)
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
 

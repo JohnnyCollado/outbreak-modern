@@ -10,7 +10,7 @@
 #define MOD_STATE   0x000A8000u
 #define MOD_STATUS  0x000AFF00u
 #define MOD_MAGIC   0x434D4F31u     /* "1OMC" */
-#define MOD_VERSION 3
+#define MOD_VERSION 4
 
 typedef struct {
     u32 magic;          /* MOD_MAGIC once our code has run since the region was last cleared */
@@ -28,6 +28,11 @@ typedef struct {
     u32 callout_dz;     /* the game's own right-stick dead zone, as found (0xFFFF: not found) */
     /* 0x50: milestone 3 */
     f32 pull;           /* fraction of the camera distance in use (1: no wall in the way) */
+    /* 0x54: milestone 4 */
+    u32 aiming;         /* her action is the aim */
+    u32 free_aim;       /* 1 while the elevation is ours (servo off) */
+    u32 servo;          /* the servo's address | 1 while it is switched off (0: not found yet) */
+    f32 elev;           /* the gun's elevation we set, radians */
 } ModStatus;
 
 #endif

@@ -66,6 +66,7 @@ def main():
         b = read(pine)
         v2 = read_v2(pine) if b[1] >= 2 else None
         pull = struct.unpack("<f", pine.read_block(STATUS + 0x50, 4))[0] if b[1] >= 3 else None
+        aim = struct.unpack("<IIIf", pine.read_block(STATUS + 0x54, 16)) if b[1] >= 4 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -96,6 +97,13 @@ def main():
               + (f"{v2[11]} (callouts on L1)" if v2[11] != 0xFFFF else "not found (callouts not gated)"))
     if pull is not None:
         print(f"  walls: camera at {pull * 100:.0f}% of its distance" + (" (pulled in by a wall)" if pull < 0.99 else ""))
+    if aim is not None:
+        import math
+        servo = aim[2] & ~3
+        print(f"  aim servo: " + (f"0x{servo:08X}, " + ("switched off (free aim ready)" if aim[2] & 1 else "found, not off")
+                                  if servo else "not found yet (it scans GAME.BIN for about a second after gameplay starts)"))
+        if aim[0]:
+            print(f"  aiming: " + (f"free aim, gun at {math.degrees(aim[3]):+.1f} deg" if aim[1] else "the game's own aim (no servo)"))
     return 0 if rate > 0 else 2
 
 

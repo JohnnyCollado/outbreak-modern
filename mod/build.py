@@ -92,7 +92,7 @@ def build():
     os.makedirs(BUILD, exist_ok=True)
     clang, lld, objcopy, nm = tool("clang"), tool("ld.lld"), tool("llvm-objcopy"), tool("llvm-nm")
     objs = []
-    for src in ("stub.S", "mod.c", "collide.c"):
+    for src in ("stub.S", "mod.c", "collide.c", "servo.c"):
         obj = os.path.join(BUILD, src + ".o")
         subprocess.run([clang, *CFLAGS, "-c", os.path.join(HERE, src), "-o", obj], check=True)
         objs.append(obj)
