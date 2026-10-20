@@ -40,6 +40,8 @@ MODERN = {
 #                                does what it did in the original game)
 DIRECTIONS = 0xF000           # the D-pad bits of the raw button word
 DPAD_DOWN = 0x4000
+SELECT, R3 = 0x0100, 0x0400
+QUIT_COMBO = SELECT | R3      # held ~1 s: stop the mod from the pad (on the device, no Ctrl+C)
 
 
 def plausible(raw):

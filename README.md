@@ -33,3 +33,22 @@ Results land in `results/`.
 - `tools/test_buttons.py`: layout tests on a map laid out like the device's
 - `tools/f1_crosshair.py`: `check` (read-only) and `show`; `run` draws a "+" while aiming using the
   game's own on-screen text lines (data only, removed on exit)
+
+## Running on the device, no PC (Termux)
+
+The tools only need Python's standard library, and ARMSX2's PINE listens on the device's own
+loopback, so they run on the Android device itself. On Android they skip adb and connect
+directly.
+
+1. Install Termux from F-Droid (the Play Store build is outdated), then:
+   `pkg install python git` and `termux-wake-lock` (keeps Android from pausing Termux).
+2. Get this repository onto the device: `git clone` it (a private repository needs a GitHub
+   token), or copy the folder over once and reach it after `termux-setup-storage`.
+3. In ARMSX2: PINE on (Settings > Advanced), load File #1 and get into gameplay.
+4. Android freezes ARMSX2 whenever it is off screen, so start each tool with a delay and switch
+   back to ARMSX2 straight away:
+   `sleep 5 && python tools/f1_camtest.py install --at 0x00084000` (once per game boot), then
+   `sleep 5 && python tools/f1_camtest.py run --free-aim`.
+5. To stop, hold **SELECT + R3** for a second in the game: the servo, buttons and crosshair are
+   restored while ARMSX2 is still on screen. (Ctrl+C in Termux works too, but by then ARMSX2 is
+   off screen and frozen, so the cleanup may not get through.)
