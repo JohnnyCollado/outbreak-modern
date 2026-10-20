@@ -155,6 +155,40 @@ Texture replacement comes with the first textured renderer (milestone 3); compre
 streaming with the 3D milestone (4); interpolation, resolution scale and widescreen after single
 player works (6), each switchable and off by default online if in doubt.
 
+## Hardware tiers (targets, to be measured)
+
+Estimates from the design's requirements, not measurements: nothing is built yet. What sets the
+floor: a 64-bit CPU (guest memory reserves a 4 GiB range), Vulkan with descriptor indexing
+(bindless textures), and memory for textures. The game itself is light (a 294 MHz CPU's work at
+30 Hz, 32 MiB of guest RAM); the 4K pack is what costs.
+
+| | Minimum (original textures, 1-2x resolution, 60 fps) | 4K texture pack (2-3x resolution) |
+|---|---|---|
+| Android | Android 10+, 64-bit, Vulkan 1.1 + descriptor indexing (Adreno 6xx / Mali-G72 class, e.g. Snapdragon 660-730), 3 GB RAM | Snapdragon 865 / 8 Gen 1 class GPU or newer, 8 GB RAM, ~2-4 GB storage for the converted pack |
+| Windows | Windows 10 64-bit, x64 with SSE4.1, Vulkan 1.2 GPU (GTX 650 / Radeon HD 7000 / Intel HD 500 or newer), 4 GB RAM | 8 GB RAM, 4 GB VRAM (GTX 970 / RX 470 class or newer) |
+
+Every tier runs the same logic and maths, so tiers never affect cross-play. Ways to widen later: a
+GLES 3.0/OpenGL fallback renderer (older Android; no bindless), and 1K/2K tiers converted from the
+same pack.
+
+**Reference devices**: one low-end device per platform (e.g. a Snapdragon 7-series phone, a
+GTX 1050 PC) plus the Odin 3, measured at every milestone (frame time, memory, temperature on
+Android), so the published minimum is a tested fact.
+
+## Beta testing
+
+When single player works end to end (milestone 6), open a beta:
+
+- **Builds**: Windows zip and an Android APK from the same commit, by CI; the player supplies
+  their own disc image (nothing from the game is distributed, same rule as the decomp).
+- **Who**: testers across the tiers above, so the minimum is confirmed or corrected on real
+  hardware (GPU/driver families matter more than speed on Android: Adreno, Mali, Xclipse,
+  PowerVR).
+- **What they send**: an in-game report (device, GPU/driver, settings, frame-time and memory
+  stats, the last seconds of log) -- the same idea as `f1_aimlog.py`, built in.
+- **Online beta later** (milestone 7), on a local server first, then on Obsrv only with the
+  admins' agreement; mixed rooms (PS2/PCSX2 + Windows + Android) are the cross-play test.
+
 ## Repository layout (a new repository)
 
 ```
