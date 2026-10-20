@@ -147,15 +147,18 @@ class RoomCollision:
         self.stats["cells"] += 1
         return self.cell_tris[key]
 
-    def first_hit(self, a, b):
-        """Smallest fraction t along a->b that hits a room triangle, or None."""
-        hit = self.first_hit_tri(a, b)
+    def first_hit(self, a, b, grids=None):
+        """Smallest fraction t along a->b that hits a room triangle, or None. `grids`: only
+        these (0 walls, 1 floors)."""
+        hit = self.first_hit_tri(a, b, grids)
         return hit[0] if hit else None
 
-    def first_hit_tri(self, a, b):
+    def first_hit_tri(self, a, b, grids=None):
         """(t, kind byte, grid) of the first triangle along a->b, or None."""
         best = None
         for g, grid in self.grids.items():
+            if grids is not None and g not in grids:
+                continue
             for idx in grid.cells_along(a, b):
                 for p in self._cell(g, idx):
                     t = segment_triangle(a, b, self.tris[p][1])

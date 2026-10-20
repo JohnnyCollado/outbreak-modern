@@ -41,6 +41,7 @@ typedef float f32;
 #define SERVO_RATE_BACK 0x24060AAAu
 #define SCREEN_W        640
 #define SCREEN_H        448
+#define CAM_FOV         (CAMERA + 0x60) /* f32, degrees (ingame.c: x pi/180 for the projection; default 27) */
 #define CAM_POS         (CAMERA + 0x18) /* f32[3] */
 #define CAM_TARGET      (CAMERA + 0x24) /* f32[3]; the game's movement uses pos -> target as "forward" */
 /* The pad this frame (D_00292D40): buttons u16 +2, active-high as the game leaves it, bytes

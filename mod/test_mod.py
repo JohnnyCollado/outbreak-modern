@@ -135,6 +135,11 @@ def milestone2(uc):
     expect(close(eye, want_eye) and close(look, want_look),
            f"camera behind her shoulder: eye {tuple(round(v, 1) for v in eye)}, look {tuple(round(v, 1) for v in look)}")
     expect(struct.unpack("<h", uc.mem_read(DZ, 2))[0] == 0x80, "right stick alone: the game sees it centred (no callouts)")
+    uc.mem_write(0x00306320 + 0x60, struct.pack("<f", 27.0))                # a narrow shot
+    t += 1 / 60
+    frame(uc, t)
+    fov = struct.unpack("<f", uc.mem_read(0x00306320 + 0x60, 4))[0]
+    expect(fov == 60.0, f"FOV held at 60 deg whatever the shot sets (shot 27 -> {fov:g})")
     for i in range(60):                                                    # 1 s full right
         t += 1 / 60
         frame(uc, t, (0, 255, 128, 128, 128))
@@ -180,6 +185,7 @@ def milestone2(uc):
     t += 1 / 60
     frame(uc, t)
     expect(cam(uc)[0] == (1.0, 2.0, 3.0), "...and the camera left alone while off")
+    expect(struct.unpack("<f", uc.mem_read(0x00306320 + 0x60, 4))[0] == 27.0, "...and the shot's own FOV given back")
     for i in range(72):
         t += 1 / 60
         frame(uc, t, (0x0500, 128, 128, 128, 128))
@@ -324,6 +330,21 @@ def milestone4(uc):
     used, x, y = struct.unpack_from("<3h", line, 0)
     expect(used == 1 and (x, y) == (308, 212) and bytes(line[0x0C:0x0E]) == b"\x81\x7b",
            f"crosshair: the square plus, centred ({x}, {y})")
+    # device report: looking a little down pointed the gun at the floor, and a little up sent it
+    # all the way up. With a floor under her, sweep the view from down to up across the horizon.
+    room(uc, floors=flat(-1500, 1500, 1000, 4000, -5.0))
+    guns = []
+    for i in range(90):
+        t += 1 / 60
+        frame(uc, t, (0, 128, 255 if i < 45 else 0, 128, 128))              # down, then up
+        cam_elev = -math.degrees(status(uc)[10])
+        gun = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
+        guns.append((cam_elev, gun))
+    worst = max(abs(c - g) for c, g in guns)
+    jump = max(abs(guns[i + 1][1] - guns[i][1]) for i in range(len(guns) - 1))
+    expect(worst < 0.05, f"the gun follows the camera's elevation 1:1 over a floor (worst {worst:.3f} deg)")
+    expect(jump < 1.5, f"...with no jump crossing the horizon (largest step {jump:.2f} deg per frame)")
+    room(uc)
     uc.mem_write(PLAYER + 0x08, b"\x00")
     t += 1 / 60
     frame(uc, t)
@@ -367,7 +388,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 4 and st[2] == 1 and st[7] == 1, "status: magic, version 4, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 5 and st[2] == 1 and st[7] == 1, "status: magic, version 5, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):

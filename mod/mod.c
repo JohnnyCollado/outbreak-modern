@@ -39,7 +39,11 @@
 #define AIM_FOLLOW      0.3f            /* no servo: seconds to swing round to a lock-on */
 #define AIM_MAX         DEG(45.0f)      /* free aim up/down limit (the game's own) */
 #define AIM_TURN        DEG(720.0f)     /* she turns into the aim at this rate (device: one-frame snap felt bad) */
-#define CONVERGE        1500.0f         /* aim at what the crosshair is on, else this far ahead */
+#define FOV             60.0f           /* degrees, held while on: each fixed camera shot sets its own
+                                           (some narrow: "starts hella zoomed in", device). HeySnippy's
+                                           File #1 setting (ro_settings.json fov_deg) */
+#define CONVERGE        1500.0f         /* aim at the wall the crosshair is on, else this far ahead */
+#define CONVERGE_MIN    300.0f          /* ...but never nearer: a wall in her face mustn't yank her round */
 #define CROSS_SLOT      30              /* the crosshair's text line (the banner uses TEXT_SLOT) */
 #define CROSS_SIZE      24
 #define COUNT_HZ        294912000.0f    /* the EE's cycle counter (COP0 Count) */
@@ -63,6 +67,7 @@ typedef struct {
     f32 aim_face;       /* free aim: her facing, turned toward the aim */
     u32 aim_face_set;
     u32 cross_shown;
+    f32 game_fov;       /* the shot's own FOV, given back when switched off */
     Servo servo;
 } State;
 
@@ -194,6 +199,7 @@ void mod_frame(u32 caller) {
             ms->enabled = !ms->enabled;
             if (!ms->enabled) {
                 callouts_to_game();
+                if (st.game_fov > 1.0f && st.game_fov < 170.0f) MEM(f32, CAM_FOV) = st.game_fov;
                 servo_restore(&st.servo);
                 hide_line(CROSS_SLOT);
                 st.cross_shown = 0;
@@ -302,6 +308,12 @@ void mod_frame(u32 caller) {
         for (i = 0; i < 3; i++) eye[i] = side[i] + (eye[i] - side[i]) * st.pull;
     }
     ms->pull = st.pull;
+    {
+        float f = MEM(f32, CAM_FOV);
+        if (f != FOV) st.game_fov = f;      /* the shot changed it: remember theirs */
+        MEM(f32, CAM_FOV) = FOV;
+        ms->game_fov = st.game_fov;
+    }
     MEM(f32, CAM_POS) = eye[0];
     MEM(f32, CAM_POS + 4) = eye[1];
     MEM(f32, CAM_POS + 8) = eye[2];
@@ -330,11 +342,14 @@ void mod_frame(u32 caller) {
     ms->facing = st.facing;
 
     if (free_aim) {
-        /* She faces where the camera looks and the gun takes its elevation, so the shot lines up
-           with the view. Converge: the camera sits a shoulder to the side, so its centre ray (the
-           crosshair) runs beside her gun line (device: "slightly off to the right"); aim from her
-           chest at what the crosshair is on -- the first wall down that ray, else CONVERGE ahead.
-           Clear the game's auto-aim lock every frame, as its own "aim at nothing" does. */
+        /* She faces where the camera looks and the gun takes the camera's elevation, 1:1.
+           Converge sideways only: the camera sits a shoulder to the side, so its centre ray (the
+           crosshair) runs beside her gun line (device: "slightly off to the right"); turn her
+           from her chest toward the WALL the crosshair is on (else CONVERGE ahead, never nearer
+           than CONVERGE_MIN). Not up/down, and not on floors: aiming at the floor point the
+           crosshair was on pointed the gun at the ground and made it jump past the horizon
+           (device, 2026-10-20). Clear the game's auto-aim lock every frame, as its own "aim at
+           nothing" does. */
         float dd[3], far[3], ap[3], chest[3], n, t, face, elev, step;
         int i;
         for (i = 0; i < 3; i++) dd[i] = look[i] - eye[i];
@@ -344,14 +359,15 @@ void mod_frame(u32 caller) {
             dd[i] /= n;
             far[i] = eye[i] + dd[i] * CONVERGE;
         }
-        t = coll_ready() ? coll_first_hit(eye, far) : -1.0f;
+        t = coll_ready() ? coll_first_hit_in(eye, far, 1) : -1.0f;
         if (t < 0.0f) t = 1.0f;
+        if (t < CONVERGE_MIN / CONVERGE) t = CONVERGE_MIN / CONVERGE;
         for (i = 0; i < 3; i++) ap[i] = eye[i] + dd[i] * CONVERGE * t;
         chest[0] = ms->player[0];
         chest[1] = ms->player[1] + r_th;
         chest[2] = ms->player[2];
         face = atan2f_(ap[0] - chest[0], ap[2] - chest[2]);
-        elev = atan2f_(ap[1] - chest[1], sqrtf_((ap[0] - chest[0]) * (ap[0] - chest[0]) + (ap[2] - chest[2]) * (ap[2] - chest[2])));
+        elev = -st.pitch;                    /* the camera's look elevation */
         if (!st.aim_face_set) {
             st.aim_face = heading_of(p);
             st.aim_face_set = 1;

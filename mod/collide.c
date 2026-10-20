@@ -68,13 +68,17 @@ static float cell_hit(u32 list, const float *a, const float *d, float best) {
 }
 
 float coll_first_hit(const float *a, const float *b) {
+    return coll_first_hit_in(a, b, 3);
+}
+
+float coll_first_hit_in(const float *a, const float *b, int mask) {
     float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, best = -1.0f;
     int g;
     for (g = 0; g < 2; g++) {
         const Grid *G = grid(g);
         u32 last = 0xFFFFFFFFu;
         int n, i;
-        if (!G) continue;
+        if (!G || !(mask & (1 << g))) continue;
         /* the cells the segment crosses, sampled every 0.4 cells as the game does */
         n = (int)(sqrtf_((d[0] / (float)G->cw) * (d[0] / (float)G->cw) + (d[2] / (float)G->cd) * (d[2] / (float)G->cd))
                   * 2.5f) + 1;

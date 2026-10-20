@@ -705,16 +705,19 @@ def cmd_run(a):
             if free_aiming:
                 # She faces where the camera looks and the gun takes its elevation, so the shot
                 # lines up with the view (0x10000 per turn). The hook applies these every frame.
-                # Converge: the camera sits a shoulder to the side, so its centre ray (the crosshair)
-                # runs parallel to her gun line and the shots landed beside it (device: "slightly
-                # off to the right"). Find what the crosshair is on -- the first wall down that ray,
-                # else --converge ahead -- and point her and the gun from her chest at that point.
+                # Converge sideways: the camera sits a shoulder to the side, so its centre ray (the
+                # crosshair) runs parallel to her gun line and the shots landed beside it (device:
+                # "slightly off to the right"). Turn her from her chest toward the WALL the
+                # crosshair is on (else --converge ahead, never nearer than 300). The gun takes the
+                # camera's elevation 1:1: converging up/down on the floor point pointed it at the
+                # ground and made it jump past the horizon (device, standalone patch, 2026-10-20).
                 d = [look[i] - eye[i] for i in range(3)]
                 n = math.sqrt(sum(c * c for c in d)) or 1.0
                 d = [c / n for c in d]
                 far = tuple(eye[i] + d[i] * a.converge for i in range(3))
-                hit = room.first_hit(eye, far) if (room and room.grids) else None
-                aim_pt = tuple(eye[i] + d[i] * a.converge * (hit if hit is not None else 1.0) for i in range(3))
+                hit = room.first_hit(eye, far, grids=(0,)) if (room and room.grids) else None
+                frac = max(hit if hit is not None else 1.0, 300.0 / max(a.converge, 300.0))
+                aim_pt = tuple(eye[i] + d[i] * a.converge * frac for i in range(3))
                 chest = (p[0], p[1] + rig.target_height, p[2])
                 face = math.atan2(aim_pt[0] - chest[0], aim_pt[2] - chest[2]) - math.radians(a.yaw_offset)
                 # Turn her to it at --aim-turn instead of in one frame (device: aiming with the camera
@@ -724,7 +727,7 @@ def cmd_run(a):
                 step = math.radians(a.aim_turn) * dt if a.aim_turn > 0 else math.pi
                 aim_face += max(-step, min(step, (face - aim_face + math.pi) % (2 * math.pi) - math.pi))
                 face = aim_face
-                elev = math.atan2(aim_pt[1] - chest[1], math.hypot(aim_pt[0] - chest[0], aim_pt[2] - chest[2]))
+                elev = -pitch                         # the camera's look elevation
                 lim = round(a.aim_max / 360 * 65536)
                 writes.append((block + B_AIM_HEADING,
                                [round(face / (2 * math.pi) * 65536) & 0xFFFF,

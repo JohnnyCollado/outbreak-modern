@@ -10,7 +10,7 @@
 #define MOD_STATE   0x000A8000u
 #define MOD_STATUS  0x000AFF00u
 #define MOD_MAGIC   0x434D4F31u     /* "1OMC" */
-#define MOD_VERSION 4
+#define MOD_VERSION 5
 
 typedef struct {
     u32 magic;          /* MOD_MAGIC once our code has run since the region was last cleared */
@@ -33,6 +33,8 @@ typedef struct {
     u32 free_aim;       /* 1 while the elevation is ours (servo off) */
     u32 servo;          /* the servo's address | 1 while it is switched off (0: not found yet) */
     f32 elev;           /* the gun's elevation we set, radians */
+    /* 0x64: milestone 4, device fixes */
+    f32 game_fov;       /* the current shot's own FOV (degrees); ours is held at mod.c FOV */
 } ModStatus;
 
 #endif
