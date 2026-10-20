@@ -61,6 +61,28 @@ PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
 PLAYER_ACT = 0x08  # act[0]: the current action; 2 = aiming (game/charmove.c func_0061CE50)
 ACT_AIM = 2
 RIG = ("distance", "height", "target_height", "shoulder", "lookahead")
+PLAYER_TARGET = 0x24  # (players) the aim's target: set by func_0062D6A0 when aiming (charmove.c)
+# Pools from the decomp, to say what a target is. type byte at +0x02: 0 player, 1 NPC, 2 enemy
+# (from submain/ingame.c's draw-by-type switch and charsync.c; to be confirmed by `run`'s report).
+POOLS = ((0x00476DD0, 4, 0x10E0, "player"), (0x003E8230, 10, 0x1170, "NPC pool"),
+         (0x003FFCA0, 64, 0xD90, "thing pool"))
+TYPE_NAMES = {0: "player", 1: "NPC", 2: "enemy"}
+
+
+def describe_target(pine, ptr):
+    """What the aim target pointer refers to, for the log. Read-only."""
+    if ptr == 0:
+        return "nothing"
+    if not 0 < ptr < 0x02000000:
+        return f"0x{ptr:08X} (not an EE RAM address)"
+    where = "unknown pool"
+    for base, n, size, name in POOLS:
+        if base <= ptr < base + n * size:
+            where = f"{name} slot {(ptr - base) // size}" + ("" if (ptr - base) % size == 0 else " (mid-object?)")
+            break
+    hdr = pine.read_block(ptr, 4)
+    return (f"0x{ptr:08X}: type {hdr[2]} ({TYPE_NAMES.get(hdr[2], '?')}), kind 0x{hdr[3]:02X}, "
+            f"active {hdr[0]}, in {where}")
 STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "f1hook-state.json")
 
 
@@ -356,6 +378,7 @@ def cmd_run(a):
     pull = 1.0                                             # fraction of the wanted distance in use
     aim = 0.0                                              # 0 = hip rig, 1 = aim rig (blended)
     pending, streak = (idx, player), 0
+    last_target = None
     was_aiming = False
     cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
     t0, shown = time.perf_counter(), None
@@ -407,6 +430,10 @@ def cmd_run(a):
             elif was_aiming and not aiming:
                 print("  aim released", flush=True)
             was_aiming = aiming
+            target = struct.unpack_from("<I", pl, PLAYER_TARGET)[0] if aiming else None
+            if target != last_target and aiming:
+                print(f"  aim target: {describe_target(pine, target)}", flush=True)
+            last_target = target
             if not aiming:
                 # Follow her facing. NOT while aiming: the game's auto-target snaps her toward the
                 # nearest character, and the camera must not be dragged along with it.
