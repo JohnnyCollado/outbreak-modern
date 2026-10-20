@@ -51,6 +51,9 @@ def test_encodings():
         (mips.swc1(2, 24, "t2"), "swc1 $f2, 24($10)"),
         (mips.add_s(2, 0, 1), "add.s $f2, $f0, $f1"),
         (mips.lbu("t3", 0, "t0"), "lbu $11, 0($8)"),
+        (mips.lh("t4", 52, "t0"), "lh $12, 52($8)"),
+        (mips.sh("t4", 146, "t3"), "sh $12, 146($11)"),
+        (mips.sb("t4", 3292, "t3"), "sb $12, 3292($11)"),
     ]
     for word, want in cases:
         got = llvm_disasm(word)
@@ -87,6 +90,16 @@ def run_cave(code, base, mem, prologue):
             reg[rt] = mem.get((reg[rs] + simm) & 0xFFFFFFFF, 0)
         elif op == 0x2B:
             mem[(reg[rs] + simm) & 0xFFFFFFFF] = reg[rt]
+        elif op in (0x21, 0x29, 0x28):                  # lh / sh / sb on a word-keyed memory
+            a = (reg[rs] + simm) & 0xFFFFFFFF
+            word, sh_ = a & ~3, 8 * (a & 3)
+            cur = mem.get(word, 0)
+            if op == 0x21:
+                v = (cur >> sh_) & 0xFFFF
+                reg[rt] = (v - 0x10000 if v & 0x8000 else v) & 0xFFFFFFFF
+            else:
+                m = 0xFFFF if op == 0x29 else 0xFF
+                mem[word] = (cur & ~(m << sh_)) | ((reg[rt] & m) << sh_)
         elif op == 0x31:
             freg[rt] = f32(mem.get((reg[rs] + simm) & 0xFFFFFFFF, 0))
         elif op == 0x39:
@@ -122,10 +135,13 @@ def test_cave():
     player = 0x00476DD0
     code = C.build_cave(block, orig1, orig2)
     ours = [f2u(v) for v in (10.0, 20.0, 30.0, 1.5, 2.5, 3.5)]
-    for flags in range(8):
+    for flags in range(16):
         for has_player in (True, False):
             mem = {block + C.B_FLAGS: flags, block + C.B_COUNT: 41, block + C.B_FOV: 0xAAAAAAAA,
-                   block + C.B_PLAYER: player if has_player else 0}
+                   block + C.B_PLAYER: player if has_player else 0,
+                   block + C.B_AIM_HEADING: (0xF000 << 16) | 0x1234,       # heading 0x1234, elev -0x1000
+                   player + C.P_TARGET: 0x004017C0, player + 0xCDC: 0x11223305,
+                   player + 0x90: 0x7777AAAA, player + 0xBC8: 0x55550000}
             for i, v in enumerate((100.0, 200.0, 300.0)):
                 mem[player + C.PLAYER_POS + 4 * i] = f2u(v)
             for i, v in enumerate(ours):
@@ -146,8 +162,17 @@ def test_cave():
             expect([w for w in trace if w in (orig1, orig2)] == [orig1, orig2] and trace[-4:-2] == [orig1, orig2],
                    f"{tag}: original prologue replayed once, in order, right before the jump back")
             expect(exit_to == C.HOOK + 8, f"{tag}: returns to hook+8")
+            aim_on = bool(flags & C.F_AIM) and has_player
+            expect((mem[player + C.P_TARGET] == 0) == aim_on, f"{tag}: lock-on cleared only with bit 3")
+            expect(mem[player + 0xCDC] == (0x112233FF if aim_on else 0x11223305),
+                   f"{tag}: target index byte set to 0xFF only with bit 3, neighbours untouched")
+            expect(mem[player + 0x90] == (0x1234AAAA if aim_on else 0x7777AAAA),
+                   f"{tag}: heading (+0x92, s16) written only with bit 3, +0x90 untouched")
+            expect(mem[player + 0xBC8] == (0x5555F000 if aim_on else 0x55550000),
+                   f"{tag}: elevation (+0xBC8, s16) written only with bit 3, +0xBCA untouched")
             touched = {a for a in mem if not (block <= a < block + C.BLOCK_SIZE)} - {
-                player + C.PLAYER_POS + 4 * i for i in range(3)}
+                player + C.PLAYER_POS + 4 * i for i in range(3)} - {
+                player + C.P_TARGET, player + 0xCDC, player + 0x90, player + 0xBC8}
             allowed = {C.CAMERA + 0x18 + 4 * i for i in range(6)} | {C.CAMERA + 0x60}
             expect(touched <= allowed, f"{tag}: writes only the block and camera pos/target/fov")
     tw = C.trampoline(block)

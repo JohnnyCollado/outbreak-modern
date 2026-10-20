@@ -40,6 +40,21 @@ def sw(rt, off, base):
     return _i(0x2B, base, rt, off)
 
 
+def lh(rt, off, base):
+    assert -0x8000 <= off < 0x8000
+    return _i(0x21, base, rt, off)
+
+
+def sh(rt, off, base):
+    assert -0x8000 <= off < 0x8000
+    return _i(0x29, base, rt, off)
+
+
+def sb(rt, off, base):
+    assert -0x8000 <= off < 0x8000
+    return _i(0x28, base, rt, off)
+
+
 def lbu(rt, off, base):
     assert -0x8000 <= off < 0x8000
     return _i(0x24, base, rt, off)

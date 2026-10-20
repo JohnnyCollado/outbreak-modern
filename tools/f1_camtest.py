@@ -53,11 +53,17 @@ MAGIC = 0x434D424F  # "OBMC"
 # Block layout (data first, code at +0x40)
 B_FLAGS, B_POS, B_TARGET, B_FOV, B_COUNT, B_ORIG1, B_ORIG2, B_MAGIC, B_PLAYER, B_CODE = (
     0x00, 0x04, 0x10, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x40)
+B_AIM_HEADING, B_AIM_ELEV = 0x34, 0x36        # s16 each, used with F_AIM
 BLOCK_SIZE = 0x200
 # flags: bit 0 override pos/target, bit 1 override fov, bit 2 pos/target are OFFSETS from the
 # player at B_PLAYER (the cave adds that frame's player position, so the camera moves with her
 # every frame however late the PC's update is)
-F_POS, F_FOV, F_RELATIVE = 1, 2, 4
+# bit 3: free aim. Each frame, for the player at B_PLAYER: clear the auto-aim lock (+0x24 = 0,
+# +0xCDC = 0xFF, as the game's own "aim at nothing" does), set heading +0x92 and gun elevation
+# +0xBC8 from the block. Done here, right after the game's logic each frame, so the game never
+# gets a whole tick to re-lock or turn her (from the PC it would be a race).
+F_POS, F_FOV, F_RELATIVE, F_AIM = 1, 2, 4, 8
+P_TARGET, P_TARGET_IDX, P_HEADING, P_ELEV = 0x24, 0xCDC, 0x92, 0xBC8
 PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
 PLAYER_ACT = 0x08  # act[0]: the current action; 2 = aiming (game/charmove.c func_0061CE50)
 ACT_AIM = 2
@@ -90,7 +96,7 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 def build_cave(block, orig1, orig2, hook=HOOK, camera=CAMERA):
     """The cave's machine code, to be written at block + B_CODE. Returns a list of u32.
 
-    Registers: t0-t3 and $f0-$f2 only. All are caller-saved, and the hooked function takes no
+    Registers: t0-t4 and $f0-$f2 only. All are caller-saved, and the hooked function takes no
     arguments, so nothing live is clobbered at its entry.
     """
     code, fixups, labels = [], [], {}
@@ -112,19 +118,28 @@ def build_cave(block, orig1, orig2, hook=HOOK, camera=CAMERA):
     emit(mips.lw("t1", B_COUNT, "t0"), mips.addiu("t1", "t1", 1), mips.sw("t1", B_COUNT, "t0"))
     emit(mips.lw("t1", B_FLAGS, "t0"), mips.lui("t2", ch), mips.addiu("t2", "t2", cl))  # t2 = camera
     emit(mips.andi("t3", "t1", F_POS))
-    branch("t3", "zero", "fov")
+    branch("t3", "zero", "aim")
     emit(mips.andi("t3", "t1", F_RELATIVE))
     branch("t3", "zero", "absolute")
     emit(mips.lw("t3", B_PLAYER, "t0"))
-    branch("t3", "zero", "fov")                                                # no player: leave the game's
+    branch("t3", "zero", "aim")                                                # no player: leave the game's
     for i in range(3):                                                         # camera = player + offsets
         emit(mips.lwc1(0, PLAYER_POS + 4 * i, "t3"),
              mips.lwc1(1, B_POS + 4 * i, "t0"), mips.add_s(2, 0, 1), mips.swc1(2, 0x18 + 4 * i, "t2"),
              mips.lwc1(1, B_TARGET + 4 * i, "t0"), mips.add_s(2, 0, 1), mips.swc1(2, 0x24 + 4 * i, "t2"))
-    branch("zero", "zero", "fov")                                              # always
+    branch("zero", "zero", "aim")                                              # always
     label("absolute")
     for i in range(6):                                                         # pos[3] + target[3]
         emit(mips.lw("t3", B_POS + 4 * i, "t0"), mips.sw("t3", 0x18 + 4 * i, "t2"))
+    label("aim")
+    emit(mips.andi("t3", "t1", F_AIM))
+    branch("t3", "zero", "fov")
+    emit(mips.lw("t3", B_PLAYER, "t0"))
+    branch("t3", "zero", "fov")
+    emit(mips.sw("zero", P_TARGET, "t3"),                                      # no lock-on target
+         mips.addiu("t4", "zero", 0xFF), mips.sb("t4", P_TARGET_IDX, "t3"),
+         mips.lh("t4", B_AIM_HEADING, "t0"), mips.sh("t4", P_HEADING, "t3"),
+         mips.lh("t4", B_AIM_ELEV, "t0"), mips.sh("t4", P_ELEV, "t3"))
     label("fov")
     emit(mips.andi("t3", "t1", F_FOV))
     branch("t3", "zero", "replay")
@@ -407,6 +422,7 @@ def cmd_run(a):
     yaw_off, pitch, last = 0.0, math.radians(a.pitch), time.perf_counter()
     smooth_heading = None
     flags = F_POS | F_RELATIVE | (F_FOV if a.fov else 0)
+    free_aiming = False
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -474,19 +490,24 @@ def cmd_run(a):
                 print("  aiming", flush=True)
             elif was_aiming and not aiming:
                 print("  aim released", flush=True)
+                if free_aiming:
+                    smooth_heading, yaw_off = smooth_heading + yaw_off, 0.0   # keep the view where it is
             was_aiming = aiming
+            free_aiming = aiming and servo is not None and servo.orig is not None
             target = struct.unpack_from("<I", pl, PLAYER_TARGET)[0] if aiming else None
             if target != last_target and aiming:
                 print(f"  aim target: {describe_target(pine, target)}", flush=True)
-                if target:
+                if target and not free_aiming:
                     yaw_off = 0.0                         # a new lock: swing round behind her
             last_target = target
             # Follow her facing. With a lock-on the game turns her to the target (even one behind
             # her), so follow that too, but slower (--aim-follow), so hopping between nearby
             # targets is a pan, not a jerk (device reports: instant = jumpy, frozen = left behind).
-            tau = a.aim_follow if (aiming and target) else a.follow
-            k = 1 - math.exp(-dt / tau) if tau > 0 else 1
-            smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
+            # With free aim the CAMERA drives her facing (the hook writes it), so don't follow it back.
+            if not free_aiming:
+                tau = a.aim_follow if (aiming and target) else a.follow
+                k = 1 - math.exp(-dt / tau) if tau > 0 else 1
+                smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
             sx, sy = stick(pad[6]), stick(pad[7])
             # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
             yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
@@ -519,15 +540,17 @@ def cmd_run(a):
             # update only delays rotation, never makes the camera lag behind her movement.
             rel = [eye[i] - p[i] for i in range(3)] + [look[i] - p[i] for i in range(3)]
             writes = [(block + B_POS, [*map(f2u, rel), f2u(a.fov or 0.0)]),
-                      (block + B_PLAYER, [player]),
-                      (block + B_FLAGS, [flags])]                   # flags last
-            if aiming and servo and servo.orig is not None:
-                # Gun elevation = where the camera actually LOOKS (eye -> look-at), so the shot
-                # lines up with the view, not with the camera's orbit angle. 0x10000 per turn.
+                      (block + B_PLAYER, [player])]
+            if free_aiming:
+                # She faces where the camera looks and the gun takes its elevation, so the shot
+                # lines up with the view (0x10000 per turn). The hook applies these every frame.
+                face = smooth_heading + yaw_off           # the heading field; the camera adds --yaw-offset
                 elev = math.atan2(look[1] - eye[1], math.hypot(look[0] - eye[0], look[2] - eye[2]))
                 lim = round(a.aim_max / 360 * 65536)
-                writes.append((player + f1_freeaim.AIM_ELEV,
-                               [max(-lim, min(lim, round(elev / (2 * math.pi) * 65536)))], 2))
+                writes.append((block + B_AIM_HEADING,
+                               [round(face / (2 * math.pi) * 65536) & 0xFFFF,
+                                max(-lim, min(lim, round(elev / (2 * math.pi) * 65536))) & 0xFFFF], 2))
+            writes.append((block + B_FLAGS, [flags | (F_AIM if free_aiming else 0)]))   # flags last
             pine.write_multi(writes)
             loops += 1
             if count0 is None:
