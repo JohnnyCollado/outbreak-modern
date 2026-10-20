@@ -38,6 +38,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import f1_buttons  # noqa: E402
 import f1_collide  # noqa: E402
 import f1_freeaim  # noqa: E402
 import f1_hookcheck  # noqa: E402
@@ -437,6 +438,10 @@ def cmd_run(a):
     aim = 0.0                                              # 0 = hip rig, 1 = aim rig (blended)
     pending, streak = (idx, player), 0
     last_target = None
+    buttons = None
+    if a.modern_buttons:
+        buttons = f1_buttons.ButtonMap(pine)
+        print(buttons.apply())
     servo = None
     if a.free_aim:
         servo = f1_freeaim.Servo(pine)
@@ -447,7 +452,8 @@ def cmd_run(a):
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
     print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
           f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
-          f"invert-x {a.invert_x}, collide {a.collide}, free-aim {a.free_aim}, fov {a.fov or 'game'}\n"
+          f"invert-x {a.invert_x}, collide {a.collide}, free-aim {a.free_aim}, modern-buttons {a.modern_buttons}, "
+          f"fov {a.fov or 'game'}\n"
           f"aim rig: distance {a.aim_distance:g}, height {a.aim_height:g}, shoulder {a.aim_shoulder:g}, "
           f"lookahead {a.aim_lookahead:g}, blend {a.aim_blend:g}s, follow {a.aim_follow:g}s")
     if cycle:
@@ -478,6 +484,8 @@ def cmd_run(a):
                     print(f"  now following player #{idx}", flush=True)
                 if room:
                     room.refresh()                        # new room -> new triangles
+                if buttons and buttons.ensure():
+                    print("  modern buttons re-applied (the game reset its button map)", flush=True)
                 if servo and servo.ensure():
                     print(f"  free aim: GAME.BIN reloaded, servo switched off again at 0x{servo.addr:08X}", flush=True)
                 elif servo and servo.addr is None:
@@ -596,7 +604,8 @@ def cmd_run(a):
                 clean.close()
         except (OSError, pine_diag.PineError) as e:
             print(f"\n!! clean-up could not reach PINE ({e}). Our camera"
-                  + (" and the free-aim patch" if servo and servo.orig else "") + " may still be active.\n"
+                  + (", the free-aim patch" if servo and servo.orig else "")
+                  + (", the modern buttons" if buttons and buttons.orig else "") + " may still be active.\n"
                   "!! Run `python tools\\f1_camtest.py uninstall` (and run `run` once more and Ctrl+C), "
                   "or simply load your save state.")
             return 1
@@ -646,6 +655,8 @@ def main(argv=None):
     r.add_argument("--aim-blend", type=float, default=0.12, help="seconds to move into/out of the aim rig")
     r.add_argument("--aim-follow", type=float, default=0.3,
                    help="seconds the camera takes to swing round to a locked-on target")
+    r.add_argument("--classic-buttons", dest="modern_buttons", action="store_false",
+                   help="keep the game's buttons (default: L2 aims, R2 fires while the camera runs)")
     r.add_argument("--free-aim", action="store_true",
                    help="switch off the game's 3-position aim servo; the gun follows where the camera looks")
     r.add_argument("--aim-max", type=float, default=45, help="free aim limit up/down, degrees (game: 45)")
