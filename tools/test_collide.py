@@ -107,13 +107,25 @@ def main():
                               yaw_offset=0, wall_margin=20)
     p = (1000.0, 0.0, 1000.0)
     eye, _ = C.ots_camera(p, math.pi / 2, 0, 0, a)            # faces +X: camera at x = 780, past the wall
-    pivot = (p[0], p[1] + a.target_height, p[2])
-    t = room.first_hit(pivot, eye)
-    pull = max(0.0, t - a.wall_margin / math.dist(pivot, eye))
+    pivot, pull = C.collide_pull(room, p, eye, math.pi / 2, a, a.wall_margin)
     pulled = tuple(pivot[i] + (eye[i] - pivot[i]) * pull for i in range(3))
     expect(eye[0] < 800 < pulled[0], f"eye moved from x = {eye[0]:.0f} to the room side, x = {pulled[0]:.0f}")
     expect(abs(pulled[0] - 820) < 1, "and stops wall_margin (20) in front of the wall")
 
+    a.shoulder = 50                                          # squeezed: ends at her shoulder, not her middle
+    eye, _ = C.ots_camera(p, math.pi / 2, 0, 0, a)
+    pivot, pull = C.collide_pull(room, p, eye, math.pi / 2, a, a.wall_margin)
+    pulled = tuple(pivot[i] + (eye[i] - pivot[i]) * pull for i in range(3))
+    expect(abs(abs(pulled[2] - p[2]) - 50) < 1, f"pulled-in eye keeps the 50 shoulder offset (z off by {pulled[2] - p[2]:.1f})")
+
+    side_wall = bytearray(32 << 20)                          # a wall 30 to her right: shoulder point shrinks
+    build_room(side_wall, wall_x=1030.0)
+    near = K.RoomCollision(FakePine(side_wall))
+    near.refresh()
+    yaw = 0.0                                               # faces +Z, so "right" is +X
+    eye, _ = C.ots_camera(p, yaw, 0, 0, a)
+    pivot, _ = C.collide_pull(near, p, eye, yaw, a, a.wall_margin)
+    expect(abs(pivot[0] - 1010) < 1, f"shoulder point stops wall_margin short of a wall beside her (x = {pivot[0]:.1f})")
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
 

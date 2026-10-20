@@ -23,3 +23,4 @@ Results land in `results/`.
 - `tools/f1_collide.py`: read-only access to the room's collision triangles (decomp layout), used to
   keep the camera inside the room; `python tools/f1_camtest.py walls` checks it on your disc
 - `tools/test_collide.py`: geometry and synthetic-room tests for the camera collision
+- `tools/f1_aimscan.py`: read-only guided capture to find where the aim elevation (up/level/down) is stored

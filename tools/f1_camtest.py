@@ -373,6 +373,25 @@ def ots_camera(p, heading, yaw_off, pitch, a):
     return eye, look
 
 
+def collide_pull(room, p, eye, yaw, rig, margin):
+    """(pivot, fraction of pivot->eye to use) keeping the eye `margin` inside the walls.
+
+    The pivot is her SHOULDER point, not her middle, so a squeeze ends in an over-the-shoulder
+    view instead of inside her back (device report). The shoulder point is itself first kept out
+    of a wall right beside her, then the eye is traced from it.
+    """
+    rx, rz = math.cos(yaw), -math.sin(yaw)              # same "right" as ots_camera
+    centre = (p[0], p[1] + rig.target_height, p[2])
+    side = (centre[0] + rx * rig.shoulder, centre[1], centre[2] + rz * rig.shoulder)
+    ts = room.first_hit(centre, side) if rig.shoulder else None
+    if ts is not None:
+        keep = max(0.0, ts - margin / max(abs(rig.shoulder), 1e-6))
+        side = tuple(centre[i] + (side[i] - centre[i]) * keep for i in range(3))
+    span = math.dist(side, eye)
+    t = room.first_hit(side, eye)
+    return side, (1.0 if t is None else max(0.0, t - margin / max(span, 1e-6)))
+
+
 def cmd_run(a):
     pine, _ = connect()
     block, _ = find_block(pine)
@@ -478,10 +497,8 @@ def cmd_run(a):
             if room and room.grids:
                 # Keep the eye inside the room: trace from her (at look height) to the eye, and stop
                 # `wall_margin` short of the first triangle. Snap in, ease back out.
-                pivot = (p[0], p[1] + rig.target_height, p[2])
-                span = math.dist(pivot, eye)
-                t = room.first_hit(pivot, eye)
-                want = 1.0 if t is None else max(0.0, t - a.wall_margin / max(span, 1e-6))
+                yaw = smooth_heading + yaw_off + math.radians(a.yaw_offset)
+                pivot, want = collide_pull(room, p, eye, yaw, rig, a.wall_margin)
                 pull = want if want < pull else pull + (want - pull) * (1 - math.exp(-dt / 0.3))
                 eye = tuple(pivot[i] + (eye[i] - pivot[i]) * pull for i in range(3))
             # Offsets from the player: the hook adds HER position for the frame it draws, so a late
