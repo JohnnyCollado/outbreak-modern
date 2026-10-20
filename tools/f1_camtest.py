@@ -58,6 +58,9 @@ BLOCK_SIZE = 0x200
 # every frame however late the PC's update is)
 F_POS, F_FOV, F_RELATIVE = 1, 2, 4
 PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
+PLAYER_ACT = 0x08  # act[0]: the current action; 2 = aiming (game/charmove.c func_0061CE50)
+ACT_AIM = 2
+RIG = ("distance", "height", "target_height", "shoulder", "lookahead")
 STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "f1hook-state.json")
 
 
@@ -351,12 +354,16 @@ def cmd_run(a):
     if room and not room.refresh():
         print("  (no collision grid yet: camera collision off until one appears)")
     pull = 1.0                                             # fraction of the wanted distance in use
+    aim = 0.0                                              # 0 = hip rig, 1 = aim rig (blended)
+    was_aiming = False
     cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
     t0, shown = time.perf_counter(), None
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
     print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
           f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
-          f"invert-x {a.invert_x}, collide {a.collide}, fov {a.fov or 'game'}")
+          f"invert-x {a.invert_x}, collide {a.collide}, fov {a.fov or 'game'}\n"
+          f"aim rig: distance {a.aim_distance:g}, height {a.aim_height:g}, shoulder {a.aim_shoulder:g}, "
+          f"lookahead {a.aim_lookahead:g}, blend {a.aim_blend:g}s")
     if cycle:
         print("CALIBRATE: the camera visits 4 angles around her, 4 s each, twice. Stand still (stick and\n"
               "D-pad untouched). Note the yaw-offset whose view shows HER BACK.")
@@ -394,11 +401,23 @@ def cmd_run(a):
                         pitch + sy * math.radians(a.orbit_speed * 0.6) * dt * (-1 if a.invert_y else 1)))
             if sx == 0 and a.recenter > 0:
                 yaw_off *= math.exp(-dt / a.recenter)
-            eye, look = ots_camera(p, smooth_heading, yaw_off, pitch, a)
+            aiming = pl[PLAYER_ACT] == ACT_AIM
+            if aiming and not was_aiming:
+                yaw_off = 0.0                             # aim where she faces
+                print("  aiming", flush=True)
+            elif was_aiming and not aiming:
+                print("  aim released", flush=True)
+            was_aiming = aiming
+            k_aim = 1 - math.exp(-dt / a.aim_blend) if a.aim_blend > 0 else 1
+            aim += ((1.0 if aiming else 0.0) - aim) * k_aim
+            rig = type(a)(**vars(a))                      # hip rig blended toward the aim rig
+            for f in RIG:
+                setattr(rig, f, getattr(a, f) + (getattr(a, "aim_" + f) - getattr(a, f)) * aim)
+            eye, look = ots_camera(p, smooth_heading, yaw_off, pitch, rig)
             if room and room.grids:
                 # Keep the eye inside the room: trace from her (at look height) to the eye, and stop
                 # `wall_margin` short of the first triangle. Snap in, ease back out.
-                pivot = (p[0], p[1] + a.target_height, p[2])
+                pivot = (p[0], p[1] + rig.target_height, p[2])
                 span = math.dist(pivot, eye)
                 t = room.first_hit(pivot, eye)
                 want = 1.0 if t is None else max(0.0, t - a.wall_margin / max(span, 1e-6))
@@ -465,6 +484,12 @@ def main(argv=None):
     r.add_argument("--yaw-offset", type=float, default=0,
                    help="degrees between the heading field and where she faces (device-confirmed: 0)")
     r.add_argument("--hz", type=float, default=60)
+    r.add_argument("--aim-distance", type=float, default=120)
+    r.add_argument("--aim-height", type=float, default=160)
+    r.add_argument("--aim-target-height", type=float, default=150)
+    r.add_argument("--aim-shoulder", type=float, default=50)
+    r.add_argument("--aim-lookahead", type=float, default=400)
+    r.add_argument("--aim-blend", type=float, default=0.12, help="seconds to move into/out of the aim rig")
     r.add_argument("--no-collide", dest="collide", action="store_false", help="let the camera pass through walls")
     r.add_argument("--wall-margin", type=float, default=20, help="units kept between the camera and a wall")
     for action in r._actions[1:]:   # calibrate takes the same camera options
