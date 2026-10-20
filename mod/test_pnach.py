@@ -20,11 +20,18 @@ def expect(cond, what):
         FAILS.append(what)
 
 
-def run(text, ram):
-    """One frame of patch=1 lines. Returns how many words changed."""
-    skip, changed = 0, 0
+MAIN = "Modern Camera (standalone)"
+
+
+def run(text, ram, groups=(MAIN,)):
+    """One frame of patch=1 lines in the switched-on `groups`. Returns how many words changed.
+    (ARMSX2 applies only the groups named in the game's enabled list, each with a fresh skip.)"""
+    skip, changed, group = 0, 0, None
     for line in text.splitlines():
-        if not line.startswith("patch=1,EE,"):
+        if line.startswith("[") and line.rstrip().endswith("]"):
+            group, skip = line.strip()[1:-1], 0
+            continue
+        if not line.startswith("patch=1,EE,") or group not in groups:
             continue
         _, _, addr, kind, data = line.split(",")
         assert kind == "extended"
@@ -69,6 +76,10 @@ def main():
     struct.pack_into("<I", ram, SITES[1], 0x0C001234)                   # something else there
     run(text, ram)
     expect(struct.unpack_from("<I", ram, SITES[1])[0] == 0x0C001234, "a call site holding anything else is left alone")
+    # the Debug group: off by default; on, it writes DEBUG_ON to MOD_CONFIG (only with the overlay)
+    expect(struct.unpack_from("<I", ram, build.MOD_CONFIG)[0] == 0, "Debug off (default): no debug marker written")
+    run(text, ram, groups=(MAIN, "Debug"))
+    expect(struct.unpack_from("<I", ram, build.MOD_CONFIG)[0] == build.DEBUG_ON, "Debug switched on: the marker written")
     S = lambda funct: 0x46000000 | (0x10 << 21) | (2 << 16) | (4 << 11) | (6 << 6) | funct   # fmt S
     fixed, notes = build.ee_fixups([S(0x0D), S(0x35), S(0x3E), S(0x02)], build.MOD_BASE)
     expect(fixed == [S(0x24), S(0x34), S(0x36), S(0x02)] and len(notes) == 3,

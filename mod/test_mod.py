@@ -416,8 +416,17 @@ def milestone4(uc):
     expect(abs(left - math.degrees(math.atan2(25, hd))) < 0.3 and abs(up - math.degrees(math.atan2(30, hd))) < 0.5,
            f"...vs aiming from her chest: {left:.1f} deg left, {up:.1f} deg up at {hd:.0f} out "
            f"(a 25 right / 30 down offset; the device trims: 2.1-2.5 left, 3.0 up at ~550-580)")
-    # trim: R3 + D-pad up 3 times, left once -> up +0.3, right -0.1; applied, shown
+    # trim, Debug off (the default): R3 + D-pad does nothing
     uc.mem_write(0x002F7450 + 31 * 0x8C, b"\0" * 0x8C)                          # (an earlier test gave line 31 to "the game")
+    for b in (0x0400, 0x1400, 0x0400, 0x8400, 0x0000):
+        t += 1 / 60
+        frame(uc, t, (b, 128, 128, 128, 128))
+    up, right = struct.unpack("<2f", uc.mem_read(0x000AFF6C, 8))
+    gun_off = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
+    expect((up, right) == (0.0, 0.0) and abs(gun_off - want_elev) < 0.1 and struct.unpack("<I", uc.mem_read(0x000AFF7C, 4))[0] == 0,
+           f"Debug off: R3 + D-pad trims nothing (gun {gun_off:.2f})")
+    uc.mem_write(0x000AFEF0, struct.pack("<I", 0x47424431))                    # the Debug group on
+    # trim: R3 + D-pad up 3 times, left once -> up +0.3, right -0.1; applied, shown
     for b in (0x0400, 0x1400, 0x0400, 0x1400, 0x0400, 0x1400, 0x0400, 0x8400, 0x0000):
         t += 1 / 60
         frame(uc, t, (b, 128, 128, 128, 128))
@@ -432,6 +441,11 @@ def milestone4(uc):
            f"R3 + D-pad: aim trim up {up:+.1f} right {right:+.1f}, shown ({line!r})")
     expect(abs(gun2 - (want_elev + 0.3)) < 0.02 and abs(((h3 - (want_face + 0.1)) + 180) % 360 - 180) < 0.02,
            f"...applied: gun {gun2:.2f} (was {want_elev:.2f}), heading {h3:.2f} (was {want_face:.2f}; left = +yaw)")
+    uc.mem_write(0x000AFEF0, struct.pack("<I", 0))                             # Debug off again
+    t += 1 / 60
+    frame(uc, t)
+    gun3 = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
+    expect(abs(gun3 - want_elev) < 0.1, f"...and Debug off: the trim isn't applied ({gun3:.2f})")
     uc.mem_write(thing + 0x544, struct.pack("<h", 0))                          # dead
     t += 1 / 60
     frame(uc, t)
@@ -574,7 +588,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 9 and st[2] == 1 and st[7] == 1, "status: magic, version 9, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 10 and st[2] == 1 and st[7] == 1, "status: magic, version 10, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):

@@ -71,6 +71,7 @@ def main():
         converge = struct.unpack("<f", pine.read_block(STATUS + 0x68, 4))[0] if b[1] >= 6 else None
         trim = struct.unpack("<2f", pine.read_block(STATUS + 0x6C, 8)) if b[1] >= 8 else None
         m5 = struct.unpack("<2I", pine.read_block(STATUS + 0x74, 8)) if b[1] >= 9 else None
+        debug = struct.unpack("<I", pine.read_block(STATUS + 0x7C, 4))[0] if b[1] >= 10 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -105,6 +106,8 @@ def main():
         print("  buttons: " + ("modern layout (L2 aim, R2 fire, R1 run, cross: kick / menu back)" if m5[0] else
                                "the game's own (no controller yet, or its preset didn't look like a button map)")
               + ("; quick turn running" if m5[1] else ""))
+    if debug is not None:
+        print("  Debug: " + ("ON (R3 + D-pad trims the aim)" if debug else "off (switch the patch's Debug group on for the tuning tools)"))
     if game_fov is not None:
         print(f"  FOV: {game_fov:g} deg (the game's, left alone)")
     if aim is not None:

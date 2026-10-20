@@ -29,6 +29,7 @@ BUILD = os.path.join(HERE, "build")
 SITES = os.path.join(HERE, "sites.json")
 PNACH = os.path.join(ROOT, "patches", "SLPM-65428_32088394.pnach")
 MOD_BASE = 0x000A0000
+MOD_CONFIG, DEBUG_ON = 0x000AFEF0, 0x47424431      # mod.h
 HOOKED = 0x00345740
 ANCHOR_CALL = 0x0018F0E0
 CFLAGS = ["--target=mipsel-unknown-none-elf", "-march=mips2", "-mabi=32", "-mhard-float", "-msingle-float",
@@ -158,6 +159,15 @@ def pnach(words, entry, anchor, sites, chunk=250):
     out.append("// then, still only while SUBMAIN is loaded, each call site's jal 0x%08X -> jal mod_entry "
                "(0x%08X): %s" % (HOOKED, entry, " ".join(f"0x{s:08X}" for s in sites)))
     out += cond32(anchor, jal(ANCHOR_CALL), len(hooks)) + hooks
+    # A second group, off unless switched on in the Patch Manager (tools/push_patch.py enables only
+    # the first): it writes DEBUG_ON to MOD_CONFIG, and the mod turns its tuning tools on.
+    out += ["",
+            "[Debug]",
+            "author=outbreak-modern-camera-mod-android",
+            "description=Tuning tools for Modern Camera (needs it on too): while aiming, R3 + D-pad trims "
+            "the aim up/down/left/right in 0.1 deg steps, shown on screen. Off for normal play.",
+            ""]
+    out += cond32(anchor, jal(ANCHOR_CALL), 1) + [write32(MOD_CONFIG, DEBUG_ON)]
     return "\n".join(out) + "\n"
 
 

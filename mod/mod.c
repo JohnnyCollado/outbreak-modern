@@ -92,10 +92,9 @@ static const char banner_on[] = "Modern Camera: on   (SELECT + R3: off)";
 static const char banner_off[] = "Modern Camera: off  (SELECT + R3: on)";
 static const char cross_glyph[] = "\x81\x7b";     /* the full-width plus (Shift-JIS): square on screen */
 
-/* Aim trim: after the sqrt fix the gun follows the camera (device log, 2026-10-20), but shots
-   still land "slightly off": the game fires from the gun in her hand, not from the middle of her
-   chest, and by how much isn't known. While aiming, R3 + D-pad turns the aim up/down/left/right
-   in TRIM_STEP steps, shown on screen, to be reported and built in. */
+/* Aim trim (Debug only: the patch file's Debug group): while aiming, R3 + D-pad turns the aim
+   up/down/left/right in TRIM_STEP steps, shown on screen. It found the gun-hand offset built in
+   below (GUN_RIGHT/GUN_DOWN); kept for tuning. Without Debug no trim is read or applied. */
 #define TRIM_STEP       DEG(0.1f)       /* device: 0.5 was too coarse for the last nudge */
 #define TRIM_MAX        200             /* steps: +-20 deg */
 
@@ -216,7 +215,7 @@ void mod_frame(u32 caller) {
     u8 act;
     float dt, sx, sy, yaw, ce, se, fx, fz, rx, rz, pivot[3], d[3], eye[3], look[3];
     float r_dist, r_height, r_th, r_shoulder, r_look;
-    int aiming, free_aim;
+    int aiming, free_aim, debug;
 
     if (ms->magic != MOD_MAGIC || ms->version != MOD_VERSION) {
         u32 starts = ms->magic == MOD_MAGIC ? ms->starts : 0;
@@ -229,6 +228,8 @@ void mod_frame(u32 caller) {
     }
     ms->frames++;
     ms->caller = caller;
+    debug = MEM(u32, MOD_CONFIG) == DEBUG_ON;
+    ms->debug = debug;
     if (!(n > 0 && n <= 4 && idx < n)) {
         return;
     }
@@ -493,7 +494,7 @@ void mod_frame(u32 caller) {
             face = view + clampf(wrap_pi(face - view), -CONVERGE_YAW, CONVERGE_YAW);
             elev = tilt + clampf(elev - tilt, -CONVERGE_ELEV, CONVERGE_ELEV);
         }
-        if ((buttons & BTN_R3) && (pressed & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT))) {
+        if (debug && (buttons & BTN_R3) && (pressed & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT))) {
             if ((pressed & BTN_UP) && st.trim_up < TRIM_MAX) st.trim_up++;
             if ((pressed & BTN_DOWN) && st.trim_up > -TRIM_MAX) st.trim_up--;
             if ((pressed & BTN_RIGHT) && st.trim_right < TRIM_MAX) st.trim_right++;
@@ -501,8 +502,10 @@ void mod_frame(u32 caller) {
             show_trim(st.trim_up, st.trim_right);
         }
         /* right is -yaw here (the right stick turns the view right by decreasing yaw) */
-        face -= (float)st.trim_right * TRIM_STEP;
-        elev += (float)st.trim_up * TRIM_STEP;
+        if (debug) {
+            face -= (float)st.trim_right * TRIM_STEP;
+            elev += (float)st.trim_up * TRIM_STEP;
+        }
         ms->trim_up = (float)st.trim_up * 0.1f;
         ms->trim_right = (float)st.trim_right * 0.1f;
         if (!st.aim_face_set) {

@@ -10,7 +10,11 @@
 #define MOD_STATE   0x000A8000u
 #define MOD_STATUS  0x000AFF00u
 #define MOD_MAGIC   0x434D4F31u     /* "1OMC" */
-#define MOD_VERSION 9
+/* The patch file's "Debug" group (off unless switched on in ARMSX2's Patch Manager) writes
+   DEBUG_ON here every frame; the mod reads it. A specific value, so stray memory can't turn it on. */
+#define MOD_CONFIG  0x000AFEF0u
+#define DEBUG_ON    0x47424431u     /* "1DBG" */
+#define MOD_VERSION 10
 
 typedef struct {
     u32 magic;          /* MOD_MAGIC once our code has run since the region was last cleared */
@@ -41,6 +45,7 @@ typedef struct {
     /* 0x74: milestone 5 */
     u32 buttons_on;     /* 1 while the modern layout is in the game's button map */
     u32 quick_turn;     /* 1 stick / 2 D-pad while a quick turn runs */
+    u32 debug;          /* 1 while the patch file's Debug group is on */
 } ModStatus;
 
 #endif

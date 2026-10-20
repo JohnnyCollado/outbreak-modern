@@ -29,7 +29,12 @@ loads by itself: `patches/SLPM-65428_32088394.pnach`.
 
 Don't run the PC mod (`f1_camtest.py run`) at the same time: both would drive the camera.
 Everything the PC mod did is in the patch now; the PC tools are for development and diagnostics.
-While aiming, R3 + D-pad trims the aim in 0.1 deg steps (shown on screen) if it ever needs it.
+
+**Debug** (a second entry in the patch file, off by default; `tools/push_patch.py` only enables
+the main one): switch it on in ARMSX2's Patch Manager (and restart the game) for the tuning tools.
+Today that is the aim trim: while aiming, R3 + D-pad turns the aim up/down/left/right in 0.1 deg
+steps, shown on screen (and in `f1_patchcheck.py` / `f1_aimlog.py`). With Debug off, R3 + D-pad does
+nothing and no trim is applied.
 
 ## Milestones
 
