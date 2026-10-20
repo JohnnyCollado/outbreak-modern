@@ -95,6 +95,66 @@ Everything in `docs/android-port-map.md` becomes one shared library, written onc
 The logic runs at its original 30 Hz tick everywhere (online play needs it), driven by the
 platform's display timing; rendering may later interpolate on top (the decomp's plan too).
 
+## Decision 6: visuals and performance (4K texture pack, high frame rates)
+
+The rule that keeps cross-play safe: **everything here is presentation only**. Nothing changes
+the 30 Hz logic, the game's memory or what it sends; online, peers can't tell (decomp
+NETWORK.md: PC-only options must be off online or purely visual -- these are purely visual).
+
+### Texture replacement, at the source
+
+An emulator has to guess which texture a draw uses from GS memory (PCSX2 hashes the texture's
+pixels and palette as they sit in GS memory, plus its format and size, `GSTextureReplacements.cpp`
+`TextureName`; that's why its packs need texture caching and miss textures that move). The native
+port knows exactly: every texture goes through Capcom's texture manager (decomp `fltex.c`, TIM2
+pictures). So:
+
+- When `fltex.c` loads a TIM2 picture, compute its **PCSX2 key** (pixel hash, palette hash,
+  format, size) from the TIM2 data, once, and look the replacement up then. **PCSX2-format packs
+  then drop in unchanged** -- the same pack works in ARMSX2/PCSX2 and in both native ports. (The
+  hash has to match PCSX2's exactly; verified per texture by dumping keys from both.)
+- The replacement is bound wherever the game draws that texture; the renderer samples it with
+  normalised coordinates, so a 4K texture fits where a 256x256 one was.
+- Palette animations (one picture, changing CLUT) are keyed by palette hash, as in PCSX2.
+
+### 4K textures without running out of memory
+
+A 4096x4096 RGBA texture is 64 MiB uncompressed (85 MiB with mipmaps). A room uses dozens. So:
+
+- **Convert the pack once, offline** (a tool, at install time) to GPU-compressed formats with full
+  mip chains: **BC7** for Windows, **ASTC** for Android (Adreno supports ASTC; mobile GPUs don't do
+  BC). ASTC 6x6 is ~3.6 bits/pixel: a 4K texture becomes ~7 MiB (~10 MiB with mips).
+- **Load per room, ahead of time.** The game loads textures per room (`charload.c`, `enemyload.c`,
+  room archives); start reading the room's replacements when the game starts loading the room, on a
+  background thread, and fall back to the original texture until a replacement is ready -- never
+  stall a frame.
+- **A memory budget** with least-recently-used eviction (PCSX2 has one too); on the Odin a
+  smaller mip can be dropped first.
+- **Bindless textures** (Vulkan descriptor indexing) so switching textures costs nothing per draw.
+
+### Frame rate and resolution
+
+- **Interpolated rendering**: the logic stays at 30 Hz; the renderer draws at the display's rate
+  (60/120 Hz) by interpolating object transforms and the camera between the last two logic ticks.
+  The camera mod's own camera can run at the display rate directly (it's ours).
+- **Internal resolution scale** (1x-4x of 640x448) and widescreen (the projection is ours to set),
+  MSAA/FXAA; aspect handled in the projection, not by stretching.
+- **VU1 programs on the GPU**: once each microprogram is a vertex shader, the CPU no longer
+  transforms vertices; skinned meshes (`0x221135`) become GPU skinning.
+- **Batching**: the game's many small draws collapse into few Vulkan draws per pipeline state
+  (pipelines created ahead and cached to disk, so no stutter on first use).
+- **CPU**: the recompiled code is native; the hot paths (VU0 maths, 128-bit copies) get SSE/NEON
+  helpers.
+- **Android specifics**: frame pacing through the swapchain (Android Frame Pacing / Swappy) and
+  performance hints (ADPF), so the Odin holds clocks without overheating; lower-resolution mips
+  when the device runs hot.
+
+### Order
+
+Texture replacement comes with the first textured renderer (milestone 3); compression and per-room
+streaming with the 3D milestone (4); interpolation, resolution scale and widescreen after single
+player works (6), each switchable and off by default online if in doubt.
+
 ## Repository layout (a new repository)
 
 ```
