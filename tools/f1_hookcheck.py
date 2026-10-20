@@ -19,7 +19,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phase2_check  # noqa: E402
-import pine_diag  # noqa: E402
 
 FUNCS = {
     0x00345740: {"name": "camera -> renderer", "size": 0x130,
@@ -47,15 +46,7 @@ def check(words, calls):
 
 
 def main(argv=None):
-    ok, msg = phase2_check.ensure_forward(phase2_check.shutil.which("adb") or "adb", 28011)
-    print(("adb: " if ok else "adb problem: ") + msg)
-    try:
-        pine = pine_diag.Pine("127.0.0.1", 28011, 5.0)
-        info = pine_diag.identify(pine)
-    except (OSError, pine_diag.PineError) as e:
-        print(f"PINE not reachable: {e}")
-        return 1
-    print(f"{info['id']} CRC {info['crc']} disc version {info['game_version']}")
+    pine, info = phase2_check.connect_game()
     all_ok = True
     try:
         for addr, f in FUNCS.items():

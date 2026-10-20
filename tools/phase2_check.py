@@ -134,6 +134,28 @@ def ensure_forward(adb_exe, port, serial=None):
     return True, f"forwarded tcp:{port} to {serial}"
 
 
+def connect_game(port=28011, quiet=False):
+    """Forward the port, connect to PINE and identify the game. Returns (pine, info).
+    Exits with a plain explanation instead of a traceback when PINE can't be used."""
+    ok, msg = ensure_forward(shutil.which("adb") or "adb", port)
+    if not quiet:
+        print(("adb: " if ok else "adb problem: ") + msg)
+    try:
+        pine = pine_diag.Pine("127.0.0.1", port, 5.0)
+        info = pine_diag.identify(pine)
+    except TimeoutError:
+        raise SystemExit(
+            "PINE accepted the connection but didn't answer. PINE serves ONE client at a time:\n"
+            "  - is `f1_camtest.py run` (or another tool, or the camera mod) still running? Ctrl+C it first;\n"
+            "  - is ARMSX2 on screen with the Odin awake? Android freezes it in the background;\n"
+            "  - still stuck: toggle Enable PINE off/on in ARMSX2. `phase2_check.py` gives a full diagnosis.")
+    except (OSError, pine_diag.PineError) as e:
+        raise SystemExit(f"PINE not reachable ({e}). Is Enable PINE on in ARMSX2 (Settings > Advanced)?")
+    if not quiet:
+        print(f"{info['id']} CRC {info['crc']} disc version {info['game_version']}")
+    return pine, info
+
+
 TCP_STATES = {"01": "ESTABLISHED", "06": "TIME_WAIT", "08": "CLOSE_WAIT", "0A": "LISTEN"}
 
 

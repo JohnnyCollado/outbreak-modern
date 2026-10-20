@@ -166,11 +166,7 @@ def trampoline(block):
 
 
 def connect():
-    ok, msg = phase2_check.ensure_forward(phase2_check.shutil.which("adb") or "adb", 28011)
-    print(("adb: " if ok else "adb problem: ") + msg)
-    pine = pine_diag.Pine("127.0.0.1", 28011, 5.0)
-    info = pine_diag.identify(pine)
-    print(f"{info['id']} CRC {info['crc']} disc version {info['game_version']}")
+    pine, info = phase2_check.connect_game()
     return pine, info
 
 
