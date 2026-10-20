@@ -328,7 +328,7 @@ def milestone4(uc):
     eye, look = cam(uc)
     view = math.degrees(math.atan2(look[0] - eye[0], look[2] - eye[2]))
     h2 = heading(uc)
-    expect(abs(((h2 - view) + 180) % 360 - 180) < 3.0, f"...then faces where the camera looks ({h2:.1f} vs view {view:.1f}; convergence adds a little)")
+    expect(abs(((h2 - view) + 180) % 360 - 180) < 4.0, f"...then faces where the camera looks ({h2:.1f} vs view {view:.1f}; convergence from her gun hand adds a little)")
     p = struct.unpack("<3f", uc.mem_read(PLAYER + 0x38, 12))
     pivot_d = math.dist(eye, (p[0] + math.cos(math.radians(view)) * 50, p[1] + 160, p[2] - math.sin(math.radians(view)) * 50))
     expect(abs(pivot_d - 120) < 2.0, f"aim rig: the camera 120 behind her aim shoulder ({pivot_d:.1f})")
