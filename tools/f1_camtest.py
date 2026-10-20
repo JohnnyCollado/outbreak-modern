@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""First WRITE test for File #1: a render-time camera override hook, driven from the PC.
+"""DEVELOPMENT TOOL. The mod driven from the PC over PINE: a render-time camera override hook in
+File #1, with the camera, aiming and controls computed here. The standalone patch (mod/,
+patches/*.pnach) replaced it for play; this stays for trying ideas live without a rebuild.
+Don't run it while the patch is enabled: both would drive the camera.
 
   freemem    READ-ONLY. Samples EE RAM 0x80000-0x100000 while you play and lists runs that
              stayed zero the whole time: candidate homes for the hook. Writes nothing.

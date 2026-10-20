@@ -155,7 +155,8 @@ def main(argv=None):
         if a.enable:
             enable(adb, r)
     print("\nNow start File #1 from ARMSX2's game list (a fresh boot, not a resume). At boot ARMSX2\n"
-          "should say \"1 game patches are active\"; in the room, \"Modern Camera patch: running\".")
+          "should say \"1 game patches are active\"; in the room, \"Modern Camera: on\" shows for a moment.\n"
+          "Debug stays off unless you switch it on in ARMSX2's Patch Manager.")
     return 0
 
 

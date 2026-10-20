@@ -1,65 +1,78 @@
 # Outbreak Modern Camera on ARMSX2 (Android)
 
-Research project: run a modern over-the-shoulder camera for Resident Evil Outbreak
-File #1 / #2 (JP) on ARMSX2 on the AYN Odin 3 Max.
+A modern over-the-shoulder camera, free aim and modern controls for Resident Evil Outbreak
+File #1 (SLPM-65428, the English fan patch included), running on ARMSX2 on Android (built and
+tested on an AYN Odin 3). It is a patch file ARMSX2 loads by itself: no PC and no helper app
+while you play. It holds only our own code and addresses; no game code is stored here.
 
-- `docs/phase1-feasibility-report.md`: Phase 1 research and Phase 2 test plan
-- `tools/phase2_check.py`: automated Phase 2 checks (PC → ADB → ARMSX2 PINE). Needs Python 3.8+ and adb
-- `tools/pine_diag.py`: read-only PINE diagnostic client (`--bench N`, `--read ADDR`)
+## Install
 
-Quick start (PC with the Odin attached over USB, PINE enabled, game booted, save state made):
+1. Get `patches/SLPM-65428_32088394.pnach` onto the device and enable it:
+   - from a PC with adb: `python tools/push_patch.py` (with the game closed). It finds ARMSX2's
+     data folder, copies the patch into its `patches` folder and enables it for the game;
+   - or by hand: put the file in ARMSX2's `patches` folder (or Patch Manager > Import) and enable
+     **"Modern Camera (standalone)"** in Patch Manager.
+2. Start File #1 from the game list (a fresh boot: patches are read when the game boots). In the
+   first room, "Modern Camera: on" shows at the top left for a moment.
 
-    python tools/phase2_check.py
+## Playing
 
-Results land in `results/`.
-- `tools/f1_live.py`: live read-only view of File #1's camera, players and pad, using the CC0
-  decomp's addresses (to verify them on your disc)
-- `tools/f1_analyze.py <log>`: angle conventions, input encoding and camera behaviour from an `f1_live` log
-- `tools/f1_hookcheck.py`: read-only check that the camera hook functions sit at the decomp's addresses in the running build
-- `tools/f1_camtest.py`: first write test. Installs a render-time camera override hook in File #1
-  and drives an over-the-shoulder camera from the PC (`freemem` → `install` → `run` → `uninstall`; `reinstall` swaps in a newer hook).
-  **Make a save state first**; loading it undoes everything.
-- `tools/test_mips.py`: checks the hook's machine code against LLVM and simulates it
-- `tools/f1_collide.py`: read-only access to the room's collision triangles (decomp layout), used to
-  keep the camera inside the room; `python tools/f1_camtest.py walls` checks it on your disc
-- `tools/test_collide.py`: geometry and synthetic-room tests for the camera collision
-- `tools/f1_aimscan.py`: read-only guided capture to find where the aim elevation (up/level/down) is stored
-- `tools/f1_freeaim.py`: finds the game's 3-position aim servo by its contents and switches it off so
-  `f1_camtest.py run --free-aim` can set the gun's elevation from where the camera looks
-- `tools/test_freeaim.py`: finder/patch tests on a synthetic stand-in (no game code)
-- `tools/f1_controls.py`: read-only `buttons` (the game's button map) and `watch` (buttons pressed →
-  game action bits), groundwork for the modern button layout
-- `tools/f1_buttons.py`: modern button layout while `run` is active (L2 aims, R2 fires, R1 runs; ✕ kicks while aiming and backs out of menus; ↓ + ✕ quick-turns and swings the camera behind her; callouts only with L1 + right stick; restored on exit)
-- `tools/test_buttons.py`: layout tests on a map laid out like the device's
-- `tools/f1_crosshair.py`: `check` (read-only) and `show`; `run` draws a "+" while aiming using the
-  game's own on-screen text lines (data only, removed on exit)
+| | |
+|---|---|
+| Right stick | turn the camera (it never moves by itself) |
+| Left stick | walk, relative to the camera |
+| L2 | aim (the gun follows the camera, up and down too) |
+| R2 (or ○) | fire / interact |
+| R1 | run |
+| ✕ | Kevin's kick while aiming, back in menus; doesn't run |
+| ↓ + ✕ | quick turn: she turns about, the camera swings in behind her |
+| L1 + right stick | callouts |
+| SELECT + R3 (hold 1 s) | switch the whole mod off and on (off gives the game's camera, aim and buttons back) |
 
-## Standalone patch (no PC, no helper app)
+The camera stays inside walls and under stairs; aiming shows a "＋" and the shot converges, from
+her gun hand, on the enemy or wall under it.
 
-`mod/` is the mod as our own code running inside the game, built into a patch file ARMSX2 loads
-by itself (`patches/SLPM-65428_32088394.pnach`). See `mod/README.md`. Milestone 1 (the pipeline)
-is in; the camera and controls move over milestone by milestone.
+**Debug** is a second entry in the patch file, off by default: switch it on in Patch Manager (and
+restart the game) for tuning tools. Today that is the aim trim: while aiming, R3 + D-pad turns the
+aim in 0.1 deg steps, shown on screen.
 
-- `tools/f1_patchprobe.py`: read-only, finds the call-site addresses the patch file needs
-- `tools/f1_patchcheck.py`: read-only, shows whether the in-game code is running
-- `tools/f1_aimlog.py`: read-only, logs aiming frame by frame (what the patch writes, what the game
-  has); L3 marks a moment, and from a PC each mark saves a screenshot of the device
+## If something is off
 
-## Running on the device, no PC (Termux)
+From a PC with adb (or Termux on the device), with the game running:
 
-The tools only need Python's standard library, and ARMSX2's PINE listens on the device's own
-loopback, so they run on the Android device itself. On Android they skip adb and connect
-directly.
+- `python tools/f1_patchcheck.py`: is the patch applied and running; camera, walls, aim, buttons, Debug
+- `python tools/f1_aimlog.py 90`: logs aiming frame by frame; click L3 at a bad moment to mark it
+  (and, from a PC, save a screenshot of the device). Send the log and the screenshots.
 
-1. Install Termux from F-Droid (the Play Store build is outdated), then:
-   `pkg install python git` and `termux-wake-lock` (keeps Android from pausing Termux).
-2. Get this repository onto the device: `git clone` it (a private repository needs a GitHub
-   token), or copy the folder over once and reach it after `termux-setup-storage`.
-3. In ARMSX2: PINE on (Settings > Advanced), load File #1 and get into gameplay.
-4. Android freezes ARMSX2 whenever it is off screen, so start each tool with a delay and switch
-   back to ARMSX2 straight away:
-   `sleep 5 && python tools/f1_camtest.py install --at 0x00084000` (once per game boot), then
-   `sleep 5 && python tools/f1_camtest.py run --free-aim`.
-5. To stop, hold **SELECT + R3** for a second in the game: the servo, buttons and crosshair are
-   restored while ARMSX2 is still on screen. (Ctrl+C in Termux works too, but by then ARMSX2 is
-   off screen and frozen, so the cleanup may not get through.)
+## How it is built
+
+`mod/` (see `mod/README.md`): C and a small assembly entry for the PS2's EE, built with clang and
+ld.lld into `patches/SLPM-65428_32088394.pnach` by `python mod/build.py`, with emulator tests
+(`mod/test_mod.py`, needs `pip install unicorn`) and a patch-file interpreter test
+(`mod/test_pnach.py`). The game's addresses come from the CC0
+[Outbreak decomp](https://github.com/GalaxyNostalgia/Outbreak-decomp) and were checked on the
+device with the tools below. `docs/phase1-feasibility-report.md` is the full research and
+device-test record.
+
+## Development tools (PC → adb → ARMSX2 PINE)
+
+PINE on in ARMSX2 (Settings > Advanced). Python 3.8+ (standard library only) and adb. Results land
+in `results/`.
+
+- Connection: `tools/phase2_check.py` (checks and diagnosis), `tools/pine_diag.py` (PINE client).
+- Reading the game: `tools/f1_live.py` (camera, players, pad), `tools/f1_analyze.py` (its logs),
+  `tools/f1_hookcheck.py` (hook functions where the decomp says), `tools/f1_controls.py` (button
+  map, buttons -> game bits), `tools/f1_aimscan.py` (finding the aim fields).
+- For the patch: `tools/f1_patchprobe.py` (the call-site addresses `mod/sites.json` holds),
+  `tools/push_patch.py`, `tools/f1_patchcheck.py`, `tools/f1_aimlog.py`.
+- The PC-driven version of the mod, for trying ideas live without a rebuild:
+  `tools/f1_camtest.py` (`freemem` → `install` → `run` → `uninstall`; **make a save state first**)
+  with `f1_collide.py`, `f1_freeaim.py`, `f1_buttons.py`, `f1_crosshair.py`, `mips.py`. Don't run it
+  while the patch is enabled. Its tests: `tools/test_*.py`.
+
+### The PC-driven version on the device (Termux)
+
+The tools only need the standard library and PINE listens on the device's own loopback, so they
+also run in Termux (from F-Droid: `pkg install python git`, `termux-wake-lock`). Android freezes
+ARMSX2 when it is off screen, so start a tool with a delay and switch back at once, e.g.
+`sleep 5 && python tools/f1_camtest.py run --free-aim`; hold SELECT + R3 for a second to stop it.
