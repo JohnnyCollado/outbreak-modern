@@ -484,6 +484,7 @@ Why this beats both earlier options:
 | Aim state and target | Aiming = action 2 (`+0x08`) confirmed: `aiming`/`aim released` track the weapon. Auto-aim targets (`+0x24`) seen: all `type 2 (enemy), kind 0x01` in the thing pool (`0x3FFCA0`), slots 47/49; no partner targeted in that run. Type map 0 player / 1 NPC / 2 enemy: the enemy case is confirmed, player/NPC not yet observed | Partially verified (device) |
 | Hook call rate | ~60/s normally; ~120/s in some states (called twice per frame, harmless); 0/s for a few seconds during loads | Confirmed (device) |
 | Ceilings in the collision data | Stairs probe: straight down hits the step (grid 1), straight up and every behind-and-rising ray are clear, so **ceilings are not in the collision data**. Grid 0 = walls (kind 0), grid 1 = floors/stairs (kinds 0 and 1). The camera is held within `--headroom` (190) of the floor under it instead | Confirmed (device) |
+| Aim elevation field (`f1_aimscan`) | Player `+0x0BC8` (s16, 0x10000 per turn): level 0, up +8191 (≈ +45°), down −8191. Also `+0x0BCC` (0x100 / 0 / 0x200: pose index?) and `+0x0CD2` (0x20 / 0 / 0x70). `+0xF80`–`0xF8C` matched too but are the controls (`Ctrl` at `+0xF78`: 0x400 aim, 1 up, 2 down). How it changes over time and which code writes it are not yet known | Confirmed (device, scan) |
 | Free EE RAM | `0x00084000`–`0x00100000` stayed zero for 720 passes (60 s of play) | Confirmed (measured) |
 
 This agrees with the f1_live travel fit (`atan2(dx, dz)`), so the "back-step" reinterpretation
