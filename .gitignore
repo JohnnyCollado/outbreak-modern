@@ -2,3 +2,10 @@
 results/*-state.json
 __pycache__/
 mod/build/
+
+# Texture packs: gigabytes, and someone else's work -- keep them out of git (docs/native-port-design.md)
+textures/
+replacements/
+*.zip
+*.7z
+*.rar
