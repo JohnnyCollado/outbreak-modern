@@ -5,7 +5,8 @@ Biohazard Outbreak File #1, from the player's own disc, and that can later play 
 **with PS2, PCSX2, Windows and Android players in the same room** (cross-play).
 
 Status: proposal, for discussion. Nothing built yet. Builds on `docs/android-port-map.md` (what
-has to be implemented) and the decomp's own plan (its ROADMAP Phase 5/6).
+has to be implemented) and the decomp's own plan (its ROADMAP Phase 5/6). Per-milestone plans,
+and findings from 2026-10-20 that change parts of this design, are in `docs/milestones/`.
 
 ## The requirement that drives everything: cross-play
 
