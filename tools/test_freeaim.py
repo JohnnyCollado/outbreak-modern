@@ -8,6 +8,7 @@ for (a prologue after a `jr ra`, two 1170 step constants, a 2730 return constant
 import os
 import struct
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import f1_freeaim as F  # noqa: E402
@@ -67,7 +68,8 @@ def main():
     print("patching:")
     ram = bytearray(32 << 20)
     orig = place(ram, 0x00556800)
-    servo = F.Servo(FakePine(ram))
+    state = os.path.join(tempfile.mkdtemp(), "servo.json")
+    servo = F.Servo(FakePine(ram), state_file=state)
     msg = servo.disable()
     head = list(struct.unpack_from("<2I", ram, 0x00556800))
     expect(head == [F.JR_RA, mips.NOP], f"switched off: {msg}")
@@ -78,9 +80,25 @@ def main():
            "re-applied after a reload")
     expect("restored" in servo.restore() and list(struct.unpack_from("<2I", ram, 0x00556800)) == orig,
            "restore puts the original words back")
+    expect(not os.path.exists(state), "state file removed after a clean restore")
+
+    print("an earlier run left it off:")
+    servo.disable()                                                   # patch + state file written
+    expect(F.find_servo(lambda a, n: bytes(ram[a:a + n])) == 0x00556800, "the patched function is still found")
+    later = F.Servo(FakePine(ram), state_file=state)                  # a new run, same machine
+    msg = later.disable()
+    expect(later.active and later.orig == tuple(orig) and "on file" in msg, f"recognised as off, originals from file: {msg}")
+    expect("restored" in later.restore() and list(struct.unpack_from("<2I", ram, 0x00556800)) == orig,
+           "and restored from the file")
+    servo.disable()
+    os.remove(state)                                                  # no file this time
+    blind = F.Servo(FakePine(ram), state_file=state)
+    msg = blind.disable()
+    expect(blind.active and blind.orig is None and "NOT on file" in msg, "off without a file: still active, says so")
+    expect("save state" in blind.restore(), "restore says to load the save state instead of guessing")
     other = bytearray(32 << 20)
     o2 = place(other, 0x00556804)                                    # not 8-aligned
-    expect("refusing" in F.Servo(FakePine(other)).disable() and
+    expect("refusing" in F.Servo(FakePine(other), state_file=os.path.join(tempfile.mkdtemp(), "s.json")).disable() and
            list(struct.unpack_from("<2I", other, 0x00556804)) == o2, "refuses a non 8-aligned site, writes nothing")
 
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")

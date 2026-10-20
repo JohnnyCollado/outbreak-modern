@@ -1,0 +1,2 @@
+# machine-local state written by the tools (originals to restore), not results
+results/*-state.json

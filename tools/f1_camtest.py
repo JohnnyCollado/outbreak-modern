@@ -510,7 +510,8 @@ def cmd_run(a):
             aiming = pl[PLAYER_ACT] == ACT_AIM
             if aiming and not was_aiming:
                 smooth_heading, yaw_off = heading, 0.0    # start the aim straight behind her
-                print("  aiming", flush=True)
+                print("  aiming" + ("" if not a.free_aim else " (free aim ON)" if servo and servo.active
+                                    else " (free aim OFF: servo not switched off, see the start of the log)"), flush=True)
             elif was_aiming and not aiming:
                 print("  aim released", flush=True)
                 if free_aiming:
@@ -518,7 +519,7 @@ def cmd_run(a):
             was_aiming = aiming
             if buttons:
                 buttons.set_aiming(aiming)              # cross: kick while aiming, nothing otherwise
-            free_aiming = aiming and servo is not None and servo.orig is not None
+            free_aiming = aiming and servo is not None and servo.active
             target = struct.unpack_from("<I", pl, PLAYER_TARGET)[0] if aiming else None
             if target != last_target and aiming:
                 print(f"  aim target: {describe_target(pine, target)}", flush=True)
@@ -529,7 +530,12 @@ def cmd_run(a):
             # her), so follow that too, but slower (--aim-follow), so hopping between nearby
             # targets is a pan, not a jerk (device reports: instant = jumpy, frozen = left behind).
             # With free aim the CAMERA drives her facing (the hook writes it), so don't follow it back.
-            if not free_aiming:
+            # Walking with the left stick is camera-relative in the game (func_006307E0), so a camera
+            # that chases her facing makes a sideways push turn her forever (device: "the left
+            # stick keeps rotating"). Hold the camera while the stick is pushed; follow again
+            # once it's released (or with the D-pad, which is tank control).
+            stick_moving = bool(stick(pad[PAD_LX]) or stick(pad[PAD_LY]))
+            if not free_aiming and not (stick_moving and not aiming and not a.follow_while_moving):
                 tau = a.aim_follow if (aiming and target) else a.follow
                 k = 1 - math.exp(-dt / tau) if tau > 0 else 1
                 smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
@@ -672,6 +678,8 @@ def main(argv=None):
     r.add_argument("--orbit-speed", type=float, default=100, help="degrees/s at full right stick (device: 150 felt fast)")
     r.add_argument("--strafe-speed", type=float, default=150,
                    help="units/s at full left stick while free-aiming (about half her walk; 0 = off)")
+    r.add_argument("--follow-while-moving", action="store_true",
+                   help="let the camera chase her facing while the left stick is pushed (old behaviour)")
     r.add_argument("--recenter", type=float, default=1.0,
                    help="seconds to ease back behind once the right stick is released (0 = stay put)")
     r.add_argument("--invert-x", action="store_true", help="stick right turns the view left")
