@@ -34,6 +34,15 @@ Results land in `results/`.
 - `tools/f1_crosshair.py`: `check` (read-only) and `show`; `run` draws a "+" while aiming using the
   game's own on-screen text lines (data only, removed on exit)
 
+## Standalone patch (no PC, no helper app)
+
+`mod/` is the mod as our own code running inside the game, built into a patch file ARMSX2 loads
+by itself (`patches/SLPM-65428_32088394.pnach`). See `mod/README.md`. Milestone 1 (the pipeline)
+is in; the camera and controls move over milestone by milestone.
+
+- `tools/f1_patchprobe.py`: read-only, finds the call-site addresses the patch file needs
+- `tools/f1_patchcheck.py`: read-only, shows whether the in-game code is running
+
 ## Running on the device, no PC (Termux)
 
 The tools only need Python's standard library, and ARMSX2's PINE listens on the device's own
