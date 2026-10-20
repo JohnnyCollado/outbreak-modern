@@ -39,6 +39,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import f1_collide  # noqa: E402
+import f1_freeaim  # noqa: E402
 import f1_hookcheck  # noqa: E402
 import mips  # noqa: E402
 import phase2_check  # noqa: E402
@@ -355,7 +356,13 @@ def stick(v, dead=0.15):
 
 
 def ots_camera(p, heading, yaw_off, pitch, a):
-    """Eye and look-at behind/over the shoulder.
+    """Eye and look-at for an over-the-shoulder ORBIT camera.
+
+    The camera turns around a pivot at her shoulder (`height` up, `shoulder` to the side) and
+    looks along (yaw, elevation = -pitch): the eye sits `distance` behind the pivot on that line,
+    the look-at `lookahead` in front. So the direction the camera looks IS (yaw, -pitch), which
+    is what free aim gives the gun. (The first rig kept a fixed look-at height, so tilting moved
+    the eye but barely changed the view direction.)
 
     She faces along the heading field (player +0x92), atan2(dx, dz): on the device,
     --yaw-offset 0 shows her back and 180 her face (user, 2026-10-19).
@@ -363,13 +370,11 @@ def ots_camera(p, heading, yaw_off, pitch, a):
     yaw = heading + yaw_off + math.radians(a.yaw_offset)
     fx, fz = math.sin(yaw), math.cos(yaw)           # where the camera looks, on the floor plane
     rx, rz = fz, -fx                                # perpendicular; sign of "right" set by --shoulder
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    eye = (p[0] - fx * a.distance * cp + rx * a.shoulder,
-           p[1] + a.height + a.distance * sp,
-           p[2] - fz * a.distance * cp + rz * a.shoulder)
-    look = (p[0] + fx * a.lookahead + rx * a.shoulder,
-            p[1] + a.target_height,
-            p[2] + fz * a.lookahead + rz * a.shoulder)
+    ce, se = math.cos(-pitch), math.sin(-pitch)     # look elevation: +up
+    pivot = (p[0] + rx * a.shoulder, p[1] + a.height, p[2] + rz * a.shoulder)
+    d = (fx * ce, se, fz * ce)
+    eye = tuple(pivot[i] - d[i] * a.distance for i in range(3))
+    look = tuple(pivot[i] + d[i] * a.lookahead for i in range(3))
     return eye, look
 
 
@@ -411,13 +416,17 @@ def cmd_run(a):
     aim = 0.0                                              # 0 = hip rig, 1 = aim rig (blended)
     pending, streak = (idx, player), 0
     last_target = None
+    servo = None
+    if a.free_aim:
+        servo = f1_freeaim.Servo(pine)
+        print("free aim: " + servo.disable())
     was_aiming = False
     cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
     t0, shown = time.perf_counter(), None
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
     print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
           f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
-          f"invert-x {a.invert_x}, collide {a.collide}, fov {a.fov or 'game'}\n"
+          f"invert-x {a.invert_x}, collide {a.collide}, free-aim {a.free_aim}, fov {a.fov or 'game'}\n"
           f"aim rig: distance {a.aim_distance:g}, height {a.aim_height:g}, shoulder {a.aim_shoulder:g}, "
           f"lookahead {a.aim_lookahead:g}, blend {a.aim_blend:g}s, follow {a.aim_follow:g}s")
     if cycle:
@@ -448,6 +457,10 @@ def cmd_run(a):
                     print(f"  now following player #{idx}", flush=True)
                 if room:
                     room.refresh()                        # new room -> new triangles
+                if servo and servo.ensure():
+                    print(f"  free aim: GAME.BIN reloaded, servo switched off again at 0x{servo.addr:08X}", flush=True)
+                elif servo and servo.addr is None:
+                    print("  free aim: " + servo.disable(), flush=True)
                 t_player = now
             pl, pad, cnt = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4)])
             count = struct.unpack("<I", cnt)[0]
@@ -477,7 +490,8 @@ def cmd_run(a):
             sx, sy = stick(pad[6]), stick(pad[7])
             # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
             yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
-            pitch = max(math.radians(-30), min(math.radians(60),
+            low = -a.aim_max if (aiming and servo) else -30   # free aim may look further up
+            pitch = max(math.radians(low), min(math.radians(60),
                         pitch + sy * math.radians(a.orbit_speed * 0.6) * dt * (-1 if a.invert_y else 1)))
             if sx == 0 and a.recenter > 0 and not aiming:
                 yaw_off *= math.exp(-dt / a.recenter)
@@ -504,9 +518,17 @@ def cmd_run(a):
             # Offsets from the player: the hook adds HER position for the frame it draws, so a late
             # update only delays rotation, never makes the camera lag behind her movement.
             rel = [eye[i] - p[i] for i in range(3)] + [look[i] - p[i] for i in range(3)]
-            pine.write_multi([(block + B_POS, [*map(f2u, rel), f2u(a.fov or 0.0)]),
-                              (block + B_PLAYER, [player]),
-                              (block + B_FLAGS, [flags])])          # flags last
+            writes = [(block + B_POS, [*map(f2u, rel), f2u(a.fov or 0.0)]),
+                      (block + B_PLAYER, [player]),
+                      (block + B_FLAGS, [flags])]                   # flags last
+            if aiming and servo and servo.orig is not None:
+                # Gun elevation = where the camera actually LOOKS (eye -> look-at), so the shot
+                # lines up with the view, not with the camera's orbit angle. 0x10000 per turn.
+                elev = math.atan2(look[1] - eye[1], math.hypot(look[0] - eye[0], look[2] - eye[2]))
+                lim = round(a.aim_max / 360 * 65536)
+                writes.append((player + f1_freeaim.AIM_ELEV,
+                               [max(-lim, min(lim, round(elev / (2 * math.pi) * 65536)))], 2))
+            pine.write_multi(writes)
             loops += 1
             if count0 is None:
                 count0 = count
@@ -519,11 +541,18 @@ def cmd_run(a):
     except KeyboardInterrupt:
         pass
     finally:
+        # Ctrl+C can land between a request and its reply, leaving this connection out of step,
+        # so clean up on a FRESH one: the servo must never stay switched off by accident.
+        pine.close()
+        clean = pine_diag.Pine("127.0.0.1", 28011, 5.0)
         try:
-            pine.write_words(block + B_FLAGS, [0])
+            if servo:
+                servo.pine = clean
+                print("\nfree aim: " + servo.restore())
+            clean.write_words(block + B_FLAGS, [0])
             print("\ncamera handed back to the game (hook left installed, inert)")
         finally:
-            pine.close()
+            clean.close()
     return 0
 
 
@@ -570,6 +599,9 @@ def main(argv=None):
     r.add_argument("--aim-blend", type=float, default=0.12, help="seconds to move into/out of the aim rig")
     r.add_argument("--aim-follow", type=float, default=0.3,
                    help="seconds the camera takes to swing round to a locked-on target")
+    r.add_argument("--free-aim", action="store_true",
+                   help="switch off the game's 3-position aim servo; the gun follows where the camera looks")
+    r.add_argument("--aim-max", type=float, default=45, help="free aim limit up/down, degrees (game: 45)")
     r.add_argument("--no-collide", dest="collide", action="store_false", help="let the camera pass through walls")
     r.add_argument("--wall-margin", type=float, default=20, help="units kept between the camera and a wall")
     r.add_argument("--headroom", type=float, default=190,

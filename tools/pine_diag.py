@@ -26,6 +26,7 @@ import sys
 import time
 
 MSG_READ32 = 0x02
+MSG_WRITE16 = 0x05
 MSG_WRITE32 = 0x06
 MSG_WRITE64 = 0x07
 MSG_VERSION = 0x08
@@ -117,9 +118,15 @@ class Pine:
         return out
 
     def write_multi(self, writes):
-        """Several (addr, [u32, ...]) writes in ONE round trip, applied in the order given."""
-        body = b"".join(bytes([MSG_WRITE32]) + struct.pack("<II", addr + 4 * i, w & 0xFFFFFFFF)
-                        for addr, words in writes for i, w in enumerate(words))
+        """Several writes in ONE round trip, applied in the order given. Each is (addr, [u32, ...])
+        or (addr, [u16, ...], 2) for 16-bit fields, so a neighbouring field is never touched."""
+        body = b""
+        for item in writes:
+            addr, values = item[0], item[1]
+            width = item[2] if len(item) > 2 else 4
+            op, fmt, mask = (MSG_WRITE16, "<IH", 0xFFFF) if width == 2 else (MSG_WRITE32, "<II", 0xFFFFFFFF)
+            body += b"".join(bytes([op]) + struct.pack(fmt, addr + width * i, v & mask)
+                             for i, v in enumerate(values))
         self._batch(body, "multi-write")
 
     def write64(self, addr, value):

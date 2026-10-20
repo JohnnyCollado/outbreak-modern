@@ -24,3 +24,6 @@ Results land in `results/`.
   keep the camera inside the room; `python tools/f1_camtest.py walls` checks it on your disc
 - `tools/test_collide.py`: geometry and synthetic-room tests for the camera collision
 - `tools/f1_aimscan.py`: read-only guided capture to find where the aim elevation (up/level/down) is stored
+- `tools/f1_freeaim.py`: finds the game's 3-position aim servo by its contents and switches it off so
+  `f1_camtest.py run --free-aim` can set the gun's elevation from where the camera looks
+- `tools/test_freeaim.py`: finder/patch tests on a synthetic stand-in (no game code)
