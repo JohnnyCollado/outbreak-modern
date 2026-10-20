@@ -400,7 +400,7 @@ def milestone4(uc):
         frame(uc, t)
     conv = struct.unpack("<f", uc.mem_read(0x000AFF68, 4))[0]
     vy = math.atan2(dvec[0], dvec[2])                                        # the view's yaw
-    gun = (p[0] - math.cos(vy) * 20, p[1] + 150 - 30, p[2] + math.sin(vy) * 20)    # her right hand
+    gun = (p[0] - math.cos(vy) * 25, p[1] + 150 - 30, p[2] + math.sin(vy) * 25)    # her right hand
     want_face = math.degrees(math.atan2(hit[0] - gun[0], hit[2] - gun[2]))
     want_elev = math.degrees(math.atan2(hit[1] - gun[1], math.hypot(hit[0] - gun[0], hit[2] - gun[2])))
     chest = (p[0], p[1] + 150, p[2])
@@ -413,9 +413,9 @@ def milestone4(uc):
            f"...her heading and gun go from her gun hand through it ({h:.2f}/{want_face:.2f}, {gun_deg:.2f}/{want_elev:.2f} deg)")
     left, up = ((want_face - chest_face) + 180) % 360 - 180, want_elev - chest_elev
     hd = math.hypot(hit[0] - chest[0], hit[2] - chest[2])
-    expect(abs(left - math.degrees(math.atan2(20, hd))) < 0.3 and abs(up - math.degrees(math.atan2(30, hd))) < 0.5,
+    expect(abs(left - math.degrees(math.atan2(25, hd))) < 0.3 and abs(up - math.degrees(math.atan2(30, hd))) < 0.5,
            f"...vs aiming from her chest: {left:.1f} deg left, {up:.1f} deg up at {hd:.0f} out "
-           f"(a 20 right / 30 down offset; the device trim at ~550: 2.1 left, 3.0 up)")
+           f"(a 25 right / 30 down offset; the device trims: 2.1-2.5 left, 3.0 up at ~550-580)")
     # trim: R3 + D-pad up 3 times, left once -> up +0.3, right -0.1; applied, shown
     uc.mem_write(0x002F7450 + 31 * 0x8C, b"\0" * 0x8C)                          # (an earlier test gave line 31 to "the game")
     for b in (0x0400, 0x1400, 0x0400, 0x1400, 0x0400, 0x1400, 0x0400, 0x8400, 0x0000):

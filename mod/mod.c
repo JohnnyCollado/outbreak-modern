@@ -42,10 +42,10 @@
 #define CONVERGE        1500.0f         /* aim at the enemy or wall the crosshair is on, else this far ahead */
 #define CONVERGE_MIN    300.0f          /* ...but never nearer: something in her face mustn't yank her round */
 /* Where the shot leaves from, relative to her chest point (r_th up from her feet): the gun in
-   her right hand. Measured on the device with the aim trim (2026-10-20): at ~550 from her chest
-   the shots needed 2.1 deg left and 3.0 deg up = ~20 to her right and ~30 lower. As an offset
-   (not an angle) it holds at any distance. */
-#define GUN_RIGHT       20.0f
+   her right hand. Measured on the device with the aim trim (2026-10-20), twice: 2.1 deg left and
+   3.0 deg up at ~550 from her chest, then 2.5 left and 3.0 up at ~580 = ~25 to her right and
+   ~30 lower. As an offset (not an angle) it holds at any distance. */
+#define GUN_RIGHT       25.0f
 #define GUN_DOWN        30.0f
 #define CONVERGE_YAW    DEG(15.0f)      /* convergence may turn her at most this far from the view... */
 #define CONVERGE_ELEV   DEG(10.0f)      /* ...and tilt the gun at most this far from the camera's tilt */
