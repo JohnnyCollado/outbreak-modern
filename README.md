@@ -42,6 +42,8 @@ is in; the camera and controls move over milestone by milestone.
 
 - `tools/f1_patchprobe.py`: read-only, finds the call-site addresses the patch file needs
 - `tools/f1_patchcheck.py`: read-only, shows whether the in-game code is running
+- `tools/f1_aimlog.py`: read-only, logs aiming frame by frame (what the patch writes, what the game
+  has); L3 marks a moment, and from a PC each mark saves a screenshot of the device
 
 ## Running on the device, no PC (Termux)
 
