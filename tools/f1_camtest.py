@@ -471,7 +471,7 @@ def cmd_run(a):
     t0, shown = time.perf_counter(), None
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
     print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
-          f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
+          f"shoulder {a.shoulder:g}, camera {'chase (follow ' + format(a.follow, 'g') + 's, recenter ' + format(a.recenter, 'g') + 's)' if a.chase else 'moves only with the right stick'}, "
           f"invert-x {a.invert_x}, collide {a.collide}, free-aim {a.free_aim}, modern-buttons {a.modern_buttons}, "
           f"fov {a.fov or 'game'}\n"
           f"aim rig: distance {a.aim_distance:g}, height {a.aim_height:g}, shoulder {a.aim_shoulder:g}, "
@@ -521,7 +521,12 @@ def cmd_run(a):
                 smooth_heading = heading
             aiming = pl[PLAYER_ACT] == ACT_AIM
             if aiming and not was_aiming:
-                smooth_heading, yaw_off = heading, 0.0    # start the aim straight behind her
+                if a.free_aim and servo is not None and servo.active and not a.chase:
+                    # RE5 style: she turns to the camera (the hook writes her heading), the view
+                    # stays put. Fold the orbit into the base yaw so nothing moves.
+                    smooth_heading, yaw_off = smooth_heading + yaw_off, 0.0
+                else:
+                    smooth_heading, yaw_off = heading, 0.0    # start the aim straight behind her
                 print("  aiming" + ("" if not a.free_aim else " (free aim ON)" if servo and servo.active
                                     else " (free aim OFF: servo not switched off, see the start of the log)"), flush=True)
             elif was_aiming and not aiming:
@@ -551,7 +556,11 @@ def cmd_run(a):
             # Same signal as the facing below uses (the game's own stick reading, mag >= 0x10), or the
             # raw stick: if they ever disagreed, following while facing would feed back and spin.
             stick_moving = bool(stick(pad[PAD_LX]) or stick(pad[PAD_LY]) or mag >= 0x10)
-            if not free_aiming and not (stick_moving and not aiming and not a.follow_while_moving):
+            # Modern (default): the camera never moves by itself; only the right stick turns it.
+            # --chase: it swings in behind her (except while the left stick is pushed, which would
+            # feed back through the camera-relative walking) and lock-ons pull it round.
+            chase = a.chase and not (stick_moving and not aiming and not a.follow_while_moving)
+            if not free_aiming and (chase or (aiming and target and not a.free_aim)):
                 tau = a.aim_follow if (aiming and target) else a.follow
                 k = 1 - math.exp(-dt / tau) if tau > 0 else 1
                 smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
@@ -561,7 +570,7 @@ def cmd_run(a):
             low = -a.aim_max if (aiming and servo) else -30   # free aim may look further up
             pitch = max(math.radians(low), min(math.radians(60),
                         pitch + sy * math.radians(a.orbit_speed * 0.6) * dt * (-1 if a.invert_y else 1)))
-            if sx == 0 and a.recenter > 0 and not aiming:
+            if sx == 0 and a.recenter > 0 and not aiming and a.chase:
                 yaw_off *= math.exp(-dt / a.recenter)
             k_aim = 1 - math.exp(-dt / a.aim_blend) if a.aim_blend > 0 else 1
             aim += ((1.0 if aiming else 0.0) - aim) * k_aim
@@ -713,6 +722,8 @@ def main(argv=None):
                    help="modern walking: deg/s she turns toward the stick direction (0 = the game's own arcs)")
     r.add_argument("--strafe-speed", type=float, default=0,
                    help="units/s at full left stick while free-aiming (0 = stand still, RE5 style; ~150 = half her walk)")
+    r.add_argument("--chase", action="store_true",
+                   help="old camera: swings in behind her and drifts back after looking (default: only the right stick moves it)")
     r.add_argument("--follow-while-moving", action="store_true",
                    help="let the camera chase her facing while the left stick is pushed (old behaviour)")
     r.add_argument("--recenter", type=float, default=1.0,
