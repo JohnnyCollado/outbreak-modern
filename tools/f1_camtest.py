@@ -315,13 +315,26 @@ def cmd_walls(a):
         p = struct.unpack("<3f", pine.read_block(base + PLAYER_POS, 12))
         chest = (p[0], p[1] + a.height, p[2])
         print(f"our player #{idx} at ({p[0]:.0f}, {p[1]:.0f}, {p[2]:.0f}); ray origin {a.height:g} above the feet")
+        def probe(label, end):
+            hit = room.first_hit_tri(chest, end)
+            span = math.dist(chest, end)
+            print(f"  {label:>22}: " + (f"hit at {hit[0] * span:6.0f}  (kind {hit[1]}, grid {hit[2]})" if hit
+                                         else f"clear to {span:g}"))
+
         for deg in range(0, 360, 45):
             r = math.radians(deg)
-            end = (chest[0] + math.sin(r) * a.reach, chest[1], chest[2] + math.cos(r) * a.reach)
-            t = room.first_hit(chest, end)
-            print(f"  heading {deg:3} deg: " + (f"wall at {t * a.reach:6.0f}" if t is not None else f"clear to {a.reach:g}"))
+            probe(f"heading {deg:3} deg", (chest[0] + math.sin(r) * a.reach, chest[1], chest[2] + math.cos(r) * a.reach))
+        probe("straight up", (chest[0], chest[1] + a.reach, chest[2]))
+        probe("straight down", (chest[0], chest[1] - a.reach, chest[2]))
+        h = (struct.unpack_from("<h", pine.read_block(base + 0x90, 4), 2)[0] & 0xFFFF) * 2 * math.pi / 65536
+        for up in (20, 40, 60):                          # behind her and rising, like the camera's path
+            r = math.radians(up)
+            probe(f"behind, {up} deg up", (chest[0] - math.sin(h) * a.reach * math.cos(r), chest[1] + a.reach * math.sin(r),
+                                          chest[2] - math.cos(h) * a.reach * math.cos(r)))
         st = room.stats
         print(f"read {st['tris']} triangles in {st['cells']} cells; failed the plane check: {st['insane']}")
+        print("triangle kinds seen (grid, kind): count  " +
+              ", ".join(f"({g},{k}): {n}" for (g, k), n in sorted(room.kinds().items())))
         if st["tris"] and st["insane"] > st["tris"] // 10:
             print("!! many triangles fail the plane check: the layout is probably misread. Paste this to Claude.")
     finally:

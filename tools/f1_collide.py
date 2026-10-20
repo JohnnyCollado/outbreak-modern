@@ -149,11 +149,25 @@ class RoomCollision:
 
     def first_hit(self, a, b):
         """Smallest fraction t along a->b that hits a room triangle, or None."""
+        hit = self.first_hit_tri(a, b)
+        return hit[0] if hit else None
+
+    def first_hit_tri(self, a, b):
+        """(t, kind byte, grid) of the first triangle along a->b, or None."""
         best = None
         for g, grid in self.grids.items():
             for idx in grid.cells_along(a, b):
                 for p in self._cell(g, idx):
                     t = segment_triangle(a, b, self.tris[p][1])
-                    if t is not None and (best is None or t < best):
-                        best = t
+                    if t is not None and (best is None or t < best[0]):
+                        best = (t, self.tris[p][0] & 0xFF, g)
         return best
+
+    def kinds(self):
+        """How many distinct cached triangles there are of each kind byte, per grid."""
+        seen = {(g, p) for (g, _), ptrs in self.cell_tris.items() for p in ptrs}
+        out = {}
+        for g, p in seen:
+            k = (g, self.tris[p][0] & 0xFF)
+            out[k] = out.get(k, 0) + 1
+        return out
