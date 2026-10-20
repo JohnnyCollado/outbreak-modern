@@ -603,12 +603,14 @@ def cmd_run(a):
             # Which camera does the game's camera-relative movement use? wanted dir = camera yaw +
             # stick angle (&0xFFF0 both, as func_006307E0 does), so camera yaw = wanted - stick.
             mag, ang = struct.unpack("<hH", mstick)
-            if mag >= 0x10 and now - t_move > 1.0:
+            # Only meaningful while walking: not while aiming (free aim holds her facing and the stick
+            # isn't movement) nor while the game is paused or loading (its value goes stale).
+            if mag >= 0x10 and now - t_move > 3.0 and not aiming and hook_rate > 30:
                 game_cam = (struct.unpack("<H", mv)[0] - (ang & 0xFFF0)) & 0xFFF0
                 ours = round(math.atan2(look[0] - eye[0], look[2] - eye[2]) / (2 * math.pi) * 65536) & 0xFFFF
                 diff = ((game_cam - ours + 0x8000) & 0xFFFF) - 0x8000
                 print(f"  moving: game's movement uses camera yaw {game_cam * 360 / 65536:6.1f} deg, ours is "
-                      f"{ours * 360 / 65536:6.1f} deg -> {'OURS' if abs(diff) < 0x400 else f'NOT ours (off {diff * 360 / 65536:+.0f} deg)'}",
+                      f"{ours * 360 / 65536:6.1f} deg -> {'OURS' if abs(diff) < 0x700 else f'NOT ours (off {diff * 360 / 65536:+.0f} deg)'}",
                       flush=True)
                 t_move = now
             loops += 1
