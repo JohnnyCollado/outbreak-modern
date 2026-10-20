@@ -10,7 +10,7 @@
 #define MOD_STATE   0x000A8000u
 #define MOD_STATUS  0x000AFF00u
 #define MOD_MAGIC   0x434D4F31u     /* "1OMC" */
-#define MOD_VERSION 8
+#define MOD_VERSION 9
 
 typedef struct {
     u32 magic;          /* MOD_MAGIC once our code has run since the region was last cleared */
@@ -38,6 +38,9 @@ typedef struct {
     f32 converge;       /* free aim: distance to what the crosshair is on (enemy, wall, or 1500) */
     f32 trim_up;        /* aim trim, degrees (R3 + D-pad while aiming) */
     f32 trim_right;
+    /* 0x74: milestone 5 */
+    u32 buttons_on;     /* 1 while the modern layout is in the game's button map */
+    u32 quick_turn;     /* 1 stick / 2 D-pad while a quick turn runs */
 } ModStatus;
 
 #endif

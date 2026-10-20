@@ -70,6 +70,7 @@ def main():
         game_fov = struct.unpack("<f", pine.read_block(STATUS + 0x64, 4))[0] if b[1] >= 5 else None
         converge = struct.unpack("<f", pine.read_block(STATUS + 0x68, 4))[0] if b[1] >= 6 else None
         trim = struct.unpack("<2f", pine.read_block(STATUS + 0x6C, 8)) if b[1] >= 8 else None
+        m5 = struct.unpack("<2I", pine.read_block(STATUS + 0x74, 8)) if b[1] >= 9 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -100,6 +101,10 @@ def main():
               + (f"{v2[11]} (callouts on L1)" if v2[11] != 0xFFFF else "not found (callouts not gated)"))
     if pull is not None:
         print(f"  walls: camera at {pull * 100:.0f}% of its distance" + (" (pulled in by a wall)" if pull < 0.99 else ""))
+    if m5 is not None:
+        print("  buttons: " + ("modern layout (L2 aim, R2 fire, R1 run, cross: kick / menu back)" if m5[0] else
+                               "the game's own (no controller yet, or its preset didn't look like a button map)")
+              + ("; quick turn running" if m5[1] else ""))
     if game_fov is not None:
         print(f"  FOV: {game_fov:g} deg (the game's, left alone)")
     if aim is not None:

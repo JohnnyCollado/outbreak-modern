@@ -456,6 +456,99 @@ def milestone4(uc):
     expect(struct.unpack("<2I", uc.mem_read(SERVO, 8)) == (JR_RA, 0), "on again: switched off again (GAME.BIN 'reloaded')")
 
 
+PAD_MAP, PAD_KIND, PRESET = 0x00292C80, 0x00292D67, 0x002135A0
+# the device's map (tools/test_buttons.py DEVICE): entry i -> (mask, group)
+DEVICE = [(0x1000, 1), (0x4000, 1), (0x8000, 1), (0x2000, 1), (0x0040, 2), (0x0020, 2), (0x0002, 3), (0x0001, 3),
+          (0x0080, 2), (0x0010, 2), (0x0008, 3), (0x0004, 3), (0x0200, 0), (0x0400, 0), (0x0100, 0), (0x0800, 0)]
+
+
+def padmap(uc):
+    return [struct.unpack_from("<2I", uc.mem_read(PAD_MAP, 128), 8 * i) for i in range(16)]
+
+
+def milestone5(uc):
+    import math
+    flat_dev = [w for e in DEVICE for w in e]
+    uc.mem_write(PRESET, struct.pack("<32I", *flat_dev))
+    uc.mem_write(PAD_MAP, struct.pack("<32I", *flat_dev))
+    uc.mem_write(PAD_KIND, b"\x01")
+    uc.mem_write(PLAYER + 0x08, b"\x00")
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", 0))
+    uc.mem_write(0x000AFF04, struct.pack("<I", 0))
+    t = 400.0
+    room(uc)
+    frame(uc, t)
+    m = padmap(uc)
+    expect(m[6] == (0x0001, 3) and m[5] == (0x0022, 3) and m[10] == (0, 0) and m[7] == (0, 0),
+           f"buttons: L2 aims, R2 (and circle) fire, lock-on and L2's old action off ({m[6]}, {m[5]}, {m[10]}, {m[7]})")
+    expect(m[4] == (0x0048, 3), f"...standing: R1 or cross on entry 4 (run / menu back) {m[4]}")
+    expect(all(m[i] == DEVICE[i] for i in range(16) if i not in (4, 5, 6, 7, 10)), "...the rest untouched")
+    t += 1 / 60
+    frame(uc, t, (0x1000, 128, 128, 128, 128))                              # D-pad up: moving
+    expect(padmap(uc)[4] == (0x0008, 3), f"...moving: R1 only (cross doesn't run) {padmap(uc)[4]}")
+    uc.mem_write(PLAYER + 0x08, b"\x02")
+    t += 1 / 60
+    frame(uc, t)
+    expect(padmap(uc)[4] == (0x0040, 2), f"...aiming: cross (Kevin's kick) {padmap(uc)[4]}")
+    uc.mem_write(PLAYER + 0x08, b"\x00")
+    t += 1 / 60
+    frame(uc, t)
+    # quick turn, stick: pulled down, cross pressed
+    yaw0 = math.degrees(status(uc)[9])
+    t += 1 / 60
+    frame(uc, t, (0, 128, 128, 128, 255))                                   # stick down first
+    t += 1 / 60
+    frame(uc, t, (0x0040, 128, 128, 128, 255))                              # + cross
+    face = heading(uc)
+    want = (yaw0 + 180) % 360
+    expect(abs(((face - want) + 180) % 360 - 180) < 0.5, f"quick turn (stick): she faces the way down points ({face:.1f} vs {want:.1f})")
+    mid = None
+    for i in range(20):
+        t += 1 / 60
+        frame(uc, t, (0x0040, 128, 128, 128, 255))
+        if i == 6:
+            mid = math.degrees(status(uc)[9])
+    yaw1 = math.degrees(status(uc)[9])
+    expect(abs(((yaw1 - want) + 180) % 360 - 180) < 0.5, f"...the camera swings in behind her ({yaw0:.1f} -> {yaw1:.1f})")
+    expect(abs(((mid - yaw0) + 180) % 360 - 180) > 20 and abs(((mid - want) + 180) % 360 - 180) > 20,
+           f"...over 0.25 s, not in one jump (at ~0.12 s: {mid:.1f})")
+    expect(abs(((heading(uc) - want) + 180) % 360 - 180) < 0.5 and struct.unpack("<I", uc.mem_read(0x000AFF78, 4))[0] == 1,
+           "...her facing held while down is still pulled (stick)")
+    t += 1 / 60
+    frame(uc, t)                                                            # let go
+    expect(struct.unpack("<I", uc.mem_read(0x000AFF78, 4))[0] == 0, "...and released with the stick")
+    # quick turn, D-pad: straight about from her own facing
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", 0x2000))                  # 45 deg
+    t += 1 / 60
+    frame(uc, t, (0x4000, 128, 128, 128, 128))
+    t += 1 / 60
+    frame(uc, t, (0x4040, 128, 128, 128, 128))
+    expect(abs(((heading(uc) - 225) + 180) % 360 - 180) < 0.5, f"quick turn (D-pad): straight about from her facing (45 -> {heading(uc):.1f})")
+    for i in range(30):
+        t += 1 / 60
+        frame(uc, t)
+    # off: the game's entries back
+    for i in range(72):
+        t += 1 / 60
+        frame(uc, t, (0x0500, 128, 128, 128, 128))
+    expect(padmap(uc) == DEVICE, "SELECT + R3 off: the game's button map back")
+    t += 1 / 60
+    frame(uc, t)
+    for i in range(72):
+        t += 1 / 60
+        frame(uc, t, (0x0500, 128, 128, 128, 128))
+    t += 1 / 60
+    frame(uc, t)
+    expect(padmap(uc)[6] == (0x0001, 3), "on again: the modern layout again")
+    # a preset that doesn't look like a button map: hands off
+    uc.mem_write(PRESET, struct.pack("<I", 0x0003))                         # two bits in one mask
+    uc.mem_write(PAD_MAP, struct.pack("<32I", *flat_dev))
+    t += 1 / 60
+    frame(uc, t)
+    expect(padmap(uc) == DEVICE and struct.unpack("<I", uc.mem_read(0x000AFF74, 4))[0] == 0,
+           "a preset that isn't a button map: buttons left alone")
+
+
 def main():
     words, syms, notes = build.build()
     uc = machine(words)
@@ -481,7 +574,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 8 and st[2] == 1 and st[7] == 1, "status: magic, version 8, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 9 and st[2] == 1 and st[7] == 1, "status: magic, version 9, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):
@@ -498,6 +591,7 @@ def main():
     milestone2(uc)
     milestone3(uc)
     milestone4(uc)
+    milestone5(uc)
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
 

@@ -6,11 +6,13 @@
    Milestone 4: aiming -- a closer aim camera, the game's aim servo switched off so the gun
    follows the camera up and down, RE5-style (she turns to where the camera looks, the camera
    holds still), shots converging on the crosshair, and a "+" crosshair.
-   The button layout comes next. */
+   Milestone 5: the modern button layout (L2 aim, R2 fire, R1 run, cross: kick / menu back) and
+   the quick turn (down + cross: she turns about, the camera swings in behind her). */
 #include "mod.h"
 #include "mathf.h"
 #include "collide.h"
 #include "servo.h"
+#include "buttons.h"
 
 #define STATUS (*(volatile ModStatus *)MOD_STATUS)
 
@@ -54,6 +56,7 @@
 #define ENEMY_HIGH      190.0f          /* ...to this far above */
 #define CROSS_SLOT      30              /* the crosshair's text line (the banner uses TEXT_SLOT) */
 #define CROSS_SIZE      24
+#define QUICK_TURN      0.25f           /* seconds the camera takes to swing in behind her */
 #define COUNT_HZ        294912000.0f    /* the EE's cycle counter (COP0 Count) */
 #define COMBO_HOLD      (COUNT_HZ * 1.0f)
 
@@ -76,6 +79,10 @@ typedef struct {
     u32 aim_face_set;
     u32 cross_shown;
     s32 trim_up, trim_right;    /* aim trim, TRIM_STEP steps; kept across rooms */
+    u32 qt;             /* quick turn in progress: 1 stick, 2 D-pad */
+    u32 qt_since;       /* Count when it started */
+    f32 qt_face, qt_start, qt_turn;
+    u32 buttons_on;
     Servo servo;
 } State;
 
@@ -269,6 +276,9 @@ void mod_frame(u32 caller) {
             ms->enabled = !ms->enabled;
             if (!ms->enabled) {
                 callouts_to_game();
+                buttons_restore();
+                st.buttons_on = 0;
+                st.qt = 0;
                 servo_restore(&st.servo);
                 hide_line(CROSS_SLOT);
                 st.cross_shown = 0;
@@ -311,6 +321,39 @@ void mod_frame(u32 caller) {
     if (buttons & BTN_L1) sx = sy = 0.0f;
     /* Stick right turns the view right (that is -yaw here; +yaw felt "southpaw" on the device). */
     st.yaw = wrap_pi(st.yaw - sx * ORBIT_SPEED * dt);
+    {
+        /* Buttons, for this frame's context. Moving: the D-pad, or the left stick out of its
+           dead zone (cross mustn't run then). */
+        float lx = stick(MEM(u8, PAD + 6)), ly = stick(MEM(u8, PAD + 7));
+        int moving = (buttons & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT)) || lx != 0.0f || ly != 0.0f;
+        st.buttons_on = buttons_apply(aiming, moving);
+        ms->buttons_on = st.buttons_on;
+
+        /* Quick turn, down + cross (f1_camtest; device: with the camera-relative stick, "down"
+           only turned her to face the camera and the camera stayed put). She turns to face the
+           way "down" points (D-pad: straight about, the classic turn) and the camera swings in
+           behind her. Her facing is held until down is let go: the camera has turned, so a stick
+           still pulled down now means "back the way you came", and following it would undo it.
+           Stick: pulled most of the way, within ~30 deg of down (a run leaning toward the camera
+           mustn't count, device). */
+        if (!aiming && act <= 1 && (pressed & BTN_CROSS)
+            && ((buttons & BTN_DOWN) || (ly > 0.7f && absf(lx) < 0.58f * ly))) {
+            st.qt = (buttons & BTN_DOWN) ? 2 : 1;
+            st.qt_face = wrap_pi((st.qt == 1 ? st.yaw : heading_of(p)) + PI_F);
+            st.qt_start = st.yaw;
+            st.qt_turn = wrap_pi(st.qt_face - st.yaw);
+            st.qt_since = now;
+        }
+        if (st.qt) {
+            float f = (float)(now - st.qt_since) * (1.0f / COUNT_HZ) / QUICK_TURN;
+            int held = st.qt == 2 ? (buttons & BTN_DOWN) != 0 : ly > 0.3f;
+            if (f > 1.0f) f = 1.0f;
+            st.yaw = wrap_pi(st.qt_start + st.qt_turn * f * f * (3.0f - 2.0f * f));   /* ease in and out */
+            if (aiming || (f >= 1.0f && !held)) st.qt = 0;
+        }
+        ms->quick_turn = st.qt;
+    }
+
     /* free aim may look further up (as far as the gun goes) */
     st.pitch = clampf(st.pitch + sy * ORBIT_SPEED * 0.6f * dt, free_aim ? -AIM_MAX : PITCH_MIN, PITCH_MAX);
     if (aiming && !free_aim && MEM(u32, p + P_TARGET)) {
@@ -392,7 +435,11 @@ void mod_frame(u32 caller) {
     /* Modern walking: the game already walks relative to this camera (func_006307E0, confirmed
        on the device). Face her straight down the stick (camera yaw + the stick's angle, as the
        game computes it), turning at most TURN_SPEED, so she walks instead of arcing. */
-    if (act != ACT_AIM && act <= 1 && MEM(s16, p + P_STICK_MAG) >= 0x10) {
+    if (st.qt) {
+        st.face = st.qt_face;                   /* the quick turn holds her facing */
+        MEM(s16, p + P_HEADING) = (s16)(int)(st.face * (65536.0f / TWO_PI_F));
+        st.facing = 1;
+    } else if (act != ACT_AIM && act <= 1 && MEM(s16, p + P_STICK_MAG) >= 0x10) {
         float cam_units = atan2f_(look[0] - eye[0], look[2] - eye[2]) * (65536.0f / TWO_PI_F);
         float want = (cam_units + (float)(MEM(u16, p + P_STICK_ANG) & 0xFFF0)) * (TWO_PI_F / 65536.0f);
         float step = TURN_SPEED * dt;
