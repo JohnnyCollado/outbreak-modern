@@ -20,3 +20,6 @@ Results land in `results/`.
   and drives an over-the-shoulder camera from the PC (`freemem` → `install` → `run` → `uninstall`; `reinstall` swaps in a newer hook).
   **Make a save state first**; loading it undoes everything.
 - `tools/test_mips.py`: checks the hook's machine code against LLVM and simulates it
+- `tools/f1_collide.py`: read-only access to the room's collision triangles (decomp layout), used to
+  keep the camera inside the room; `python tools/f1_camtest.py walls` checks it on your disc
+- `tools/test_collide.py`: geometry and synthetic-room tests for the camera collision

@@ -38,6 +38,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import f1_collide  # noqa: E402
 import f1_hookcheck  # noqa: E402
 import mips  # noqa: E402
 import phase2_check  # noqa: E402
@@ -276,6 +277,33 @@ def cmd_reinstall(a):
     return cmd_install(a)
 
 
+def cmd_walls(a):
+    """READ-ONLY: validate the room's collision data and report wall distances around her."""
+    pine, _ = connect()
+    try:
+        room = f1_collide.RoomCollision(pine)
+        if not room.refresh():
+            raise SystemExit("no valid collision grid at 0x3938A8 (in gameplay?)")
+        for g, grid in room.grids.items():
+            print(f"grid {g}: {grid.nx} x {grid.nz} cells of {grid.cw} x {grid.cd}, origin ({grid.ox:g}, {grid.oz:g})")
+        idx, base = our_player(pine)
+        p = struct.unpack("<3f", pine.read_block(base + PLAYER_POS, 12))
+        chest = (p[0], p[1] + a.height, p[2])
+        print(f"our player #{idx} at ({p[0]:.0f}, {p[1]:.0f}, {p[2]:.0f}); ray origin {a.height:g} above the feet")
+        for deg in range(0, 360, 45):
+            r = math.radians(deg)
+            end = (chest[0] + math.sin(r) * a.reach, chest[1], chest[2] + math.cos(r) * a.reach)
+            t = room.first_hit(chest, end)
+            print(f"  heading {deg:3} deg: " + (f"wall at {t * a.reach:6.0f}" if t is not None else f"clear to {a.reach:g}"))
+        st = room.stats
+        print(f"read {st['tris']} triangles in {st['cells']} cells; failed the plane check: {st['insane']}")
+        if st["tris"] and st["insane"] > st["tris"] // 10:
+            print("!! many triangles fail the plane check: the layout is probably misread. Paste this to Claude.")
+    finally:
+        pine.close()
+    return 0
+
+
 def hook_is_current(pine, block):
     hdr = words_at(pine, block, B_CODE // 4)
     want = build_cave(block, hdr[B_ORIG1 // 4], hdr[B_ORIG2 // 4])
@@ -319,12 +347,16 @@ def cmd_run(a):
     flags = F_POS | F_RELATIVE | (F_FOV if a.fov else 0)
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
+    room = f1_collide.RoomCollision(pine) if a.collide else None
+    if room and not room.refresh():
+        print("  (no collision grid yet: camera collision off until one appears)")
+    pull = 1.0                                             # fraction of the wanted distance in use
     cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
     t0, shown = time.perf_counter(), None
     print(f"following our player #{our_player(pine)[0]} (from 0x48BF7D)")
     print(f"settings: yaw-offset {a.yaw_offset:g}, distance {a.distance:g}, height {a.height:g}, "
           f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
-          f"invert-x {a.invert_x}, fov {a.fov or 'game'}")
+          f"invert-x {a.invert_x}, collide {a.collide}, fov {a.fov or 'game'}")
     if cycle:
         print("CALIBRATE: the camera visits 4 angles around her, 4 s each, twice. Stand still (stick and\n"
               "D-pad untouched). Note the yaw-offset whose view shows HER BACK.")
@@ -344,6 +376,8 @@ def cmd_run(a):
                     print(f"  now showing yaw-offset {shown:3}  (heading field 0x{struct.unpack_from('<h', pine.read_block(our_player(pine)[1] + 0x90, 4), 2)[0] & 0xFFFF:04X})", flush=True)
             if now - t_player > 0.5:                      # who we follow can change (death, swap)
                 idx, player = our_player(pine)
+                if room:
+                    room.refresh()                        # new room -> new triangles
                 t_player = now
             pl, pad, cnt = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4)])
             count = struct.unpack("<I", cnt)[0]
@@ -361,6 +395,15 @@ def cmd_run(a):
             if sx == 0 and a.recenter > 0:
                 yaw_off *= math.exp(-dt / a.recenter)
             eye, look = ots_camera(p, smooth_heading, yaw_off, pitch, a)
+            if room and room.grids:
+                # Keep the eye inside the room: trace from her (at look height) to the eye, and stop
+                # `wall_margin` short of the first triangle. Snap in, ease back out.
+                pivot = (p[0], p[1] + a.target_height, p[2])
+                span = math.dist(pivot, eye)
+                t = room.first_hit(pivot, eye)
+                want = 1.0 if t is None else max(0.0, t - a.wall_margin / max(span, 1e-6))
+                pull = want if want < pull else pull + (want - pull) * (1 - math.exp(-dt / 0.3))
+                eye = tuple(pivot[i] + (eye[i] - pivot[i]) * pull for i in range(3))
             # Offsets from the player: the hook adds HER position for the frame it draws, so a late
             # update only delays rotation, never makes the camera lag behind her movement.
             rel = [eye[i] - p[i] for i in range(3)] + [look[i] - p[i] for i in range(3)]
@@ -399,6 +442,9 @@ def main(argv=None):
     i = sub.add_parser("install")
     i.add_argument("--at", type=lambda s: int(s, 0), required=True, help="address suggested by `freemem`")
     sub.add_parser("status")
+    w = sub.add_parser("walls", help="read-only: check the room collision data and wall distances")
+    w.add_argument("--height", type=float, default=140)
+    w.add_argument("--reach", type=float, default=600)
     sub.add_parser("uninstall")
     sub.add_parser("reinstall", help="replace the installed hook with this version, same address")
     r = sub.add_parser("run")
@@ -419,11 +465,13 @@ def main(argv=None):
     r.add_argument("--yaw-offset", type=float, default=0,
                    help="degrees between the heading field and where she faces (device-confirmed: 0)")
     r.add_argument("--hz", type=float, default=60)
+    r.add_argument("--no-collide", dest="collide", action="store_false", help="let the camera pass through walls")
+    r.add_argument("--wall-margin", type=float, default=20, help="units kept between the camera and a wall")
     for action in r._actions[1:]:   # calibrate takes the same camera options
         sub_calibrate._add_action(action)
     a = ap.parse_args(argv)
     return {"freemem": cmd_freemem, "install": cmd_install, "status": cmd_status,
-            "uninstall": cmd_uninstall, "reinstall": cmd_reinstall, "run": cmd_run, "calibrate": cmd_run}[a.cmd](a)
+            "uninstall": cmd_uninstall, "reinstall": cmd_reinstall, "walls": cmd_walls, "run": cmd_run, "calibrate": cmd_run}[a.cmd](a)
 
 
 if __name__ == "__main__":
