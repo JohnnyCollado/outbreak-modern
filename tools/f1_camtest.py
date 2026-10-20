@@ -468,6 +468,13 @@ def cmd_run(a):
             for f in RIG:
                 setattr(rig, f, getattr(a, f) + (getattr(a, "aim_" + f) - getattr(a, f)) * aim)
             eye, look = ots_camera(p, smooth_heading, yaw_off, pitch, rig)
+            if room and room.grids and a.headroom > 0:
+                # No ceilings in the collision data (stairs probe), but floors are there, and
+                # anywhere people walk has head-room above it: keep the eye within --headroom of
+                # the floor under it. The wall trace below then works on the adjusted eye.
+                floor = room.floor_below(eye[0], max(eye[1], p[1] + rig.target_height) + 50, eye[2])
+                if floor is not None:
+                    eye = (eye[0], min(max(eye[1], floor + 30), floor + a.headroom), eye[2])
             if room and room.grids:
                 # Keep the eye inside the room: trace from her (at look height) to the eye, and stop
                 # `wall_margin` short of the first triangle. Snap in, ease back out.
@@ -548,6 +555,8 @@ def main(argv=None):
                    help="seconds the camera takes to swing round to a locked-on target")
     r.add_argument("--no-collide", dest="collide", action="store_false", help="let the camera pass through walls")
     r.add_argument("--wall-margin", type=float, default=20, help="units kept between the camera and a wall")
+    r.add_argument("--headroom", type=float, default=190,
+                   help="max camera height above the floor under it (ceilings aren't in the collision data; 0 = off)")
     for action in r._actions[1:]:   # calibrate takes the same camera options
         sub_calibrate._add_action(action)
     a = ap.parse_args(argv)

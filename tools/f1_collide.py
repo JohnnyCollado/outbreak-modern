@@ -163,6 +163,12 @@ class RoomCollision:
                         best = (t, self.tris[p][0] & 0xFF, g)
         return best
 
+    def floor_below(self, x, y_top, z, depth=1500.0):
+        """Height of the first surface below (x, y_top, z), or None. Ceilings are not in the
+        collision data (device probe on stairs, 2026-10-20), floors are."""
+        hit = self.first_hit_tri((x, y_top, z), (x, y_top - depth, z))
+        return None if hit is None else y_top - hit[0] * depth
+
     def kinds(self):
         """How many distinct cached triangles there are of each kind byte, per grid."""
         seen = {(g, p) for (g, _), ptrs in self.cell_tris.items() for p in ptrs}

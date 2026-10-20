@@ -83,6 +83,25 @@ def main():
     expect(broken.first_hit((1000, 140, 1000), (500, 140, 1000)) is None and broken.stats["insane"] == 2,
            "misread triangles are rejected, not used")
 
+    print("floor under a point:")
+    fl = bytearray(32 << 20)
+    tris, lst, cells = 0x00500000, 0x00501000, 0x00502000
+    # a ramp (stairs) rising along +x from y=0 at x=0 to y=400 at x=2000, in grid 1
+    v = [(0, 0, 0), (2000, 400, 0), (2000, 400, 2000), (0, 0, 2000)]
+    n = (-0.196116, 0.980581, 0.0)
+    fl[tris:tris + 0x38] = tri_bytes([v[0], v[1], v[2]], n, 0.0)
+    fl[tris + 0x38:tris + 0x70] = tri_bytes([v[0], v[2], v[3]], n, 0.0)
+    struct.pack_into("<3I", fl, lst, tris, tris + 0x38, K.END)
+    for i in range(16):
+        struct.pack_into("<I", fl, cells + 4 * i, lst)
+    struct.pack_into("<8I", fl, K.GRIDS + 0x20, 500, 500, 4, 4, 0, 0, cells, lst)
+    ramp = K.RoomCollision(FakePine(fl))
+    ramp.refresh()
+    y = ramp.floor_below(1000, 900, 700)
+    expect(y is not None and abs(y - 200) < 1e-3, f"floor under x=1000 on the ramp is y=200 (got {y})")
+    expect(ramp.floor_below(1000, 100, 700) is None, "nothing below a point under the ramp")
+    expect(ramp.stats["insane"] == 0, "ramp triangles pass the plane check")
+
     print("camera pull-in:")
     a = types.SimpleNamespace(distance=220, height=150, target_height=140, shoulder=0, lookahead=200,
                               yaw_offset=0, wall_margin=20)
