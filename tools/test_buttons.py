@@ -88,6 +88,13 @@ def main():
     expect(game_bits(legacy, B.CROSS) == 0x10 and game_bits(legacy, B.R1) == 0x10, "--cross-runs: cross runs as originally")
     empty = B.ButtonMap(FakePine(bytearray(32 << 20)))
     expect("not changed" in empty.apply() and empty.orig is None, "an empty map is left alone")
+    qt = B.quick_turn
+    expect(qt(B.CROSS, 0, 0.0, 0.9) == "stick", "quick turn: cross pressed with the stick pulled down")
+    expect(qt(B.CROSS, B.CROSS, 0.0, 0.9) is None, "...only on the press, not while cross is held")
+    expect(qt(B.CROSS | B.DPAD_DOWN, 0, 0.0, 0.0) == "dpad", "...or with D-pad down")
+    expect(qt(B.CROSS, 0, 0.8, 0.6) is None and qt(B.CROSS, 0, 0.0, -0.9) is None and qt(B.CROSS, 0, 0.0, 0.3) is None,
+           "...not sideways, up, or barely pushed")
+    expect(qt(B.DPAD_DOWN, 0, 0.0, 0.9) is None, "...not without cross")
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
 

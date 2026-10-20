@@ -39,6 +39,18 @@ MODERN = {
 #   not aiming, not moving    -> R1 or cross (cross backs out of menus; tapping it standing still
 #                                does what it did in the original game)
 DIRECTIONS = 0xF000           # the D-pad bits of the raw button word
+DPAD_DOWN = 0x4000
+
+
+def quick_turn(raw, prev_raw, lx, ly):
+    """Down + cross, the classic quick turn: 'stick' or 'dpad' on the frame cross goes down while
+    down is held (left stick within 45 degrees of straight down, past half way), else None.
+    lx, ly: the left stick in -1..1, ly > 0 = pulled toward you."""
+    if not (raw & CROSS) or prev_raw & CROSS:
+        return None
+    if raw & DPAD_DOWN:
+        return "dpad"
+    return "stick" if ly > 0.5 and abs(lx) < ly else None
 
 
 def run_entry(aiming, moving, cross_runs=False):

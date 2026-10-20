@@ -450,6 +450,7 @@ def cmd_run(a):
     t_move = 0.0
     hook_rate = 60.0                                      # hook calls/s, measured below
     face_dir = None                                       # modern walking: her facing, radians
+    prev_raw, qt = 0, None                                # quick turn (down + cross) in progress
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -524,6 +525,8 @@ def cmd_run(a):
             if smooth_heading is None:
                 smooth_heading = heading
             aiming = pl[PLAYER_ACT] == ACT_AIM
+            raw_buttons = struct.unpack_from("<H", pad, 2)[0]
+            lx, ly = stick(pad[PAD_LX]), stick(pad[PAD_LY])
             if aiming and not was_aiming:
                 if a.free_aim and servo is not None and servo.active and not a.chase:
                     # RE5 style: she turns to the camera (the hook writes her heading), the view
@@ -549,7 +552,6 @@ def cmd_run(a):
                     cross.hide()
                     t_cross = 0.0
             if buttons:
-                raw_buttons = struct.unpack_from("<H", pad, 2)[0]
                 moving = bool(raw_buttons & f1_buttons.DIRECTIONS or stick(pad[PAD_LX]) or stick(pad[PAD_LY]))
                 buttons.set_context(aiming, moving)   # cross: kick / menu back / no run
             free_aiming = aiming and servo is not None and servo.active
@@ -574,7 +576,7 @@ def cmd_run(a):
             # --chase: it swings in behind her (except while the left stick is pushed, which would
             # feed back through the camera-relative walking) and lock-ons pull it round.
             chase = a.chase and not (stick_moving and not aiming and not a.follow_while_moving)
-            if not free_aiming and (chase or (aiming and target and not a.free_aim)):
+            if not free_aiming and not qt and (chase or (aiming and target and not a.free_aim)):
                 tau = a.aim_follow if (aiming and target) else a.follow
                 k = 1 - math.exp(-dt / tau) if tau > 0 else 1
                 smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
@@ -586,6 +588,26 @@ def cmd_run(a):
                         pitch + sy * math.radians(a.orbit_speed * 0.6) * dt * (-1 if a.invert_y else 1)))
             if sx == 0 and a.recenter > 0 and not aiming and a.chase:
                 yaw_off *= math.exp(-dt / a.recenter)
+            # Quick turn, down + cross (device: with the camera-relative stick, "down" only turned
+            # her to face the camera, and the camera stayed put). She snaps to face the way "down"
+            # points (D-pad: straight about, the classic turn) and the camera swings in behind her.
+            # Her facing is held there until down is let go: the camera has turned, so a stick still
+            # pulled down now means "back the way you came", and following it would undo the turn.
+            kind = (f1_buttons.quick_turn(raw_buttons, prev_raw, lx, ly)
+                    if a.quick_turn > 0 and not aiming and pl[PLAYER_ACT] in WALK_ACTS else None)
+            prev_raw = raw_buttons
+            if kind:
+                cam_base = smooth_heading + yaw_off                    # the camera's yaw, minus --yaw-offset
+                face = (cam_base if kind == "stick" else heading) + math.pi
+                qt = {"face": face, "start": cam_base, "t0": now,
+                      "turn": (face - cam_base + math.pi) % (2 * math.pi) - math.pi, "kind": kind}
+                smooth_heading, yaw_off = cam_base, 0.0
+            if qt:
+                f = min(1.0, (now - qt["t0"]) / a.quick_turn)
+                smooth_heading = qt["start"] + qt["turn"] * f * f * (3 - 2 * f)   # ease in and out
+                held = raw_buttons & f1_buttons.DPAD_DOWN if qt["kind"] == "dpad" else ly > 0.3
+                if aiming or (f >= 1 and not held):
+                    qt = None
             k_aim = 1 - math.exp(-dt / a.aim_blend) if a.aim_blend > 0 else 1
             aim += ((1.0 if aiming else 0.0) - aim) * k_aim
             rig = type(a)(**vars(a))                      # hip rig blended toward the aim rig
@@ -615,7 +637,6 @@ def cmd_run(a):
             if free_aiming and a.strafe_speed > 0:
                 # Left stick -> camera-relative step. ots_camera's "right" (cos yaw, -sin yaw) is
                 # screen-LEFT on the device (+shoulder put her right of centre), so negate it.
-                lx, ly = stick(pad[PAD_LX]), stick(pad[PAD_LY])
                 if lx or ly:
                     yaw = smooth_heading + yaw_off + math.radians(a.yaw_offset)
                     fwd = (math.sin(yaw), math.cos(yaw))
@@ -626,7 +647,11 @@ def cmd_run(a):
                     writes.append((block + B_VEL_X, [f2u(vx), f2u(vz)]))
                     strafing = True
             facing = False
-            if (not aiming and a.turn_speed > 0 and mag >= 0x10 and pl[PLAYER_ACT] in WALK_ACTS):
+            if qt:
+                face_dir = qt["face"]                    # the quick turn holds her facing
+                writes.append((block + B_AIM_HEADING, [round(face_dir / (2 * math.pi) * 65536) & 0xFFFF], 2))
+                facing = True
+            elif (not aiming and a.turn_speed > 0 and mag >= 0x10 and pl[PLAYER_ACT] in WALK_ACTS):
                 # Modern walking: face her straight down the stick (camera yaw + stick angle, the
                 # same target func_006307E0 computes), turning at most --turn-speed. The game then
                 # sees "straight ahead" and walks, instead of arcing or turning on the spot.
@@ -750,6 +775,8 @@ def main(argv=None):
                    help="modern walking: deg/s she turns toward the stick direction (0 = the game's own arcs)")
     r.add_argument("--strafe-speed", type=float, default=0,
                    help="units/s at full left stick while free-aiming (0 = stand still, RE5 style; ~150 = half her walk)")
+    r.add_argument("--quick-turn", type=float, default=0.25,
+                   help="down + cross: seconds the camera takes to swing behind her (0 = off)")
     r.add_argument("--chase", action="store_true",
                    help="old camera: swings in behind her and drifts back after looking (default: only the right stick moves it)")
     r.add_argument("--follow-while-moving", action="store_true",
