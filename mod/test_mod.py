@@ -48,10 +48,17 @@ def reg(n):
     return getattr(M, f"UC_MIPS_REG_{n}")
 
 
+COUNT_AT = 0x7F00          # the test's stand-in for the EE cycle counter (COP0 Count)
+COUNT_HZ = 294912000
+
+
 def mips32(w):
-    """sq/lq (EE-only, opcodes 0x1F/0x1E) as sw/lw of the low word: unicorn's CPU has no 128-bit
+    """mfc0 rt, $9 (Count) as lw rt, COUNT_AT($zero): the test sets the time.
+    sq/lq (EE-only, opcodes 0x1F/0x1E) as sw/lw of the low word: unicorn's CPU has no 128-bit
     registers. The EE requires 16-byte alignment for them: the stub saves at sp + r*16 with sp
     16-aligned, so the offset must be too."""
+    if w & 0xFFE0FFFF == 0x40004800:
+        return 0x8C000000 | (w & 0x001F0000) | COUNT_AT
     if w >> 26 in (0x1E, 0x1F):
         assert (w & 0xF) == 0 and (w >> 21) & 31 == 29, f"sq/lq 0x{w:08X} not at a 16-byte offset from sp"
         return (w & 0x03FFFFFF) | ((0x2B if w >> 26 == 0x1F else 0x23) << 26)
@@ -79,6 +86,107 @@ def call_site(uc):
     uc.emu_start(CALLER, STOP)
 
 
+PLAYER = 0x00476DD0
+PAD = 0x00292D40
+DZ = 0x0023BAE8 + 4
+
+
+def frame(uc, t, pad=(0, 128, 128, 128, 128), stick=None):
+    """One call at time t seconds: pad = (buttons, rx, ry, lx, ly); stick = the game's (mag, ang)."""
+    uc.mem_write(COUNT_AT, struct.pack("<I", int(t * COUNT_HZ) & 0xFFFFFFFF))
+    b, rx, ry, lx, ly = pad
+    uc.mem_write(PAD + 2, struct.pack("<H6B", b, rx, ry, lx, ly, 0, 0))
+    mag, ang = stick or (0, 0)
+    uc.mem_write(PLAYER + 0xF78 + 0x20, struct.pack("<hH", mag, ang))
+    call_site(uc)
+
+
+def status(uc):
+    return struct.unpack("<4I3fI I3f 3f3f I I", uc.mem_read(0x000AFF00, 0x50))
+
+
+def cam(uc):
+    return struct.unpack("<3f", uc.mem_read(0x00306320 + 0x18, 12)), struct.unpack("<3f", uc.mem_read(0x00306320 + 0x24, 12))
+
+
+def heading(uc):
+    return struct.unpack("<H", uc.mem_read(PLAYER + 0x92, 2))[0] * 360 / 65536
+
+
+def close(a, b, tol=0.05):
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def milestone2(uc):
+    import math
+    # her at (100, -5, 2500) facing +z (heading 0); dead zone 0x20; standing
+    uc.mem_write(DZ, struct.pack("<h", 0x20))
+    uc.mem_write(0x000AFF04, struct.pack("<I", 0))                         # force a fresh start
+    t = 10.0
+    frame(uc, t)
+    eye, look = cam(uc)
+    p8 = math.radians(8)
+    pivot = (135.0, 145.0, 2500.0)
+    d = (0.0, math.sin(-p8), math.cos(p8))
+    want_eye = tuple(pivot[i] - d[i] * 220 for i in range(3))
+    want_look = tuple(pivot[i] + d[i] * 200 for i in range(3))
+    expect(close(eye, want_eye) and close(look, want_look),
+           f"camera behind her shoulder: eye {tuple(round(v, 1) for v in eye)}, look {tuple(round(v, 1) for v in look)}")
+    expect(struct.unpack("<h", uc.mem_read(DZ, 2))[0] == 0x80, "right stick alone: the game sees it centred (no callouts)")
+    for i in range(60):                                                    # 1 s full right
+        t += 1 / 60
+        frame(uc, t, (0, 255, 128, 128, 128))
+    st = status(uc)
+    expect(abs(math.degrees(st[9]) + 100) < 1.5, f"1 s of full right stick turns the view 100 deg right (yaw {math.degrees(st[9]):.1f})")
+    expect(abs(st[11] - 1 / 60) < 1e-4, f"dt from the cycle counter ({st[11]:.5f} s)")
+    t += 1 / 60
+    frame(uc, t, (0x0004, 255, 128, 128, 128))                              # L1 + right stick
+    expect(struct.unpack("<h", uc.mem_read(DZ, 2))[0] == 0x20, "L1 + right stick: the game's dead zone back (callouts)")
+    expect(abs(math.degrees(status(uc)[9]) + 100) < 1.5, "...and the camera doesn't turn")
+    # walk: the game reads the stick as 90 deg (0x4000) from the camera's forward
+    yaw = status(uc)[9]
+    for i in range(30):
+        t += 1 / 60
+        frame(uc, t, stick=(127, 0x4000))
+    eye, look = cam(uc)
+    cam_deg = math.degrees(math.atan2(look[0] - eye[0], look[2] - eye[2]))
+    h = heading(uc)
+    want = (cam_deg + 90) % 360
+    expect(abs((h - want + 180) % 360 - 180) < 1.0, f"modern walking: she faces camera + stick angle ({h:.1f} vs {want:.1f} deg)")
+    t += 1 / 60
+    frame(uc, t)                                                           # stick let go
+    start = (want - 90) % 360                                              # 90 deg from where she should face
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", int(start / 360 * 65536) & 0xFFFF))
+    t += 1 / 60
+    frame(uc, t, stick=(127, 0x4000))                                      # pushed again
+    h2 = heading(uc)
+    step = (h2 - start + 180) % 360 - 180
+    expect(abs(abs(step) - 15.0) < 0.3, f"...turning at most 900 deg/s (one 1/60 s frame: {step:+.1f} deg)")
+    uc.mem_write(PLAYER + 0x08, b"\x02")                                   # aiming: hands off
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", 0x1234))
+    t += 1 / 60
+    frame(uc, t, stick=(127, 0x4000))
+    expect(struct.unpack("<H", uc.mem_read(PLAYER + 0x92, 2))[0] == 0x1234, "aiming: her facing is left to the game")
+    uc.mem_write(PLAYER + 0x08, b"\x00")
+    # SELECT + R3 for 1.2 s: off; the game's camera and dead zone back
+    for i in range(72):
+        t += 1 / 60
+        frame(uc, t, (0x0500, 128, 128, 128, 128))
+    expect(status(uc)[8] == 0, "SELECT + R3 held 1 s: off")
+    expect(struct.unpack("<h", uc.mem_read(DZ, 2))[0] == 0x20, "...the right stick handed back to the game")
+    uc.mem_write(0x00306320 + 0x18, struct.pack("<3f", 1.0, 2.0, 3.0))
+    t += 1 / 60
+    frame(uc, t)
+    expect(cam(uc)[0] == (1.0, 2.0, 3.0), "...and the camera left alone while off")
+    for i in range(72):
+        t += 1 / 60
+        frame(uc, t, (0x0500, 128, 128, 128, 128))
+    expect(status(uc)[8] == 1, "held again: on")
+    t += 1 / 60
+    frame(uc, t, (0xFFFF, 255, 255, 255, 255))
+    expect(status(uc)[8] == 1, "a garbage pad read (every button) toggles nothing")
+
+
 def main():
     words, syms, notes = build.build()
     uc = machine(words)
@@ -86,6 +194,7 @@ def main():
     uc.mem_write(0x0023BE14, struct.pack("<I", 1))
     uc.mem_write(0x0048BF7D, b"\0")
     uc.mem_write(0x00476DD0 + 0x38, struct.pack("<3f", 100.0, -5.0, 2500.0))
+    uc.mem_write(DZ, struct.pack("<h", 0x20))      # the game sets its dead zones at boot, before SUBMAIN
     live = [n for n in range(1, 32) if n not in (26, 27, 29, 31)]      # all but k0/k1/sp/ra
     for n in live:
         uc.reg_write(reg(n), 0x1000 * n + 0x77)
@@ -103,7 +212,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 1 and st[2] == 1 and st[7] == 1, "status: magic, version, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 2 and st[2] == 1 and st[7] == 1, "status: magic, version 2, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):
@@ -117,6 +226,7 @@ def main():
     uc.mem_write(0x000AFF08, struct.pack("<I", 29))
     call_site(uc)
     expect(uc.mem_read(0x002F7450 + 31 * 0x8C + 0x0B, 1)[0] == 0x10, "a line the game is using is left alone")
+    milestone2(uc)
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
 

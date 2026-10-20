@@ -49,13 +49,16 @@ BAD_OPS = {0x13: "COP1X", 0x30: "ll", 0x35: "ldc1", 0x38: "sc", 0x3D: "sdc1", 0x
            0x1F: "SPECIAL3", 0x37: "ld", 0x3F: "sd", 0x1A: "ldl", 0x1B: "ldr", 0x2C: "sdl", 0x2D: "sdr"}
 
 
-def ee_fixups(words, base):
+def ee_fixups(words, base, code_words=None):
     """Rewrite clang's FPU instructions for the EE; returns (words, notes). Raises on anything the
-    EE can't run. The EE FPU has no NaN or infinity, so ordered and unordered compares agree, and
+    EE can't run. Only the first `code_words` are code (the rest: constants and strings). The EE FPU has no NaN or infinity, so ordered and unordered compares agree, and
     its cvt.w.s always truncates (= trunc.w.s)."""
     out, notes = [], []
     for i, w in enumerate(words):
         op, addr = w >> 26, base + 4 * i
+        if code_words is not None and i >= code_words:
+            out.append(w)
+            continue
         if op == COP1 and (w >> 21) & 0x1F in (FMT_S, FMT_W, 0x11, 0x15):
             fmt, funct = (w >> 21) & 0x1F, w & 0x3F
             if fmt == FMT_S and funct == TRUNC_W:
@@ -105,7 +108,7 @@ def build():
     data += b"\0" * (-len(data) % 4)
     words = list(struct.unpack(f"<{len(data) // 4}I", data))
     # The stub's sq/lq are EE-only (opcodes 0x1E/0x1F); ee_fixups allows them in the stub only.
-    words, notes = ee_fixups(words, MOD_BASE)
+    words, notes = ee_fixups(words, MOD_BASE, (syms["_text_end"] - MOD_BASE) // 4)
     if syms.get("mod_entry") != MOD_BASE:
         raise SystemExit(f"mod_entry must be at 0x{MOD_BASE:08X}, is at {syms.get('mod_entry')}")
     with open(os.path.join(BUILD, "mod.bin"), "wb") as f:

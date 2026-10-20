@@ -5,6 +5,7 @@ SECTIONS
 {
     . = 0x000A0000;
     .text : { KEEP(*(.text.entry)) *(.text .text.*) }
+    _text_end = .;
     .rodata : { *(.rodata .rodata.*) }
     .data : { *(.data .data.* .sdata .sdata.*) }
     _image_end = .;

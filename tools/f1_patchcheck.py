@@ -22,6 +22,11 @@ def read(pine):
     return struct.unpack("<4I3fI", pine.read_block(STATUS, 32))
 
 
+def read_v2(pine):
+    """Milestone 2 fields: enabled, yaw, pitch, dt, eye[3], look[3], facing, callout dead zone."""
+    return struct.unpack("<I3f3f3fII", pine.read_block(STATUS + 0x20, 0x30))
+
+
 PNACH = os.path.join(os.path.dirname(SITES), "..", "patches", "SLPM-65428_32088394.pnach")
 
 
@@ -59,6 +64,7 @@ def main():
         a = read(pine)
         time.sleep(1.0)
         b = read(pine)
+        v2 = read_v2(pine) if b[1] >= 2 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -79,6 +85,14 @@ def main():
     print(f"  called from 0x{caller:08X}" + (" (a patched call site)" if caller in sites else
                                              " (not one of mod/sites.json's call sites!)" if sites else ""))
     print(f"  our player at ({b[4]:.1f}, {b[5]:.1f}, {b[6]:.1f})")
+    if v2:
+        import math
+        on, yaw, pitch, dt = v2[0], v2[1], v2[2], v2[3]
+        print(f"  camera: {'ON' if on else 'off (SELECT + R3 to switch on)'}, looking {math.degrees(yaw):.0f} deg, "
+              f"tilt {math.degrees(pitch):.0f} deg, {dt * 1000:.1f} ms between calls")
+        print(f"  eye ({v2[4]:.0f}, {v2[5]:.0f}, {v2[6]:.0f}) -> look ({v2[7]:.0f}, {v2[8]:.0f}, {v2[9]:.0f}); "
+              f"walking facing {'active' if v2[10] else 'idle'}; right-stick dead zone "
+              + (f"{v2[11]} (callouts on L1)" if v2[11] != 0xFFFF else "not found (callouts not gated)"))
     return 0 if rate > 0 else 2
 
 

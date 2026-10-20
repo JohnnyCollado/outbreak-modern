@@ -23,7 +23,31 @@ typedef float f32;
 #define PLAYER_COUNT    0x0023BE14u
 #define OUR_PLAYER      0x0048BF7Du
 #define P_POS           0x38        /* f32[3] */
-#define P_HEADING       0x92        /* s16, 0x10000 per turn, atan2(dx, dz) */
+#define P_HEADING       0x92        /* s16, 0x10000 per turn, atan2(dx, dz); she faces along it */
+#define P_ACT           0x08        /* act[0]: 0 standing, 1 moving steps, 2 aiming (charmove.c) */
+#define ACT_AIM         2
+#define P_STICK_MAG     (0xF78 + 0x20)  /* her Ctrl: the movement stick as the game reads it, s16 0-127 */
+#define P_STICK_ANG     (0xF78 + 0x22)  /* u16, 0x10000 per turn, relative to the camera (func_006307E0) */
+#define CAM_POS         (CAMERA + 0x18) /* f32[3] */
+#define CAM_TARGET      (CAMERA + 0x24) /* f32[3]; the game's movement uses pos -> target as "forward" */
+/* The pad this frame (D_00292D40): buttons u16 +2, active-high as the game leaves it, bytes
+   swapped against the usual PS2 listing; sticks +4 right x, +5 right y, +6 left x, +7 left y
+   (0-255; the decomp's pad.h comment says left first, the device showed otherwise). */
+#define PAD             0x00292D40u
+#define BTN_L2 0x0001
+#define BTN_R2 0x0002
+#define BTN_L1 0x0004
+#define BTN_R1 0x0008
+#define BTN_CROSS 0x0040
+#define BTN_SELECT 0x0100
+#define BTN_R3 0x0400
+#define BTN_UP 0x1000
+#define BTN_DOWN 0x4000
+#define BTN_LEFT 0x8000
+#define BTN_RIGHT 0x2000
+/* The sticks' dead zones (D_0023BAE8 {x, y, z, w}); z is the right stick's. Above its 0x7F top,
+   the game sees that stick centred, so it fires no callouts (padread.c func_001A5940). */
+#define RIGHT_STICK_DZ  (0x0023BAE8u + 4)
 /* The on-screen text lines (D_002F7440 + 0x10, 32 of 0x8C): used s16, x s16, y s16, timer s16,
    size u8, fade s8, alpha u8, prio u8, text[0x80]. Drawn while Options+0x16 != 0. */
 #define TEXT_LINES      0x002F7450u
