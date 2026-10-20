@@ -547,6 +547,7 @@ def cmd_run(a):
                                     else " (free aim OFF: servo not switched off, see the start of the log)"), flush=True)
             elif was_aiming and not aiming:
                 print("  aim released", flush=True)
+                t_move = now - 2.5                        # its wanted-direction field is stale for a moment
                 if free_aiming:
                     smooth_heading, yaw_off = smooth_heading + yaw_off, 0.0   # keep the view where it is
             was_aiming = aiming
@@ -624,7 +625,7 @@ def cmd_run(a):
                 jump = math.degrees((heading - prev_heading + math.pi) % (2 * math.pi) - math.pi)
                 if abs(jump) > 45 and now - t_snap > 0.5:
                     print(f"  snap: her facing jumped {jump:+.0f} deg (action {pl[PLAYER_ACT]}/{pl[PLAYER_ACT + 1]}, "
-                          f"{'aiming' if aiming else 'not aiming'}, {'quick turn' if qt else 'free aim' if free_aiming else 'walk facing' if face_dir is not None else 'game'} "
+                          f"{'aiming' if aiming else 'not aiming'}, {'quick turn' if qt else 'free aim' if free_aiming else 'game: hit reaction' if pl[PLAYER_ACT] == 5 or pl[PLAYER_ACT + 1] in (0xA1, 0xA2) else 'walk facing' if face_dir is not None else 'game'} "
                           f"in charge, stick x {lx:+.2f} y {ly:+.2f}, game stick {mag}/{ang * 360 / 65536:.0f} deg, "
                           f"buttons 0x{raw_buttons:04X})", flush=True)
                     t_snap = now
