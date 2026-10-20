@@ -44,14 +44,16 @@ def jal(target):
 # ------------------------------------------------------------------ what the EE can run
 COP1, FMT_S, FMT_W = 0x11, 0x10, 0x14
 S_OK = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x24, 0x30, 0x32, 0x34, 0x36}
-TRUNC_W, CVT_W = 0x0D, 0x24
+TRUNC_W, CVT_W, SQRT = 0x0D, 0x24, 0x04
 BAD_OPS = {0x13: "COP1X", 0x30: "ll", 0x35: "ldc1", 0x38: "sc", 0x3D: "sdc1", 0x1C: "SPECIAL2",
            0x1F: "SPECIAL3", 0x37: "ld", 0x3F: "sd", 0x1A: "ldl", 0x1B: "ldr", 0x2C: "sdl", 0x2D: "sdr"}
 
 
 def ee_fixups(words, base, code_words=None):
     """Rewrite clang's FPU instructions for the EE; returns (words, notes). Raises on anything the
-    EE can't run. Only the first `code_words` are code (the rest: constants and strings). The EE FPU has no NaN or infinity, so ordered and unordered compares agree, and
+    EE can't run. sqrt.s: the EE takes its operand from the ft field (pcsx2/FPU.cpp SQRT_S reads
+    _Ft_), standard MIPS from fs with ft = 0 -- so clang's sqrt.s computed sqrt($f0) on the device
+    and the aim's direction came out the wrong length (device log, 2026-10-20). Moved to ft. Only the first `code_words` are code (the rest: constants and strings). The EE FPU has no NaN or infinity, so ordered and unordered compares agree, and
     its cvt.w.s always truncates (= trunc.w.s)."""
     out, notes = [], []
     for i, w in enumerate(words):
@@ -61,7 +63,10 @@ def ee_fixups(words, base, code_words=None):
             continue
         if op == COP1 and (w >> 21) & 0x1F in (FMT_S, FMT_W, 0x11, 0x15):
             fmt, funct = (w >> 21) & 0x1F, w & 0x3F
-            if fmt == FMT_S and funct == TRUNC_W:
+            if fmt == FMT_S and funct == SQRT and (w >> 16) & 0x1F == 0 and (w >> 11) & 0x1F:
+                w = (w & ~(0x1F << 11)) | (((w >> 11) & 0x1F) << 16)
+                notes.append(f"0x{addr:08X} sqrt.s: operand fs -> ft (EE)")
+            elif fmt == FMT_S and funct == TRUNC_W:
                 w = (w & ~0x3F) | CVT_W
                 notes.append(f"0x{addr:08X} trunc.w.s -> cvt.w.s")
             elif fmt == FMT_S and funct >= 0x30 and funct not in S_OK:

@@ -73,6 +73,10 @@ def main():
     fixed, notes = build.ee_fixups([S(0x0D), S(0x35), S(0x3E), S(0x02)], build.MOD_BASE)
     expect(fixed == [S(0x24), S(0x34), S(0x36), S(0x02)] and len(notes) == 3,
            "EE: trunc.w.s -> cvt.w.s, unordered/signalling compares -> the ordered ones, others kept")
+    sq = 0x46000004 | (0x10 << 21) | (0 << 16) | (7 << 11) | (3 << 6)          # sqrt.s $f3, $f7 (MIPS: fs = 7)
+    fixed, _ = build.ee_fixups([sq], build.MOD_BASE)
+    expect(fixed == [0x46000004 | (0x10 << 21) | (7 << 16) | (0 << 11) | (3 << 6)],
+           "EE: sqrt.s takes its operand from ft (pcsx2 SQRT_S reads _Ft_): fs moved to ft")
     for bad, what in ((S(0x21), "cvt.d.s"), (0x46200000, "add.d"), (0xD4000000, "ldc1"), (0xC0000000, "ll")):
         try:
             build.ee_fixups([bad], build.MOD_BASE)

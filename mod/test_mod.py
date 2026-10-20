@@ -6,7 +6,7 @@ patched call site: the stub must hand every register back unchanged and continue
   python mod/test_mod.py        (needs `pip install unicorn`; skipped without it)
 
 Unicorn emulates a MIPS32 CPU, not the EE: the stub's sq/lq (EE-only) run here as 32-bit
-sw/lw. (Its FPU rounds float -> int to nearest, the EE's toward zero: tests of
+sw/lw, and sqrt.s back from the EE's operand field (ft) to standard MIPS's (fs). (Its FPU rounds float -> int to nearest, the EE's toward zero: tests of
 code that converts must allow for that.)
 """
 import os
@@ -57,6 +57,8 @@ def mips32(w):
     sq/lq (EE-only, opcodes 0x1F/0x1E) as sw/lw of the low word: unicorn's CPU has no 128-bit
     registers. The EE requires 16-byte alignment for them: the stub saves at sp + r*16 with sp
     16-aligned, so the offset must be too."""
+    if w & 0xFFE0003F == 0x46000004 and (w >> 11) & 0x1F == 0:
+        return (w & ~(0x1F << 16)) | (((w >> 16) & 0x1F) << 11)    # EE sqrt.s (operand in ft) -> MIPS (in fs)
     if w == 0x0000000C:                         # syscall (FlushCache): nothing to flush here
         return 0
     if w & 0xFFE0FFFF == 0x40004800:
