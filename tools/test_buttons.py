@@ -88,6 +88,9 @@ def main():
     expect(game_bits(legacy, B.CROSS) == 0x10 and game_bits(legacy, B.R1) == 0x10, "--cross-runs: cross runs as originally")
     empty = B.ButtonMap(FakePine(bytearray(32 << 20)))
     expect("not changed" in empty.apply() and empty.orig is None, "an empty map is left alone")
+    expect(not B.plausible(0xFFFF) and not B.plausible(0xFFF7), "glitched pad reads (device: 0xFFFF, 0xFFF7) are rejected")
+    expect(all(B.plausible(r) for r in (0, B.CROSS | B.DPAD_DOWN, 0x1000 | 0x2000, B.L2 | B.R2 | B.R1)),
+           "...real button states are kept")
     qt = B.quick_turn
     expect(qt(B.CROSS, 0, 0.0, 0.9) == "stick", "quick turn: cross pressed with the stick pulled down")
     expect(qt(B.CROSS, B.CROSS, 0.0, 0.9) is None, "...only on the press, not while cross is held")

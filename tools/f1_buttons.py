@@ -42,6 +42,12 @@ DIRECTIONS = 0xF000           # the D-pad bits of the raw button word
 DPAD_DOWN = 0x4000
 
 
+def plausible(raw):
+    """False for a pad read caught while the game rewrites it (device: 0xFFFF, 0xFFF7 -- every
+    button 'held'). A D-pad can't press up with down, or left with right."""
+    return (raw & 0x5000) != 0x5000 and (raw & 0xA000) != 0xA000
+
+
 def quick_turn(raw, prev_raw, lx, ly):
     """Down + cross, the classic quick turn: 'stick' or 'dpad' on the frame cross goes down while
     down is held (left stick pulled most of the way, within about 30 degrees of straight down: a

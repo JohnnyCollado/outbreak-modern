@@ -452,6 +452,8 @@ def cmd_run(a):
     face_dir = None                                       # modern walking: her facing, radians
     prev_raw, qt = 0, None                                # quick turn (down + cross) in progress
     prev_heading, t_snap = None, 0.0                      # her facing last update: snap report
+    good_pad, bad_pads = None, 0                          # the last believable pad read; glitches skipped
+    aim_face = None                                       # free aim: her facing, turned toward the aim
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -519,6 +521,12 @@ def cmd_run(a):
                 t_player = now
             pl, pad, cnt, mv, mstick = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4),
                                                         (player + P_MOVE_DIR, 2), (player + P_CTRL_STICK, 4)])
+            # Now and then the read lands while the game rewrites the pad (device: every button
+            # "held", sticks at the rim) and set off quick turns. Use the last good read instead.
+            if f1_buttons.plausible(struct.unpack_from("<H", pad, 2)[0]):
+                good_pad = pad
+            else:
+                pad, bad_pads = good_pad or bytes([0, 0, 0, 0, 128, 128, 128, 128]), bad_pads + 1
             count = struct.unpack("<I", cnt)[0]
             mag, ang = struct.unpack("<hH", mstick)               # the movement stick, as the game reads it
             p = struct.unpack_from("<3f", pl, 0x38)
@@ -616,7 +624,7 @@ def cmd_run(a):
                 jump = math.degrees((heading - prev_heading + math.pi) % (2 * math.pi) - math.pi)
                 if abs(jump) > 45 and now - t_snap > 0.5:
                     print(f"  snap: her facing jumped {jump:+.0f} deg (action {pl[PLAYER_ACT]}/{pl[PLAYER_ACT + 1]}, "
-                          f"{'aiming' if aiming else 'not aiming'}, {'quick turn' if qt else 'walk facing' if face_dir is not None else 'game'} "
+                          f"{'aiming' if aiming else 'not aiming'}, {'quick turn' if qt else 'free aim' if free_aiming else 'walk facing' if face_dir is not None else 'game'} "
                           f"in charge, stick x {lx:+.2f} y {ly:+.2f}, game stick {mag}/{ang * 360 / 65536:.0f} deg, "
                           f"buttons 0x{raw_buttons:04X})", flush=True)
                     t_snap = now
@@ -693,11 +701,20 @@ def cmd_run(a):
                 aim_pt = tuple(eye[i] + d[i] * a.converge * (hit if hit is not None else 1.0) for i in range(3))
                 chest = (p[0], p[1] + rig.target_height, p[2])
                 face = math.atan2(aim_pt[0] - chest[0], aim_pt[2] - chest[2]) - math.radians(a.yaw_offset)
+                # Turn her to it at --aim-turn instead of in one frame (device: aiming with the camera
+                # in front of her snapped her round 174 deg). Once she's on it, she tracks it exactly.
+                if aim_face is None:
+                    aim_face = heading
+                step = math.radians(a.aim_turn) * dt if a.aim_turn > 0 else math.pi
+                aim_face += max(-step, min(step, (face - aim_face + math.pi) % (2 * math.pi) - math.pi))
+                face = aim_face
                 elev = math.atan2(aim_pt[1] - chest[1], math.hypot(aim_pt[0] - chest[0], aim_pt[2] - chest[2]))
                 lim = round(a.aim_max / 360 * 65536)
                 writes.append((block + B_AIM_HEADING,
                                [round(face / (2 * math.pi) * 65536) & 0xFFFF,
                                 max(-lim, min(lim, round(elev / (2 * math.pi) * 65536))) & 0xFFFF], 2))
+            if not free_aiming:
+                aim_face = None
             writes.append((block + B_FLAGS, [flags | (F_AIM if free_aiming else 0)
                                              | (F_STRAFE if strafing else 0)
                                              | (F_FACE if facing and not free_aiming else 0)]))   # flags last
@@ -721,7 +738,9 @@ def cmd_run(a):
                 fps = (count - count0) / (now - t_stats)
                 hook_rate = fps if fps > 0 else hook_rate
                 print(f"  {loops / (now - t_stats):5.1f} updates/s, game {fps:5.1f} frames/s, "
-                      f"{fps / max(loops / (now - t_stats), 1e-9):4.2f} frames per update", flush=True)
+                      f"{fps / max(loops / (now - t_stats), 1e-9):4.2f} frames per update"
+                      + (f", {bad_pads} glitched pad reads skipped" if bad_pads else ""), flush=True)
+                bad_pads = 0
                 t_stats, loops, count0 = now, 0, count
             time.sleep(max(0.0, 1 / a.hz - (time.perf_counter() - now)))
     except KeyboardInterrupt:
@@ -822,6 +841,8 @@ def main(argv=None):
                    help="free aim: aim at the point this far down the crosshair if no wall is nearer")
     r.add_argument("--free-aim", action="store_true",
                    help="switch off the game's 3-position aim servo; the gun follows where the camera looks")
+    r.add_argument("--aim-turn", type=float, default=720,
+                   help="free aim: deg/s she turns to where the camera looks when the aim starts (0 = at once)")
     r.add_argument("--aim-max", type=float, default=45, help="free aim limit up/down, degrees (game: 45)")
     r.add_argument("--no-collide", dest="collide", action="store_false", help="let the camera pass through walls")
     r.add_argument("--wall-margin", type=float, default=20, help="units kept between the camera and a wall")
