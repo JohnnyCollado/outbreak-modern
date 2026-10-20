@@ -479,6 +479,8 @@ Why this beats both earlier options:
 | Whose camera | `0x48BF7D` ("our player number") = 0 offline, so slot 0 was the user's character all along | Confirmed (device) |
 | Facing vs heading field | `--yaw-offset 0` shows the character's back, `180` the face. He **faces along the heading field** (now the default) | Confirmed (device, user) |
 | Framing | Over-the-shoulder view confirmed in J's Bar with defaults at `--yaw-offset 0` (camera over the **left** shoulder; `--shoulder -35` gives the right). Right-stick orbit and recenter fixes (`97fe870`) not yet tested on the device | Confirmed (device, screenshot) |
+| Room collision data (`0x3938A8`, CollTri layout) | `walls`: two 9 x 5 grids of 300 x 300 cells; 181 triangles read, **0 failed the plane check**; wall distances 101–505 around the player, one direction clear | Confirmed (device) |
+| Camera jerk (stale absolute camera) | Gone after the hook started adding the player's position every frame (`489948e`) | Confirmed (device, user) |
 | Free EE RAM | `0x00084000`–`0x00100000` stayed zero for 720 passes (60 s of play) | Confirmed (measured) |
 
 This agrees with the f1_live travel fit (`atan2(dx, dz)`), so the "back-step" reinterpretation
