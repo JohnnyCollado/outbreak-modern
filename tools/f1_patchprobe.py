@@ -46,7 +46,7 @@ def main():
     print(f"anchor (jal 0x{ANCHOR_CALL:08X} in 0x{ANCHOR_FUNC:08X}): " + (" ".join(f"0x{a:08X}" for a in anchor) or "NONE"))
     print(f"code region 0x{CODE_AT:08X}-0x{CODE_AT + CODE_SIZE:08X}: {used} non-zero words "
           f"({'free' if used == 0 else 'IN USE (the PC hook? run `f1_camtest.py uninstall`, or pick another)'})")
-    ok = sites and len(anchor) == 1
+    ok = bool(sites and anchor)          # any of the anchors will do: they are all static SUBMAIN code
     print("\nOK: paste this to Claude." if ok else "\nNot found: in gameplay? Paste this to Claude anyway.")
     return 0 if ok else 2
 

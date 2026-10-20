@@ -1,0 +1,5 @@
+{
+  "_from": "tools/f1_patchprobe.py on the device, SLPM-65428 CRC 32088394 (English patch), 2026-10-20",
+  "sites": ["0x00341BDC", "0x00341DA0", "0x00345608", "0x0034572C"],
+  "anchor": "0x003457B8"
+}
