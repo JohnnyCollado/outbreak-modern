@@ -5,6 +5,8 @@ File #1 (SLPM-65428, the English fan patch included), running on ARMSX2 on Andro
 tested on an AYN Odin 3). It is a patch file ARMSX2 loads by itself: no PC and no helper app
 while you play. It holds only our own code and addresses; no game code is stored here.
 
+Credits: [CREDITS.md](CREDITS.md).
+
 ## Install
 
 1. Get `patches/SLPM-65428_32088394.pnach` onto the device and enable it:
