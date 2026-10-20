@@ -567,15 +567,22 @@ def cmd_run(a):
         # Ctrl+C can land between a request and its reply, leaving this connection out of step,
         # so clean up on a FRESH one: the servo must never stay switched off by accident.
         pine.close()
-        clean = pine_diag.Pine("127.0.0.1", 28011, 5.0)
         try:
-            if servo:
-                servo.pine = clean
-                print("\nfree aim: " + servo.restore())
-            clean.write_words(block + B_FLAGS, [0])
-            print("\ncamera handed back to the game (hook left installed, inert)")
-        finally:
-            clean.close()
+            clean = pine_diag.Pine("127.0.0.1", 28011, 5.0)
+            try:
+                if servo:
+                    servo.pine = clean
+                    print("\nfree aim: " + servo.restore())
+                clean.write_words(block + B_FLAGS, [0])
+                print("\ncamera handed back to the game (hook left installed, inert)")
+            finally:
+                clean.close()
+        except (OSError, pine_diag.PineError) as e:
+            print(f"\n!! clean-up could not reach PINE ({e}). Our camera"
+                  + (" and the free-aim patch" if servo and servo.orig else "") + " may still be active.\n"
+                  "!! Run `python tools\\f1_camtest.py uninstall` (and run `run` once more and Ctrl+C), "
+                  "or simply load your save state.")
+            return 1
     return 0
 
 
