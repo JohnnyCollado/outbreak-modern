@@ -10,6 +10,7 @@ Usage (in gameplay, a gun equipped, no enemy near so the auto-aim doesn't turn y
   python tools/f1_aimscan.py              # find the field (done: +0xBC8, see AIM_ELEV)
   python tools/f1_aimscan.py watch 20     # log how the elevation changes over time
   python tools/f1_aimscan.py writers      # list the code that loads/stores +0xBC8/+0xBCC
+  python tools/f1_aimscan.py dump         # print the servo candidates' code words (paste, don't commit)
 Then follow the prompts. Results go to results/aimscan-<time>.json and the console.
 """
 import datetime
@@ -122,7 +123,26 @@ def cmd_writers(offsets):
     return 0
 
 
+def cmd_dump(ranges):
+    """Print raw code words so they can be pasted into a chat for disassembly.
+    Deliberately NOT saved to a file: game code must not end up in the repository."""
+    pine, _ = connect()
+    try:
+        for lo, hi in ranges:
+            data = pine.read_block(lo, hi - lo)
+            print(f"--- 0x{lo:08X}-0x{hi:08X}")
+            for i in range(0, len(data), 32):
+                words = struct.unpack_from(f"<{min(8, (len(data) - i) // 4)}I", data, i)
+                print(f"{lo + i:08X}: " + " ".join(f"{w:08X}" for w in words))
+    finally:
+        pine.close()
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "dump":
+        # The two store clusters `writers` found in the user's build (English-patched File #1)
+        return cmd_dump([(0x00556700, 0x00556B00), (0x00648B00, 0x00648D80)])
     if len(sys.argv) > 1 and sys.argv[1] == "watch":
         return cmd_watch(float(sys.argv[2]) if len(sys.argv) > 2 else 20)
     if len(sys.argv) > 1 and sys.argv[1] == "writers":
