@@ -451,6 +451,7 @@ def cmd_run(a):
     hook_rate = 60.0                                      # hook calls/s, measured below
     face_dir = None                                       # modern walking: her facing, radians
     prev_raw, qt = 0, None                                # quick turn (down + cross) in progress
+    prev_heading, t_snap = None, 0.0                      # her facing last update: snap report
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -602,12 +603,24 @@ def cmd_run(a):
                 qt = {"face": face, "start": cam_base, "t0": now,
                       "turn": (face - cam_base + math.pi) % (2 * math.pi) - math.pi, "kind": kind}
                 smooth_heading, yaw_off = cam_base, 0.0
+                print(f"  quick turn ({kind}: stick x {lx:+.2f} y {ly:+.2f}, buttons 0x{raw_buttons:04X})", flush=True)
             if qt:
                 f = min(1.0, (now - qt["t0"]) / a.quick_turn)
                 smooth_heading = qt["start"] + qt["turn"] * f * f * (3 - 2 * f)   # ease in and out
                 held = raw_buttons & f1_buttons.DPAD_DOWN if qt["kind"] == "dpad" else ly > 0.3
                 if aiming or (f >= 1 and not held):
                     qt = None
+            # Snap report: her facing jumped between two updates (~2 game frames) by more than our own
+            # walking turn could do. Says who was in charge, to tell the game's turns from ours.
+            if prev_heading is not None and not kind and not (qt and now - qt["t0"] < 0.15):
+                jump = math.degrees((heading - prev_heading + math.pi) % (2 * math.pi) - math.pi)
+                if abs(jump) > 45 and now - t_snap > 0.5:
+                    print(f"  snap: her facing jumped {jump:+.0f} deg (action {pl[PLAYER_ACT]}/{pl[PLAYER_ACT + 1]}, "
+                          f"{'aiming' if aiming else 'not aiming'}, {'quick turn' if qt else 'walk facing' if face_dir is not None else 'game'} "
+                          f"in charge, stick x {lx:+.2f} y {ly:+.2f}, game stick {mag}/{ang * 360 / 65536:.0f} deg, "
+                          f"buttons 0x{raw_buttons:04X})", flush=True)
+                    t_snap = now
+            prev_heading = heading
             k_aim = 1 - math.exp(-dt / a.aim_blend) if a.aim_blend > 0 else 1
             aim += ((1.0 if aiming else 0.0) - aim) * k_aim
             rig = type(a)(**vars(a))                      # hip rig blended toward the aim rig

@@ -44,13 +44,14 @@ DPAD_DOWN = 0x4000
 
 def quick_turn(raw, prev_raw, lx, ly):
     """Down + cross, the classic quick turn: 'stick' or 'dpad' on the frame cross goes down while
-    down is held (left stick within 45 degrees of straight down, past half way), else None.
+    down is held (left stick pulled most of the way, within about 30 degrees of straight down: a
+    run that only leans toward you shouldn't count), else None.
     lx, ly: the left stick in -1..1, ly > 0 = pulled toward you."""
     if not (raw & CROSS) or prev_raw & CROSS:
         return None
     if raw & DPAD_DOWN:
         return "dpad"
-    return "stick" if ly > 0.5 and abs(lx) < ly else None
+    return "stick" if ly > 0.7 and abs(lx) < 0.58 * ly else None
 
 
 def run_entry(aiming, moving, cross_runs=False):

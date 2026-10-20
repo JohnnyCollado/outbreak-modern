@@ -92,8 +92,9 @@ def main():
     expect(qt(B.CROSS, 0, 0.0, 0.9) == "stick", "quick turn: cross pressed with the stick pulled down")
     expect(qt(B.CROSS, B.CROSS, 0.0, 0.9) is None, "...only on the press, not while cross is held")
     expect(qt(B.CROSS | B.DPAD_DOWN, 0, 0.0, 0.0) == "dpad", "...or with D-pad down")
-    expect(qt(B.CROSS, 0, 0.8, 0.6) is None and qt(B.CROSS, 0, 0.0, -0.9) is None and qt(B.CROSS, 0, 0.0, 0.3) is None,
-           "...not sideways, up, or barely pushed")
+    expect(qt(B.CROSS, 0, 0.8, 0.6) is None and qt(B.CROSS, 0, 0.0, -0.9) is None and qt(B.CROSS, 0, 0.0, 0.6) is None,
+           "...not sideways, up, or only half pushed")
+    expect(qt(B.CROSS, 0, 0.45, 0.85) == "stick" and qt(B.CROSS, 0, 0.6, 0.8) is None, "...within about 30 degrees of down")
     expect(qt(B.DPAD_DOWN, 0, 0.0, 0.9) is None, "...not without cross")
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
