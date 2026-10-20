@@ -355,6 +355,7 @@ def cmd_run(a):
         print("  (no collision grid yet: camera collision off until one appears)")
     pull = 1.0                                             # fraction of the wanted distance in use
     aim = 0.0                                              # 0 = hip rig, 1 = aim rig (blended)
+    pending, streak = (idx, player), 0
     was_aiming = False
     cycle = [0, 90, 180, 270] if a.cmd == "calibrate" else None
     t0, shown = time.perf_counter(), None
@@ -382,7 +383,14 @@ def cmd_run(a):
                     shown = a.yaw_offset
                     print(f"  now showing yaw-offset {shown:3}  (heading field 0x{struct.unpack_from('<h', pine.read_block(our_player(pine)[1] + 0x90, 4), 2)[0] & 0xFFFF:04X})", flush=True)
             if now - t_player > 0.5:                      # who we follow can change (death, swap)
-                idx, player = our_player(pine)
+                cand = our_player(pine)
+                # Switch only when the new index holds for 3 reads in a row (~1.5 s): one odd read
+                # must never throw the camera onto another character.
+                streak = streak + 1 if cand == pending else 1
+                pending = cand
+                if cand[0] != idx and streak >= 3:
+                    idx, player = cand
+                    print(f"  now following player #{idx}", flush=True)
                 if room:
                     room.refresh()                        # new room -> new triangles
                 t_player = now
@@ -392,22 +400,25 @@ def cmd_run(a):
             heading = (struct.unpack_from("<h", pl, 0x92)[0] & 0xFFFF) * 2 * math.pi / 65536
             if smooth_heading is None:
                 smooth_heading = heading
-            k = 1 - math.exp(-dt / a.follow) if a.follow > 0 else 1
-            smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
+            aiming = pl[PLAYER_ACT] == ACT_AIM
+            if aiming and not was_aiming:
+                smooth_heading, yaw_off = heading, 0.0    # start the aim straight behind her
+                print("  aiming", flush=True)
+            elif was_aiming and not aiming:
+                print("  aim released", flush=True)
+            was_aiming = aiming
+            if not aiming:
+                # Follow her facing. NOT while aiming: the game's auto-target snaps her toward the
+                # nearest character, and the camera must not be dragged along with it.
+                k = 1 - math.exp(-dt / a.follow) if a.follow > 0 else 1
+                smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
             sx, sy = stick(pad[6]), stick(pad[7])
             # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
             yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
             pitch = max(math.radians(-30), min(math.radians(60),
                         pitch + sy * math.radians(a.orbit_speed * 0.6) * dt * (-1 if a.invert_y else 1)))
-            if sx == 0 and a.recenter > 0:
+            if sx == 0 and a.recenter > 0 and not aiming:
                 yaw_off *= math.exp(-dt / a.recenter)
-            aiming = pl[PLAYER_ACT] == ACT_AIM
-            if aiming and not was_aiming:
-                yaw_off = 0.0                             # aim where she faces
-                print("  aiming", flush=True)
-            elif was_aiming and not aiming:
-                print("  aim released", flush=True)
-            was_aiming = aiming
             k_aim = 1 - math.exp(-dt / a.aim_blend) if a.aim_blend > 0 else 1
             aim += ((1.0 if aiming else 0.0) - aim) * k_aim
             rig = type(a)(**vars(a))                      # hip rig blended toward the aim rig
