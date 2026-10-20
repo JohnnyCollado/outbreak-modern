@@ -7,6 +7,8 @@ was picked in ARMSX2's setup, so this finds every ARMSX2 data folder on the devi
 with ARMSX2's `inis` (settings) or `memcards` folder in it -- and copies the patch into each.
 
   python tools/push_patch.py [--serial SERIAL] [--dry-run]
+  python tools/push_patch.py --download     only into /sdcard/Download (Android's folder is singular),
+                                            for ARMSX2's Patch Manager > Import
 """
 import argparse
 import os
@@ -50,6 +52,8 @@ def main(argv=None):
     ap.add_argument("--serial")
     ap.add_argument("--adb", default=shutil.which("adb") or "adb")
     ap.add_argument("--dry-run", action="store_true", help="only show where it would go")
+    ap.add_argument("--download", action="store_true",
+                    help="put it in /sdcard/Download for Patch Manager > Import, instead of the data folder")
     a = ap.parse_args(argv)
     if not os.path.exists(PNACH):
         raise SystemExit(f"{PNACH} missing: git pull first")
@@ -61,12 +65,24 @@ def main(argv=None):
         if not serial:
             raise SystemExit(f"adb: {why}; pass --serial (see `adb devices`)")
     adb = [a.adb, "-s", serial]
+    name = os.path.basename(PNACH)
+    if a.download:
+        # A push to a folder that doesn't exist (e.g. "Downloads") makes a FILE of that name instead.
+        rc, out, err = phase2_check.run(adb + ["push", PNACH, f"/sdcard/Download/{name}"], timeout=60)
+        listed = shell(adb, f"ls -l '/sdcard/Download/{name}' 2>&1").strip()
+        print(f"{'ok' if rc == 0 and name in listed else 'FAILED'}: {listed or err.strip()}")
+        print("\nIn ARMSX2: Patch Manager > Import, pick it from Download, enable \"Modern Camera (standalone)\",\n"
+              "then restart the game. ARMSX2 doesn't read the Download folder by itself.")
+        stray = shell(adb, "[ -f /sdcard/Downloads ] && ls -l /sdcard/Downloads").strip()
+        if stray:
+            print(f"\nNote: /sdcard/Downloads is a FILE (an earlier push to a folder that doesn't exist):\n  {stray}\n"
+                  "  It's a copy of a patch; delete it with: adb shell rm /sdcard/Downloads")
+        return 0
     pkgs, roots = data_roots(adb)
     print(f"device {serial}; ARMSX2 package(s): {', '.join(pkgs) or 'NONE'}")
     if not roots:
         raise SystemExit("no ARMSX2 data folder found (no `inis` or `memcards` folder). Open ARMSX2 once, "
                          "or import the file from ARMSX2's Patch Manager instead.")
-    name = os.path.basename(PNACH)
     for r in roots:
         dest = f"{r}/patches"
         print(f"  data folder {r}  ->  {dest}/{name}")
