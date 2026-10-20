@@ -73,7 +73,7 @@ static int tri_sane(const float *v) {
 }
 
 /* The nearest hit along a->b in one cell's list, below `best`. */
-static float cell_hit(u32 list, const float *a, const float *d, float best) {
+static float cell_hit(u32 list, const float *a, const float *d, float best, int steep) {
     const u32 *ptr = (const u32 *)list;
     int k;
     for (k = 0; k < MAX_TRIS; k++) {
@@ -81,6 +81,7 @@ static float cell_hit(u32 list, const float *a, const float *d, float best) {
         float t;
         if (tri == 0xFFFFFFFFu) break;
         if (tri == 0 || tri >= RAM_TOP || (tri & 3) || !tri_sane((const float *)(tri + 4))) continue;
+        if (steep && absf(((const float *)(tri + 4))[10]) > 0.7071f) continue;   /* normal's y: not a wall */
         t = seg_tri(a, d, (const float *)(tri + 4));
         if (t >= 0.0f && (best < 0.0f || t < best)) best = t;
     }
@@ -116,7 +117,7 @@ float coll_first_hit_in(const float *a, const float *b, int mask) {
             last = idx;
             list = ((const u32 *)G->cells)[idx];
             if (list == 0 || list >= RAM_TOP || (list & 3)) continue;
-            best = cell_hit(list, a, d, best);
+            best = cell_hit(list, a, d, best, mask & COLL_STEEP);
         }
     }
     return best;

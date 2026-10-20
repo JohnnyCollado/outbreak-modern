@@ -12,7 +12,9 @@
 
 /* Fraction t in [0, 1] along a->b of the first room triangle it crosses, or -1. */
 float coll_first_hit(const float *a, const float *b);
-/* The same, in the grids of `mask` only (1: walls, 2: floors). */
+/* The same, in the grids of `mask` only (1: grid 0, 2: grid 1); with COLL_STEEP, only
+   triangles steeper than 45 deg (walls, whichever grid they are in: floors and ramps never). */
+#define COLL_STEEP 4
 float coll_first_hit_in(const float *a, const float *b, int mask);
 /* Height of the first surface below (x, y_top, z) within `depth`, or `none`. */
 float coll_floor_below(float x, float y_top, float z, float depth, float none);

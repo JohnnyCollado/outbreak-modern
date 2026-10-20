@@ -41,6 +41,8 @@
 #define AIM_TURN        DEG(720.0f)     /* she turns into the aim at this rate (device: one-frame snap felt bad) */
 #define CONVERGE        1500.0f         /* aim at the enemy or wall the crosshair is on, else this far ahead */
 #define CONVERGE_MIN    300.0f          /* ...but never nearer: something in her face mustn't yank her round */
+#define CONVERGE_YAW    DEG(15.0f)      /* convergence may turn her at most this far from the view... */
+#define CONVERGE_ELEV   DEG(10.0f)      /* ...and tilt the gun at most this far from the camera's tilt */
 #define ENEMY_RADIUS    45.0f           /* an enemy, for the crosshair: a cylinder this wide... */
 #define ENEMY_LOW       -20.0f          /* ...from this far below its position... */
 #define ENEMY_HIGH      190.0f          /* ...to this far above */
@@ -67,6 +69,7 @@ typedef struct {
     f32 aim_face;       /* free aim: her facing, turned toward the aim */
     u32 aim_face_set;
     u32 cross_shown;
+    f32 gain;           /* calibration (0 = not set yet = 1.0); kept across rooms */
     Servo servo;
 } State;
 
@@ -75,6 +78,30 @@ static State st;        /* .bss: never written by the patch; set up below */
 static const char banner_on[] = "Modern Camera: on   (SELECT + R3: off)";
 static const char banner_off[] = "Modern Camera: off  (SELECT + R3: on)";
 static const char cross_glyph[] = "\x81\x7b";     /* the full-width plus (Shift-JIS): square on screen */
+
+/* Calibration: what the game does with the gun-elevation field isn't known (the decomp only
+   copies it for the network, charsync.c), and on the device the gun pointed at the ground at a
+   slight downward look and went "all the way up" at a slight upward one: the field may not be
+   0x10000 per turn. While aiming, R3 + D-pad up/down scales what we write by 0.05 steps; the
+   value shows on screen, to be reported and built in. */
+#define GAIN_STEP       0.05f
+#define GAIN_MIN        0.10f
+#define GAIN_MAX        2.00f
+
+static int show_line(int slot, const char *text, s16 x, s16 y, s16 frames, u8 size);
+
+/* "gun angle x1.00  (R3 + up/down)" with the factor filled in (built on the stack: initialised
+   writable data would be rewritten by the patch every frame, so the linker refuses it). */
+static void show_gain(float g) {
+    static const char tmpl[] = "gun angle x0.00  (R3 + up/down)";
+    char msg[sizeof(tmpl)];
+    int c = (int)(g * 100.0f + 0.5f), i;
+    for (i = 0; i < (int)sizeof(tmpl); i++) msg[i] = tmpl[i];
+    msg[11] = (char)('0' + (c / 100) % 10);
+    msg[13] = (char)('0' + (c / 10) % 10);
+    msg[14] = (char)('0' + c % 10);
+    show_line(TEXT_SLOT, msg, 16, 16, 180, 16);
+}
 
 static u32 cycle_count(void) {
     u32 c;
@@ -165,7 +192,7 @@ static float enemy_on_ray(const float *eye, const float *d, float none, u16 scen
 void mod_frame(u32 caller) {
     volatile ModStatus *ms = &STATUS;
     u32 n = MEM(u32, PLAYER_COUNT), idx = MEM(u8, OUR_PLAYER), p, now;
-    u16 buttons;
+    u16 buttons, pressed;
     u8 act;
     float dt, sx, sy, yaw, ce, se, fx, fz, rx, rz, pivot[3], d[3], eye[3], look[3];
     float r_dist, r_height, r_th, r_shoulder, r_look;
@@ -218,6 +245,7 @@ void mod_frame(u32 caller) {
     if ((buttons & (BTN_UP | BTN_DOWN)) == (BTN_UP | BTN_DOWN) || (buttons & (BTN_LEFT | BTN_RIGHT)) == (BTN_LEFT | BTN_RIGHT)) {
         buttons = st.last_buttons;      /* not a real pad state (seen from the PC mid-update) */
     }
+    pressed = buttons & ~st.last_buttons;
     st.last_buttons = buttons;
 
     /* SELECT + R3 held for a second: switch the mod off / on. */
@@ -383,7 +411,9 @@ void mod_frame(u32 caller) {
             dd[i] /= n;
             far[i] = eye[i] + dd[i] * CONVERGE;
         }
-        t = coll_ready() ? coll_first_hit_in(eye, far, 1) : -1.0f;
+        /* steep triangles only, from either grid: the floor in front of her was being hit as a
+           "wall" and the gun pointed at the ground again (device, 2026-10-20) */
+        t = coll_ready() ? coll_first_hit_in(eye, far, 1 | 2 | COLL_STEEP) : -1.0f;
         if (t < 0.0f) t = 1.0f;
         e = enemy_on_ray(eye, dd, CONVERGE, MEM(u16, p + P_SCENARIO)) * (1.0f / CONVERGE);
         if (e < t) t = e;
@@ -395,6 +425,12 @@ void mod_frame(u32 caller) {
         chest[2] = ms->player[2];
         face = atan2f_(ap[0] - chest[0], ap[2] - chest[2]);
         elev = atan2f_(ap[1] - chest[1], sqrtf_((ap[0] - chest[0]) * (ap[0] - chest[0]) + (ap[2] - chest[2]) * (ap[2] - chest[2])));
+        /* a correction, never a takeover: stay near where the camera looks */
+        {
+            float view = atan2f_(dd[0], dd[2]), tilt = -st.pitch;
+            face = view + clampf(wrap_pi(face - view), -CONVERGE_YAW, CONVERGE_YAW);
+            elev = tilt + clampf(elev - tilt, -CONVERGE_ELEV, CONVERGE_ELEV);
+        }
         if (!st.aim_face_set) {
             st.aim_face = heading_of(p);
             st.aim_face_set = 1;
@@ -405,7 +441,13 @@ void mod_frame(u32 caller) {
         MEM(u32, p + P_TARGET) = 0;
         MEM(u8, p + P_TARGET_IDX) = 0xFF;
         MEM(s16, p + P_HEADING) = (s16)(int)(st.aim_face * (65536.0f / TWO_PI_F));
-        MEM(s16, p + P_ELEV) = (s16)(int)(elev * (65536.0f / TWO_PI_F));
+        if (st.gain < GAIN_MIN) st.gain = 1.0f;
+        if ((buttons & BTN_R3) && (pressed & (BTN_UP | BTN_DOWN))) {
+            st.gain = clampf(st.gain + ((pressed & BTN_UP) ? GAIN_STEP : -GAIN_STEP), GAIN_MIN, GAIN_MAX);
+            show_gain(st.gain);
+        }
+        ms->gain = st.gain;
+        MEM(s16, p + P_ELEV) = (s16)(int)(clampf(elev * st.gain, -AIM_MAX, AIM_MAX) * (65536.0f / TWO_PI_F));
         ms->elev = elev;
     }
     ms->aiming = aiming;
