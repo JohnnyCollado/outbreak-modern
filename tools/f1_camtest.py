@@ -400,7 +400,7 @@ def cmd_run(a):
           f"shoulder {a.shoulder:g}, follow {a.follow:g}s, recenter {a.recenter:g}s, "
           f"invert-x {a.invert_x}, collide {a.collide}, fov {a.fov or 'game'}\n"
           f"aim rig: distance {a.aim_distance:g}, height {a.aim_height:g}, shoulder {a.aim_shoulder:g}, "
-          f"lookahead {a.aim_lookahead:g}, blend {a.aim_blend:g}s")
+          f"lookahead {a.aim_lookahead:g}, blend {a.aim_blend:g}s, follow {a.aim_follow:g}s")
     if cycle:
         print("CALIBRATE: the camera visits 4 angles around her, 4 s each, twice. Stand still (stick and\n"
               "D-pad untouched). Note the yaw-offset whose view shows HER BACK.")
@@ -446,13 +446,15 @@ def cmd_run(a):
             target = struct.unpack_from("<I", pl, PLAYER_TARGET)[0] if aiming else None
             if target != last_target and aiming:
                 print(f"  aim target: {describe_target(pine, target)}", flush=True)
+                if target:
+                    yaw_off = 0.0                         # a new lock: swing round behind her
             last_target = target
-            if not (aiming and target):
-                # Follow her facing, except while the auto-aim holds a target: then the game snaps
-                # her from target to target and the camera must not be dragged along. Aiming at
-                # nothing, her turning is the player's own, so the camera follows it (device report).
-                k = 1 - math.exp(-dt / a.follow) if a.follow > 0 else 1
-                smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
+            # Follow her facing. With a lock-on the game turns her to the target (even one behind
+            # her), so follow that too, but slower (--aim-follow), so hopping between nearby
+            # targets is a pan, not a jerk (device reports: instant = jumpy, frozen = left behind).
+            tau = a.aim_follow if (aiming and target) else a.follow
+            k = 1 - math.exp(-dt / tau) if tau > 0 else 1
+            smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
             sx, sy = stick(pad[6]), stick(pad[7])
             # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
             yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
@@ -542,6 +544,8 @@ def main(argv=None):
     r.add_argument("--aim-shoulder", type=float, default=50)
     r.add_argument("--aim-lookahead", type=float, default=400)
     r.add_argument("--aim-blend", type=float, default=0.12, help="seconds to move into/out of the aim rig")
+    r.add_argument("--aim-follow", type=float, default=0.3,
+                   help="seconds the camera takes to swing round to a locked-on target")
     r.add_argument("--no-collide", dest="collide", action="store_false", help="let the camera pass through walls")
     r.add_argument("--wall-margin", type=float, default=20, help="units kept between the camera and a wall")
     for action in r._actions[1:]:   # calibrate takes the same camera options
