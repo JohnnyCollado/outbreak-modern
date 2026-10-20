@@ -68,6 +68,14 @@ PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
 PLAYER_ACT = 0x08  # act[0]: the current action; 2 = aiming (game/charmove.c func_0061CE50)
 ACT_AIM = 2
 RIG = ("distance", "height", "target_height", "shoulder", "lookahead")
+# Raw DualShock 2 report (PadData at PAD_NOW): +4 RIGHT x, +5 RIGHT y, +6 LEFT x, +7 LEFT y. The
+# decomp's pad.h comment says left first; the device says otherwise (the camera orbit read +6/+7
+# and moved with the LEFT stick: the "southpaw" report). PS2 pads send right stick first.
+PAD_RX, PAD_RY, PAD_LX, PAD_LY = 4, 5, 6, 7
+# func_006307E0 (charmove.c) turns the movement stick into direction buttons RELATIVE TO THE
+# CAMERA (0x306338/0x306344), storing the wanted direction at +0xBCE (s16); the stick is Ctrl
+# +0x20 (mag) / +0x22 (angle) of the player's own Ctrl at +0xF78.
+P_MOVE_DIR, P_CTRL_STICK = 0xBCE, 0xF78 + 0x20
 PLAYER_TARGET = 0x24  # (players) the aim's target: set by func_0062D6A0 when aiming (charmove.c)
 # Pools from the decomp, to say what a target is. type byte at +0x02: 0 player, 1 NPC, 2 enemy
 # (from submain/ingame.c's draw-by-type switch and charsync.c; to be confirmed by `run`'s report).
@@ -423,6 +431,7 @@ def cmd_run(a):
     smooth_heading = None
     flags = F_POS | F_RELATIVE | (F_FOV if a.fov else 0)
     free_aiming = False
+    t_move = 0.0
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -478,7 +487,8 @@ def cmd_run(a):
                 elif servo and servo.addr is None:
                     print("  free aim: " + servo.disable(), flush=True)
                 t_player = now
-            pl, pad, cnt = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4)])
+            pl, pad, cnt, mv, mstick = pine.read_multi([(player, 0x94), (PAD_NOW, 8), (block + B_COUNT, 4),
+                                                        (player + P_MOVE_DIR, 2), (player + P_CTRL_STICK, 4)])
             count = struct.unpack("<I", cnt)[0]
             p = struct.unpack_from("<3f", pl, 0x38)
             heading = (struct.unpack_from("<h", pl, 0x92)[0] & 0xFFFF) * 2 * math.pi / 65536
@@ -508,7 +518,7 @@ def cmd_run(a):
                 tau = a.aim_follow if (aiming and target) else a.follow
                 k = 1 - math.exp(-dt / tau) if tau > 0 else 1
                 smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
-            sx, sy = stick(pad[6]), stick(pad[7])
+            sx, sy = stick(pad[PAD_RX]), stick(pad[PAD_RY])
             # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
             yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
             low = -a.aim_max if (aiming and servo) else -30   # free aim may look further up
@@ -552,6 +562,17 @@ def cmd_run(a):
                                 max(-lim, min(lim, round(elev / (2 * math.pi) * 65536))) & 0xFFFF], 2))
             writes.append((block + B_FLAGS, [flags | (F_AIM if free_aiming else 0)]))   # flags last
             pine.write_multi(writes)
+            # Which camera does the game's camera-relative movement use? wanted dir = camera yaw +
+            # stick angle (&0xFFF0 both, as func_006307E0 does), so camera yaw = wanted - stick.
+            mag, ang = struct.unpack("<hH", mstick)
+            if mag >= 0x10 and now - t_move > 1.0:
+                game_cam = (struct.unpack("<H", mv)[0] - (ang & 0xFFF0)) & 0xFFF0
+                ours = round(math.atan2(look[0] - eye[0], look[2] - eye[2]) / (2 * math.pi) * 65536) & 0xFFFF
+                diff = ((game_cam - ours + 0x8000) & 0xFFFF) - 0x8000
+                print(f"  moving: game's movement uses camera yaw {game_cam * 360 / 65536:6.1f} deg, ours is "
+                      f"{ours * 360 / 65536:6.1f} deg -> {'OURS' if abs(diff) < 0x400 else f'NOT ours (off {diff * 360 / 65536:+.0f} deg)'}",
+                      flush=True)
+                t_move = now
             loops += 1
             if count0 is None:
                 count0 = count

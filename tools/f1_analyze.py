@@ -45,15 +45,15 @@ def main(path):
     for nfwd, med, name, n in sorted(results):
         print(f"  heading = {name:16} median err {med:6.2f} deg, within 10 deg: {-nfwd}/{n}")
 
-    # Right stick -> the game's angle/magnitude.
-    print("\nright stick (raw rx, ry) -> Ctrl rangle / rmag:")
+    # LEFT stick (raw bytes +6/+7; PS2 order is rx, ry, lx, ly) -> the game's angle/magnitude.
+    print("\nleft stick (raw lx, ly) -> Ctrl 'rangle' / 'rmag' (decomp names; it is the movement stick):")
     seen = set()
     for s in S:
-        rx, ry = s["pad_sticks"][2:]
+        lx, ly = s["pad_sticks"][2:]
         c = s["ctrl_pad0"]
-        if c["rmag"] and (rx, ry) not in seen and len(seen) < 8:
-            seen.add((rx, ry))
-            print(f"  rx {rx:3} ry {ry:3} -> rangle 0x{c['rangle']:04X} ({c['rangle'] * 360 / 65536:5.1f} deg) rmag {c['rmag']}")
+        if c["rmag"] and (lx, ly) not in seen and len(seen) < 8:
+            seen.add((lx, ly))
+            print(f"  lx {lx:3} ly {ly:3} -> rangle 0x{c['rangle']:04X} ({c['rangle'] * 360 / 65536:5.1f} deg) rmag {c['rmag']}")
 
     # Buttons: stored value is active-HIGH (all zero at rest), contrary to the header comment.
     rest = collections.Counter(s["pad_buttons_pressed"] for s in S).most_common(1)[0][0]

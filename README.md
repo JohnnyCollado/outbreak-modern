@@ -27,3 +27,5 @@ Results land in `results/`.
 - `tools/f1_freeaim.py`: finds the game's 3-position aim servo by its contents and switches it off so
   `f1_camtest.py run --free-aim` can set the gun's elevation from where the camera looks
 - `tools/test_freeaim.py`: finder/patch tests on a synthetic stand-in (no game code)
+- `tools/f1_controls.py`: read-only `buttons` (the game's button map) and `watch` (buttons pressed →
+  game action bits), groundwork for the modern button layout

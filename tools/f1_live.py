@@ -31,8 +31,9 @@ import pine_diag  # noqa: E402
 # --- Addresses: all from the decomp, File #1 JP VER 1.04 (SLPM-65428). NOT yet verified live. ---
 # include/camera.h       Camera at 0x306320: pos +0x18, target +0x24, up +0x3C, far +0x58,
 #                        near +0x5C, fov +0x60 (degrees), roll +0x6C (s32)
-# include/pad.h          PadData "this frame" at 0x292D40: buttons u16 +2 (active low),
-#                        sticks u8[4] +4 (lx, ly, rx, ry; 128 = centre)
+# include/pad.h          PadData "this frame" at 0x292D40: buttons u16 +2, sticks u8[4] +4.
+#                        Sticks are rx, ry, lx, ly (PS2 order; pad.h's comment says left
+#                        first, the device shows right first). 128 = centre.
 # include/ctrl.h         Ctrl (0x30): cur u32 +8, rmag/rangle +0x20, lmag/langle +0x28
 #                        one per pad at 0x306410, and each player's own at +0xF78
 # include/object.h       players: DrawObjFull[] at 0x476DD0, stride 0x10E0; pos f32[3] +0x38,
@@ -123,7 +124,7 @@ def render(s):
         f"players  count {s['player_count']}  ours = #{s['our_index']}  pos {fmt3(s['p0_pos'])}  heading 0x{s['p0_heading']:04X}"
         f" ({s['p0_heading'] * 360 / 65536:6.1f} deg)",
         f"raw pad  status 0x{s['pad_status']:02X}  pressed 0x{s['pad_buttons_pressed']:04X}"
-        f"  sticks lx {s['pad_sticks'][0]:3} ly {s['pad_sticks'][1]:3} rx {s['pad_sticks'][2]:3} ry {s['pad_sticks'][3]:3}",
+        f"  sticks rx {s['pad_sticks'][0]:3} ry {s['pad_sticks'][1]:3} lx {s['pad_sticks'][2]:3} ly {s['pad_sticks'][3]:3}",
         f"ctrl pad0     cur 0x{c['cur']:08X}  L mag {c['lmag']:4} ang 0x{c['langle']:04X}  R mag {c['rmag']:4} ang 0x{c['rangle']:04X}",
         f"ctrl ours     cur 0x{pc['cur']:08X}  L mag {pc['lmag']:4} ang 0x{pc['langle']:04X}  R mag {pc['rmag']:4} ang 0x{pc['rangle']:04X}",
         "checks   " + "  ".join(("OK " if v else "BAD ") + k for k, v in checks(s).items()),
