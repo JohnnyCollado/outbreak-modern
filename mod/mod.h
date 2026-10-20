@@ -10,7 +10,7 @@
 #define MOD_STATE   0x000A8000u
 #define MOD_STATUS  0x000AFF00u
 #define MOD_MAGIC   0x434D4F31u     /* "1OMC" */
-#define MOD_VERSION 2
+#define MOD_VERSION 3
 
 typedef struct {
     u32 magic;          /* MOD_MAGIC once our code has run since the region was last cleared */
@@ -26,6 +26,8 @@ typedef struct {
     f32 eye[3], look[3];
     u32 facing;         /* 1 while modern walking turns her */
     u32 callout_dz;     /* the game's own right-stick dead zone, as found (0xFFFF: not found) */
+    /* 0x50: milestone 3 */
+    f32 pull;           /* fraction of the camera distance in use (1: no wall in the way) */
 } ModStatus;
 
 #endif

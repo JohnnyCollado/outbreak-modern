@@ -187,6 +187,73 @@ def milestone2(uc):
     expect(status(uc)[8] == 1, "a garbage pad read (every button) toggles nothing")
 
 
+GRIDS = 0x003938A8
+TRIS = 0x00500000
+
+
+def room(uc, walls=(), floors=()):
+    """A 4x4-cell grid per kind (cells 1000 wide from (-2000, 0)); every cell lists every triangle."""
+    uc.mem_write(GRIDS, b"\0" * 0x40)
+    addr = TRIS
+    for g, tris in enumerate((walls, floors)):
+        if not tris:
+            continue
+        ptrs = []
+        for tri in tris:
+            uc.mem_write(addr, struct.pack("<I9f", 0, *[c for v in tri for c in v]) + b"\0" * 0x10)
+            ptrs.append(addr)
+            addr += 0x40
+        lst = addr
+        uc.mem_write(lst, struct.pack(f"<{len(ptrs) + 1}I", *ptrs, 0xFFFFFFFF))
+        addr += 4 * (len(ptrs) + 1) + 0x10
+        cells = addr
+        uc.mem_write(cells, struct.pack("<16I", *[lst] * 16))
+        addr += 0x40
+        uc.mem_write(GRIDS + 0x20 * g, struct.pack("<4I2i2I", 1000, 1000, 4, 4, -2000, 0, cells, lst))
+
+
+def quad(x0, x1, y0, y1, z):
+    """Two triangles of the wall z = const."""
+    return [((x0, y0, z), (x1, y0, z), (x1, y1, z)), ((x0, y0, z), (x1, y1, z), (x0, y1, z))]
+
+
+def flat(x0, x1, z0, z1, y):
+    return [((x0, y, z0), (x1, y, z0), (x1, y, z1)), ((x0, y, z0), (x1, y, z1), (x0, y, z1))]
+
+
+def milestone3(uc):
+    # fresh start behind her (heading 0, so the camera looks along +z and sits at z ~2282)
+    uc.mem_write(PLAYER + 0x92, struct.pack("<H", 0))
+    uc.mem_write(0x000AFF04, struct.pack("<I", 0))
+    t = 100.0
+    room(uc)
+    frame(uc, t)
+    free_eye, _ = cam(uc)
+    expect(abs(free_eye[2] - 2282.1) < 0.5, f"no room data: camera as before (z {free_eye[2]:.1f})")
+    room(uc, walls=quad(-1500, 1500, -500, 1500, 2400.0))      # a wall 100 behind her
+    t += 1 / 60
+    frame(uc, t)
+    eye, _ = cam(uc)
+    pull = struct.unpack("<f", uc.mem_read(0x000AFF50, 4))[0]
+    expect(2400.0 < eye[2] < 2430.0, f"a wall behind her: the camera stops just in front of it (z {eye[2]:.1f}, pull {pull:.2f})")
+    room(uc)
+    t += 1 / 60
+    frame(uc, t)
+    eye2, _ = cam(uc)
+    expect(eye[2] - 30 < eye2[2] < eye[2], f"the wall gone: it eases back out, not in one jump (z {eye2[2]:.1f})")
+    for i in range(120):
+        t += 1 / 60
+        frame(uc, t)
+    eye3, _ = cam(uc)
+    expect(abs(eye3[2] - free_eye[2]) < 2.0, f"...and is back after 2 s (z {eye3[2]:.1f})")
+    room(uc, floors=flat(-1500, 1500, 1000, 3500, -200.0))      # the floor far below (a stairwell)
+    t += 1 / 60
+    frame(uc, t)
+    eye4, _ = cam(uc)
+    expect(abs(eye4[1] - (-200.0 + 190.0)) < 0.5, f"head-room: the camera at most 190 above the floor under it (y {eye4[1]:.1f})")
+    room(uc)
+
+
 def main():
     words, syms, notes = build.build()
     uc = machine(words)
@@ -212,7 +279,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 2 and st[2] == 1 and st[7] == 1, "status: magic, version 2, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 3 and st[2] == 1 and st[7] == 1, "status: magic, version 3, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):
@@ -227,6 +294,7 @@ def main():
     call_site(uc)
     expect(uc.mem_read(0x002F7450 + 31 * 0x8C + 0x0B, 1)[0] == 0x10, "a line the game is using is left alone")
     milestone2(uc)
+    milestone3(uc)
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
     return 1 if FAILS else 0
 

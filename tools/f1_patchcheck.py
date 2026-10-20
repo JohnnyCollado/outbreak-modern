@@ -65,6 +65,7 @@ def main():
         time.sleep(1.0)
         b = read(pine)
         v2 = read_v2(pine) if b[1] >= 2 else None
+        pull = struct.unpack("<f", pine.read_block(STATUS + 0x50, 4))[0] if b[1] >= 3 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -93,6 +94,8 @@ def main():
         print(f"  eye ({v2[4]:.0f}, {v2[5]:.0f}, {v2[6]:.0f}) -> look ({v2[7]:.0f}, {v2[8]:.0f}, {v2[9]:.0f}); "
               f"walking facing {'active' if v2[10] else 'idle'}; right-stick dead zone "
               + (f"{v2[11]} (callouts on L1)" if v2[11] != 0xFFFF else "not found (callouts not gated)"))
+    if pull is not None:
+        print(f"  walls: camera at {pull * 100:.0f}% of its distance" + (" (pulled in by a wall)" if pull < 0.99 else ""))
     return 0 if rate > 0 else 2
 
 

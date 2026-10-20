@@ -4,6 +4,7 @@ The PC tools in `tools/` drive the camera from outside the game over PINE. This 
 same mod as our own code running *inside* the game, delivered as a patch file ARMSX2 (or PCSX2)
 loads by itself: `patches/SLPM-65428_32088394.pnach`.
 
+- `collide.c`: segment vs the room's collision triangles, read in place (the game's grids).
 - `stub.S`: the entry. A patched call site calls it; it saves every register (128-bit, the EE's),
   runs `mod_frame()`, and continues into the game's own `func_00345740`.
 - `mod.c`: the mod, run every frame. `game.h`: the game addresses (from the decomp, confirmed on
@@ -25,12 +26,14 @@ loads by itself: `patches/SLPM-65428_32088394.pnach`.
 3. Optional: `python tools/f1_patchcheck.py` (PC or Termux) shows the code's status.
 
 Don't run the PC mod (`f1_camtest.py run`) at the same time: both would drive the camera.
-Not in yet (milestone 3): the camera doesn't stop at walls.
+Not in yet: aiming (milestone 4), the button layout and quick turn (milestone 5).
 
 ## Milestones
 
 1. Pipeline: our code runs every frame and reports. Done (device, 2026-10-20).
 2. The over-the-shoulder camera on the right stick, modern walking (she faces down the stick,
    relative to the camera), callouts only with L1 + right stick, SELECT + R3 (hold 1 s) to switch
-   it off and on. This version.
-3. Collision (walls, headroom). 4. Aiming, servo, crosshair. 5. Button layout, quick turn.
+   it off and on. Done (device, 2026-10-20).
+3. Collision: the camera stops short of walls (traced from her shoulder point, eased back out)
+   and stays within 190 of the floor under it (stairs: no ceilings in the data). This version.
+4. Aiming, servo, crosshair. 5. Button layout, quick turn.

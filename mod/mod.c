@@ -2,9 +2,11 @@
    before the camera goes to the renderer: what tools/f1_camtest.py `run` does from the PC, here
    inside the game. Milestone 2: the over-the-shoulder camera on the right stick, modern
    walking, callouts on L1 + right stick, SELECT + R3 to switch it all off and on.
-   Collision, aiming and the button layout come in the next milestones. */
+   Milestone 3: the camera stays inside the room (walls) and under the stairs (headroom).
+   Aiming and the button layout come in the next milestones. */
 #include "mod.h"
 #include "mathf.h"
+#include "collide.h"
 
 #define STATUS (*(volatile ModStatus *)MOD_STATUS)
 
@@ -19,6 +21,10 @@
 #define ORBIT_SPEED     DEG(100.0f)     /* rad/s at full right stick (device: 150 felt fast) */
 #define TURN_SPEED      DEG(900.0f)     /* modern walking: how fast she turns to the stick */
 #define STICK_DEAD      0.15f
+#define TARGET_HEIGHT   140.0f          /* her middle, where the wall trace starts */
+#define WALL_MARGIN     20.0f           /* units kept between the camera and a wall */
+#define HEADROOM        190.0f          /* max camera height above the floor under it (no ceilings in the data) */
+#define PULL_EASE       0.3f            /* seconds to ease back out after a wall */
 #define COUNT_HZ        294912000.0f    /* the EE's cycle counter (COP0 Count) */
 #define COMBO_HOLD      (COUNT_HZ * 1.0f)
 
@@ -30,6 +36,7 @@ typedef struct {
     u32 player;         /* which player the camera was set up behind */
     f32 yaw, pitch;
     f32 face;           /* modern walking: her facing, radians */
+    f32 pull;           /* fraction of the shoulder -> eye distance in use (walls) */
     u32 facing;
     s16 callout_dz;     /* the game's own right-stick dead zone, once found */
     u16 dz_known;
@@ -126,6 +133,7 @@ void mod_frame(u32 caller) {
         st.combo_since = 0;
         st.combo_done = 0;
         st.facing = 0;
+        st.pull = 1.0f;
         show_text(ms->enabled ? banner_on : banner_off, 16, 16, 240, 16);
     }
     dt = (float)(now - st.last_count) * (1.0f / COUNT_HZ);
@@ -191,6 +199,44 @@ void mod_frame(u32 caller) {
     look[0] = pivot[0] + d[0] * LOOKAHEAD;
     look[1] = pivot[1] + d[1] * LOOKAHEAD;
     look[2] = pivot[2] + d[2] * LOOKAHEAD;
+    {
+        /* No room data (a load, a room change): no wall in the way, so the pull eases back. */
+        float floor, top, centre[3], side[3], ts, span, want = 1.0f, t, keep;
+        int i, ready = coll_ready();
+        /* Head-room: no ceilings in the data, but floors are, and anywhere people walk has room
+           above it: keep the eye within HEADROOM of the floor under it (stairs). */
+        top = eye[1] > ms->player[1] + TARGET_HEIGHT ? eye[1] : ms->player[1] + TARGET_HEIGHT;
+        floor = ready ? coll_floor_below(eye[0], top + 50.0f, eye[2], 1500.0f, -1e30f) : -1e30f;
+        if (floor > -1e29f) {
+            eye[1] = clampf(eye[1], floor + 30.0f, floor + HEADROOM);
+        }
+        /* Walls (f1_camtest.collide_pull): trace from her middle out to her shoulder point, then
+           from there to the eye; stop WALL_MARGIN short of the first triangle. The pivot is the
+           shoulder, so a squeeze ends over her shoulder rather than inside her back. */
+        centre[0] = ms->player[0];
+        centre[1] = ms->player[1] + TARGET_HEIGHT;
+        centre[2] = ms->player[2];
+        side[0] = centre[0] + rx * SHOULDER;
+        side[1] = centre[1];
+        side[2] = centre[2] + rz * SHOULDER;
+        ts = ready ? coll_first_hit(centre, side) : -1.0f;
+        if (ts >= 0.0f) {
+            keep = ts - WALL_MARGIN / SHOULDER;
+            if (keep < 0.0f) keep = 0.0f;
+            for (i = 0; i < 3; i++) side[i] = centre[i] + (side[i] - centre[i]) * keep;
+        }
+        span = sqrtf_((eye[0] - side[0]) * (eye[0] - side[0]) + (eye[1] - side[1]) * (eye[1] - side[1])
+                      + (eye[2] - side[2]) * (eye[2] - side[2]));
+        t = ready ? coll_first_hit(side, eye) : -1.0f;
+        if (t >= 0.0f) {
+            want = t - WALL_MARGIN / (span > 1e-3f ? span : 1e-3f);
+            if (want < 0.0f) want = 0.0f;
+        }
+        /* snap in, ease back out */
+        st.pull = want < st.pull ? want : st.pull + (want - st.pull) * (dt / (PULL_EASE + dt));
+        for (i = 0; i < 3; i++) eye[i] = side[i] + (eye[i] - side[i]) * st.pull;
+    }
+    ms->pull = st.pull;
     MEM(f32, CAM_POS) = eye[0];
     MEM(f32, CAM_POS + 4) = eye[1];
     MEM(f32, CAM_POS + 8) = eye[2];
