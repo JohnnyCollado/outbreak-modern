@@ -47,4 +47,4 @@ While aiming, R3 + D-pad trims the aim in 0.1 deg steps (shown on screen) if it 
 5. The modern button layout (L2 aims, R2 fires with circle still working, R1 runs; cross kicks
    while aiming and backs out of menus but doesn't run; lock-on aim and L2's old action off) and
    the quick turn (down + cross: she turns about, the camera swings in behind her over 0.25 s).
-   SELECT + R3 off gives the game's own buttons back. This version.
+   SELECT + R3 off gives the game's own buttons back. Done (device, 2026-10-20).
