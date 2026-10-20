@@ -69,7 +69,7 @@ typedef struct {
     f32 aim_face;       /* free aim: her facing, turned toward the aim */
     u32 aim_face_set;
     u32 cross_shown;
-    f32 gain;           /* calibration (0 = not set yet = 1.0); kept across rooms */
+    s32 trim_up, trim_right;    /* aim trim, TRIM_STEP steps; kept across rooms */
     Servo servo;
 } State;
 
@@ -79,27 +79,34 @@ static const char banner_on[] = "Modern Camera: on   (SELECT + R3: off)";
 static const char banner_off[] = "Modern Camera: off  (SELECT + R3: on)";
 static const char cross_glyph[] = "\x81\x7b";     /* the full-width plus (Shift-JIS): square on screen */
 
-/* Calibration: what the game does with the gun-elevation field isn't known (the decomp only
-   copies it for the network, charsync.c), and on the device the gun pointed at the ground at a
-   slight downward look and went "all the way up" at a slight upward one: the field may not be
-   0x10000 per turn. While aiming, R3 + D-pad up/down scales what we write by 0.05 steps; the
-   value shows on screen, to be reported and built in. */
-#define GAIN_STEP       0.05f
-#define GAIN_MIN        0.10f
-#define GAIN_MAX        2.00f
+/* Aim trim: after the sqrt fix the gun follows the camera (device log, 2026-10-20), but shots
+   still land "slightly off": the game fires from the gun in her hand, not from the middle of her
+   chest, and by how much isn't known. While aiming, R3 + D-pad turns the aim up/down/left/right
+   in TRIM_STEP steps, shown on screen, to be reported and built in. */
+#define TRIM_STEP       DEG(0.5f)
+#define TRIM_MAX        40              /* steps: +-20 deg */
 
 static int show_line(int slot, const char *text, s16 x, s16 y, s16 frames, u8 size);
 
-/* "gun angle x1.00  (R3 + up/down)" with the factor filled in (built on the stack: initialised
-   writable data would be rewritten by the patch every frame, so the linker refuses it). */
-static void show_gain(float g) {
-    static const char tmpl[] = "gun angle x0.00  (R3 + up/down)";
+/* "+12.5" for n half-degree steps, into out[0..4]. */
+static void fmt_half(char *out, int n) {
+    int a = n < 0 ? -n : n;
+    out[0] = n < 0 ? '-' : '+';
+    out[1] = (char)(a / 20 ? '0' + a / 20 : ' ');
+    out[2] = (char)('0' + (a / 2) % 10);
+    out[3] = '.';
+    out[4] = (a & 1) ? '5' : '0';
+}
+
+/* "aim trim: up +0.0  right +0.0  (R3 + D-pad)" (built on the stack: initialised writable data
+   would be rewritten by the patch every frame, so the linker refuses it). */
+static void show_trim(int up, int right) {
+    static const char tmpl[] = "aim trim: up +00.0  right +00.0  (R3 + D-pad)";
     char msg[sizeof(tmpl)];
-    int c = (int)(g * 100.0f + 0.5f), i;
+    int i;
     for (i = 0; i < (int)sizeof(tmpl); i++) msg[i] = tmpl[i];
-    msg[11] = (char)('0' + (c / 100) % 10);
-    msg[13] = (char)('0' + (c / 10) % 10);
-    msg[14] = (char)('0' + c % 10);
+    fmt_half(msg + 13, up);
+    fmt_half(msg + 26, right);
     show_line(TEXT_SLOT, msg, 16, 16, 180, 16);
 }
 
@@ -431,6 +438,18 @@ void mod_frame(u32 caller) {
             face = view + clampf(wrap_pi(face - view), -CONVERGE_YAW, CONVERGE_YAW);
             elev = tilt + clampf(elev - tilt, -CONVERGE_ELEV, CONVERGE_ELEV);
         }
+        if ((buttons & BTN_R3) && (pressed & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT))) {
+            if ((pressed & BTN_UP) && st.trim_up < TRIM_MAX) st.trim_up++;
+            if ((pressed & BTN_DOWN) && st.trim_up > -TRIM_MAX) st.trim_up--;
+            if ((pressed & BTN_RIGHT) && st.trim_right < TRIM_MAX) st.trim_right++;
+            if ((pressed & BTN_LEFT) && st.trim_right > -TRIM_MAX) st.trim_right--;
+            show_trim(st.trim_up, st.trim_right);
+        }
+        /* right is -yaw here (the right stick turns the view right by decreasing yaw) */
+        face -= (float)st.trim_right * TRIM_STEP;
+        elev += (float)st.trim_up * TRIM_STEP;
+        ms->trim_up = (float)st.trim_up * 0.5f;
+        ms->trim_right = (float)st.trim_right * 0.5f;
         if (!st.aim_face_set) {
             st.aim_face = heading_of(p);
             st.aim_face_set = 1;
@@ -441,13 +460,7 @@ void mod_frame(u32 caller) {
         MEM(u32, p + P_TARGET) = 0;
         MEM(u8, p + P_TARGET_IDX) = 0xFF;
         MEM(s16, p + P_HEADING) = (s16)(int)(st.aim_face * (65536.0f / TWO_PI_F));
-        if (st.gain < GAIN_MIN) st.gain = 1.0f;
-        if ((buttons & BTN_R3) && (pressed & (BTN_UP | BTN_DOWN))) {
-            st.gain = clampf(st.gain + ((pressed & BTN_UP) ? GAIN_STEP : -GAIN_STEP), GAIN_MIN, GAIN_MAX);
-            show_gain(st.gain);
-        }
-        ms->gain = st.gain;
-        MEM(s16, p + P_ELEV) = (s16)(int)(clampf(elev * st.gain, -AIM_MAX, AIM_MAX) * (65536.0f / TWO_PI_F));
+        MEM(s16, p + P_ELEV) = (s16)(int)(elev * (65536.0f / TWO_PI_F));
         ms->elev = elev;
     }
     ms->aiming = aiming;

@@ -64,7 +64,7 @@ def screenshot(dev, path):
 
 def sample(pine, base):
     st, pl, aim, elev6, cdc, cam, pad = pine.read_multi([
-        (STATUS, 0x70), (base, 0x94), (base + 0x24, 4), (base + 0xBC8, 6), (base + 0xCDC, 1),
+        (STATUS, 0x74), (base, 0x94), (base + 0x24, 4), (base + 0xBC8, 6), (base + 0xCDC, 1),
         (CAMERA + 0x18, 24), (PAD, 8)])
     s = {
         "t": time.perf_counter(),
@@ -81,14 +81,14 @@ def sample(pine, base):
     }
     magic, version = struct.unpack_from("<2I", st, 0)
     if magic == 0x434D4F31:
-        f = struct.unpack_from("<4I3fI I3f 3f3f I I f IIIf f f f", st, 0)
+        f = struct.unpack_from("<4I3fI I3f 3f3f I I f IIIf f f f f", st, 0)
         # mod/mod.h ModStatus: 0..3 magic version frames caller, 4..6 player, 7 starts, 8 enabled,
         # 9 yaw, 10 pitch, 11 dt, 12..14 eye, 15..17 look, 18 facing, 19 callout_dz, 20 pull,
-        # 21 aiming, 22 free_aim, 23 servo, 24 elev, 25 game_fov, 26 converge, 27 gain
+        # 21 aiming, 22 free_aim, 23 servo, 24 elev, 25 game_fov, 26 converge, 27/28 trim up/right (v8)
         s["patch"] = {"version": version, "enabled": f[8], "yaw": math.degrees(f[9]), "pitch": math.degrees(f[10]),
                       "pull": f[20], "aiming": f[21], "free_aim": f[22], "servo": f[23],
                       "elev_written": math.degrees(f[24]), "fov": f[25], "converge": f[26],
-                      "gain": f[27] if version >= 7 else None}
+                      "trim_up": f[27] if version >= 8 else None, "trim_right": f[28] if version >= 8 else None}
     return s
 
 
@@ -124,7 +124,8 @@ def main(argv):
                 print(f"  {s['t']:6.2f}s act {s['act'][0]}/{s['act'][1]:<3} view {view:6.1f} heading {s['heading']:6.1f}  "
                       f"camera tilt {cam_elev:+6.1f}  gun written {p.get('elev_written', float('nan')):+6.1f} "
                       f"read {game_elev:+6.1f} (raw {s['elev_raw']})  conv {p.get('converge', 0):5.0f} "
-                      f"x{(p.get('gain') or 0):.2f}" + ("  FREE" if p.get("free_aim") else ""), flush=True)
+                      f"trim {(p.get('trim_up') or 0):+.1f}/{(p.get('trim_right') or 0):+.1f}"
+                      + ("  FREE" if p.get("free_aim") else ""), flush=True)
             time.sleep(max(0.0, 1 / 60 - (time.perf_counter() - t0 - s["t"])))
     except KeyboardInterrupt:
         pass

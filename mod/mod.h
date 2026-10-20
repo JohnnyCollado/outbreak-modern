@@ -10,7 +10,7 @@
 #define MOD_STATE   0x000A8000u
 #define MOD_STATUS  0x000AFF00u
 #define MOD_MAGIC   0x434D4F31u     /* "1OMC" */
-#define MOD_VERSION 7
+#define MOD_VERSION 8
 
 typedef struct {
     u32 magic;          /* MOD_MAGIC once our code has run since the region was last cleared */
@@ -36,7 +36,8 @@ typedef struct {
     /* 0x64: milestone 4, device fixes */
     f32 game_fov;       /* the camera's FOV (degrees; the shot's own, left alone) */
     f32 converge;       /* free aim: distance to what the crosshair is on (enemy, wall, or 1500) */
-    f32 gain;           /* gun-angle calibration factor (R3 + D-pad up/down while aiming) */
+    f32 trim_up;        /* aim trim, degrees (R3 + D-pad while aiming) */
+    f32 trim_right;
 } ModStatus;
 
 #endif

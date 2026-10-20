@@ -407,16 +407,22 @@ def milestone4(uc):
     expect(abs(conv - 500) < 5, f"an enemy on the crosshair: converges on it ({conv:.0f} out)")
     expect(abs(((h - want_face) + 180) % 360 - 180) < 0.3 and abs(gun - want_elev) < 0.3,
            f"...her heading and gun go from her chest through it ({h:.2f}/{want_face:.2f}, {gun:.2f}/{want_elev:.2f} deg)")
-    # calibration: R3 + D-pad down twice -> x0.90, the elevation written scaled by it
+    # trim: R3 + D-pad up 3 times, left once -> up +1.5, right -0.5; applied, shown
     uc.mem_write(0x002F7450 + 31 * 0x8C, b"\0" * 0x8C)                          # (an earlier test gave line 31 to "the game")
-    for b in (0x0400, 0x4400, 0x0400, 0x4400, 0x0000):
+    for b in (0x0400, 0x1400, 0x0400, 0x1400, 0x0400, 0x1400, 0x0400, 0x8400, 0x0000):
         t += 1 / 60
         frame(uc, t, (b, 128, 128, 128, 128))
-    gain = struct.unpack("<f", uc.mem_read(0x000AFF6C, 4))[0]
+    for i in range(30):
+        t += 1 / 60
+        frame(uc, t)
+    up, right = struct.unpack("<2f", uc.mem_read(0x000AFF6C, 8))
     gun2 = struct.unpack("<h", uc.mem_read(PLAYER + 0xBC8, 2))[0] * 360 / 65536
-    line = bytes(uc.mem_read(0x002F7450 + 31 * 0x8C + 0x0C, 40)).split(b"\0")[0]
-    expect(abs(gain - 0.9) < 1e-5 and abs(gun2 - want_elev * 0.9) < 0.1 and line.startswith(b"gun angle x0.90"),
-           f"R3 + D-pad: gun-angle factor {gain:.2f}, shown ({line!r}), applied ({gun2:.2f} vs {want_elev * 0.9:.2f})")
+    h3 = heading(uc)
+    line = bytes(uc.mem_read(0x002F7450 + 31 * 0x8C + 0x0C, 60)).split(b"\0")[0]
+    expect((up, right) == (1.5, -0.5) and line.startswith(b"aim trim: up + 1.5  right - 0.5"),
+           f"R3 + D-pad: aim trim up {up:+.1f} right {right:+.1f}, shown ({line!r})")
+    expect(abs(gun2 - (want_elev + 1.5)) < 0.1 and abs(((h3 - (want_face + 0.5)) + 180) % 360 - 180) < 0.1,
+           f"...applied: gun {gun2:.2f} (was {want_elev:.2f}), heading {h3:.2f} (was {want_face:.2f}; left = +yaw)")
     uc.mem_write(thing + 0x544, struct.pack("<h", 0))                          # dead
     t += 1 / 60
     frame(uc, t)
@@ -466,7 +472,7 @@ def main():
     expect(uc.reg_read(UC_MIPS_REG_29) == SP, "...and the stack pointer")
     expect(uc.reg_read(UC_MIPS_REG_31) == SITE + 8, "the game function returns to the call site")
     st = struct.unpack("<4I3fI", uc.mem_read(0x000AFF00, 32))
-    expect(st[0] == 0x434D4F31 and st[1] == 7 and st[2] == 1 and st[7] == 1, "status: magic, version 7, 1 frame, 1 start")
+    expect(st[0] == 0x434D4F31 and st[1] == 8 and st[2] == 1 and st[7] == 1, "status: magic, version 8, 1 frame, 1 start")
     expect(st[3] == SITE + 8, "status: the caller")
     expect(st[4:7] == (100.0, -5.0, 2500.0), "status: our player's position")
     for _ in range(40):

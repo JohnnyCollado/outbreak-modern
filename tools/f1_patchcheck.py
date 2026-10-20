@@ -69,7 +69,7 @@ def main():
         aim = struct.unpack("<IIIf", pine.read_block(STATUS + 0x54, 16)) if b[1] >= 4 else None
         game_fov = struct.unpack("<f", pine.read_block(STATUS + 0x64, 4))[0] if b[1] >= 5 else None
         converge = struct.unpack("<f", pine.read_block(STATUS + 0x68, 4))[0] if b[1] >= 6 else None
-        gain = struct.unpack("<f", pine.read_block(STATUS + 0x6C, 4))[0] if b[1] >= 7 else None
+        trim = struct.unpack("<2f", pine.read_block(STATUS + 0x6C, 8)) if b[1] >= 8 else None
     finally:
         pine.close()
     if b[0] != MAGIC:
@@ -110,7 +110,7 @@ def main():
         if aim[0]:
             print(f"  aiming: " + (f"free aim, gun at {math.degrees(aim[3]):+.1f} deg" if aim[1] else "the game's own aim (no servo)")
                   + (f", converging {converge:.0f} out" if aim[1] and converge else "")
-                  + (f", gun-angle factor x{gain:.2f}" if aim[1] and gain else ""))
+                  + (f", aim trim up {trim[0]:+.1f} right {trim[1]:+.1f}" if aim[1] and trim else ""))
     return 0 if rate > 0 else 2
 
 
