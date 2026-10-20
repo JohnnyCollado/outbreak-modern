@@ -31,39 +31,54 @@ MODERN = {
     10: (0, 0),              # aim WITH lock-on (was R1): off; with free aim the camera aims
     7: (0, 0),               # L2's old action: off (it pairs with right-stick flicks; the camera owns that stick)
 }
-# Entry 4 (game bit 0x10) is both run and, while an aim bit 0x440 is held, Kevin's kick
-# (charmove.c func_0061E810). The map can't tell them apart, so it follows the context:
-RUN_WHEN = {
-    False: (R1, 3),          # not aiming: R1 runs, cross doesn't (user's choice)
-    True: (CROSS, 2),        # aiming: cross is the kick again, as in the original game
-}
+# Entry 4 (game bit 0x10) is run, Kevin's kick while an aim bit 0x440 is held (charmove.c
+# func_0061E810) AND "back" in the menus. The map can't tell them apart, so it follows the context
+# (device reports: cross shouldn't run, but must still kick and back out of menus):
+#   aiming                    -> cross (the kick)
+#   not aiming, moving        -> R1 only (so cross + a direction doesn't run)
+#   not aiming, not moving    -> R1 or cross (cross backs out of menus; tapping it standing still
+#                                does what it did in the original game)
+DIRECTIONS = 0xF000           # the D-pad bits of the raw button word
+
+
+def run_entry(aiming, moving, cross_runs=False):
+    if cross_runs:
+        return (R1 | CROSS, 3)
+    if aiming:
+        return (CROSS, 2)
+    return (R1, 3) if moving else (R1 | CROSS, 3)
 
 
 class ButtonMap:
     """Apply, keep and restore the modern layout through a PINE client (port 0)."""
 
-    def __init__(self, pine, layout=None):
+    def __init__(self, pine, layout=None, cross_runs=False):
         self.pine, self.layout, self.orig = pine, layout or MODERN, None
-        self.aiming = False
+        self.cross_runs = cross_runs
+        self.ctx = (False, False)                 # (aiming, moving)
 
     def _read(self):
         raw = self.pine.read_block(PAD_MAP, ENTRIES * 8)
         return [struct.unpack_from("<II", raw, 8 * i) for i in range(ENTRIES)]
 
     def _wanted(self, base):
-        layout = {**self.layout, 4: RUN_WHEN[self.aiming]}
+        layout = {**self.layout, 4: run_entry(*self.ctx, self.cross_runs)}
         return [layout.get(i, base[i]) for i in range(ENTRIES)]
-
-    def set_aiming(self, aiming):
-        """Switch entry 4 between run (R1) and kick (cross). Returns True if it changed."""
-        if self.orig is None or aiming == self.aiming:
-            return False
-        self.aiming = aiming
-        self.pine.write_multi([(PAD_MAP + 4 * 8, list(RUN_WHEN[aiming]))])
-        return True
 
     def _write(self, entries):
         self.pine.write_multi([(PAD_MAP, [w for e in entries for w in e])])
+
+    def set_context(self, aiming, moving):
+        """Switch entry 4 (run / kick / menu back) for the context. Returns True if it changed."""
+        new = (aiming, moving)
+        if self.orig is None or new == self.ctx:
+            return False
+        before = run_entry(*self.ctx, self.cross_runs)
+        self.ctx = new
+        after = run_entry(*new, self.cross_runs)
+        if after != before:
+            self.pine.write_multi([(PAD_MAP + 4 * 8, list(after))])
+        return after != before
 
     def _preset(self):
         """The game's own default map for this controller, or None if it doesn't look like one.
@@ -85,8 +100,10 @@ class ButtonMap:
         if self.orig is None:
             self.orig = self._preset() or cur
         self._write(self._wanted(self.orig))
-        return ("modern buttons: L2 aims, R2 fires (circle still works), R1 runs; cross only kicks "
-                "(while aiming); lock-on aim and L2's old action off")
+        return ("modern buttons: L2 aims, R2 fires (circle still works), R1 runs; "
+                + ("cross also runs (--cross-runs)" if self.cross_runs else
+                   "cross kicks while aiming and backs out of menus, but doesn't run")
+                + "; lock-on aim and L2's old action off")
 
     def ensure(self):
         """Re-apply if the game reset the map (controller reconnect). True if re-applied."""

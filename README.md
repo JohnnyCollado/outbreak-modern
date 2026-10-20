@@ -29,5 +29,5 @@ Results land in `results/`.
 - `tools/test_freeaim.py`: finder/patch tests on a synthetic stand-in (no game code)
 - `tools/f1_controls.py`: read-only `buttons` (the game's button map) and `watch` (buttons pressed →
   game action bits), groundwork for the modern button layout
-- `tools/f1_buttons.py`: modern button layout while `run` is active (L2 aims, R2 fires, R1 runs, ✕ kicks while aiming; restored on exit)
+- `tools/f1_buttons.py`: modern button layout while `run` is active (L2 aims, R2 fires, R1 runs; ✕ kicks while aiming and backs out of menus; restored on exit)
 - `tools/test_buttons.py`: layout tests on a map laid out like the device's

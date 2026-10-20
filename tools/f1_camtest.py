@@ -449,7 +449,7 @@ def cmd_run(a):
     last_target = None
     buttons = None
     if a.modern_buttons:
-        buttons = f1_buttons.ButtonMap(pine)
+        buttons = f1_buttons.ButtonMap(pine, cross_runs=a.cross_runs)
         print(buttons.apply())
     servo = None
     if a.free_aim:
@@ -518,7 +518,9 @@ def cmd_run(a):
                     smooth_heading, yaw_off = smooth_heading + yaw_off, 0.0   # keep the view where it is
             was_aiming = aiming
             if buttons:
-                buttons.set_aiming(aiming)              # cross: kick while aiming, nothing otherwise
+                raw_buttons = struct.unpack_from("<H", pad, 2)[0]
+                moving = bool(raw_buttons & f1_buttons.DIRECTIONS or stick(pad[PAD_LX]) or stick(pad[PAD_LY]))
+                buttons.set_context(aiming, moving)   # cross: kick / menu back / no run
             free_aiming = aiming and servo is not None and servo.active
             target = struct.unpack_from("<I", pl, PLAYER_TARGET)[0] if aiming else None
             if target != last_target and aiming:
@@ -676,8 +678,8 @@ def main(argv=None):
     r.add_argument("--fov", type=float, default=0, help="override FOV in degrees (0 = keep the game's)")
     r.add_argument("--follow", type=float, default=0.15, help="seconds to swing behind a turn (0 = rigid)")
     r.add_argument("--orbit-speed", type=float, default=100, help="degrees/s at full right stick (device: 150 felt fast)")
-    r.add_argument("--strafe-speed", type=float, default=150,
-                   help="units/s at full left stick while free-aiming (about half her walk; 0 = off)")
+    r.add_argument("--strafe-speed", type=float, default=0,
+                   help="units/s at full left stick while free-aiming (0 = stand still, RE5 style; ~150 = half her walk)")
     r.add_argument("--follow-while-moving", action="store_true",
                    help="let the camera chase her facing while the left stick is pushed (old behaviour)")
     r.add_argument("--recenter", type=float, default=1.0,
@@ -697,6 +699,8 @@ def main(argv=None):
                    help="seconds the camera takes to swing round to a locked-on target")
     r.add_argument("--classic-buttons", dest="modern_buttons", action="store_false",
                    help="keep the game's buttons (default: L2 aims, R2 fires while the camera runs)")
+    r.add_argument("--cross-runs", action="store_true",
+                   help="cross runs as in the original game (default: R1 runs, cross kicks/backs out only)")
     r.add_argument("--free-aim", action="store_true",
                    help="switch off the game's 3-position aim servo; the gun follows where the camera looks")
     r.add_argument("--aim-max", type=float, default=45, help="free aim limit up/down, degrees (game: 45)")

@@ -51,11 +51,14 @@ def main():
     expect(game_bits(ram, B.L2) == 0x40, "L2 now aims (0x40)")
     expect(game_bits(ram, B.R2) == 0x20, "R2 now fires (0x20)")
     expect(game_bits(ram, B.CIRCLE) == 0x20, "circle still fires/interacts (0x20)")
-    expect(game_bits(ram, B.R1) == 0x10 and game_bits(ram, B.CROSS) == 0, "not aiming: R1 runs (0x10), cross does nothing")
-    expect(m.set_aiming(True) and game_bits(ram, B.CROSS) == 0x10 and game_bits(ram, B.R1) == 0,
-           "aiming: cross gives 0x10 again (Kevin's kick with an aim bit held)")
-    expect(not m.set_aiming(True), "no rewrite when the context didn't change")
-    expect(m.set_aiming(False) and game_bits(ram, B.R1) == 0x10 and game_bits(ram, B.CROSS) == 0, "back to R1 runs")
+    expect(game_bits(ram, B.R1) == 0x10 and game_bits(ram, B.CROSS) == 0x10,
+           "standing, not aiming: R1 runs, cross gives 0x10 (menus: back)")
+    expect(m.set_context(False, True) and game_bits(ram, B.R1) == 0x10 and game_bits(ram, B.CROSS) == 0,
+           "moving, not aiming: R1 runs, cross gives nothing (no cross-run)")
+    expect(m.set_context(True, True) and game_bits(ram, B.CROSS) == 0x10 and game_bits(ram, B.R1) == 0,
+           "aiming: cross gives 0x10 (Kevin's kick with an aim bit held)")
+    expect(not m.set_context(True, False), "aiming, moving or not: same entry, no rewrite")
+    expect(m.set_context(False, False) and game_bits(ram, B.CROSS) == 0x10, "back to standing: cross backs out again")
     expect(not any(game_bits(ram, 1 << b) & 0x400 for b in range(16)), "nothing triggers lock-on aim (0x400)")
     expect(game_bits(ram, 0x1000) == 0x1 and game_bits(ram, 0x0004) == 0x800, "D-pad and L1 (item) unchanged")
     expect(not any(game_bits(ram, 1 << b) & 0x80 for b in range(16)), "nothing triggers L2's old action (0x80)")
@@ -78,6 +81,11 @@ def main():
     expect(fallback._preset() is None, "a preset that doesn't look like a button map is rejected")
     fallback.apply()
     expect(fallback.orig == before, "...and the current map is kept as the original instead")
+    legacy = bytearray(ram)
+    lm = B.ButtonMap(FakePine(legacy), cross_runs=True)
+    lm.apply()
+    lm.set_context(False, True)
+    expect(game_bits(legacy, B.CROSS) == 0x10 and game_bits(legacy, B.R1) == 0x10, "--cross-runs: cross runs as originally")
     empty = B.ButtonMap(FakePine(bytearray(32 << 20)))
     expect("not changed" in empty.apply() and empty.orig is None, "an empty map is left alone")
     print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILURE(S)")
