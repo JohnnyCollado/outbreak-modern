@@ -10,7 +10,7 @@ Overlapping lines: the one with the larger prio number is hidden, so ours uses 0
 gives way to the game's own messages.
 
   python tools/f1_crosshair.py check       READ-ONLY: are those conditions met in this build?
-  python tools/f1_crosshair.py show 5      draw "+" at the centre for 5 s, then remove it
+  python tools/f1_crosshair.py show 5 [full|half|dot]   draw it at the centre for 5 s, then remove it
 """
 import os
 import struct
@@ -36,18 +36,24 @@ def line_addr(i):
     return LINES + i * LINE_SIZE
 
 
+# Glyphs: the half-width "+" is a tall, narrow cell (it looked stretched on the device); the font
+# is Shift-JIS, so the full-width plus (0x817B) is square. Width in units of `size`.
+STYLES = {"full": (b"\x81\x7b", 1.0), "half": (b"+", 0.5), "dot": (b"\x81\x45", 1.0)}
+
+
 def pack_line(x, y, size, text, alpha=0x80, timer=0x7FFF, prio=OUR_PRIO):
-    body = text.encode("ascii") + b"\0"
+    body = (text if isinstance(text, bytes) else text.encode("ascii")) + b"\0"
     return struct.pack("<hhhhBbBB", 1, x, y, timer, size, 0, alpha, prio) + body.ljust(0x80, b"\0")
 
 
 class Crosshair:
     """Show/keep/hide one text line. Never touches a line the game is using."""
 
-    def __init__(self, pine, size=24, text="+", dx=0, dy=0, slot=SLOT):
-        self.pine, self.size, self.text, self.slot = pine, size, text, slot
-        # The string is drawn from its left edge; a half-width glyph is about size/2 wide.
-        self.x = SCREEN_W // 2 - (len(text) * size) // 4 + dx
+    def __init__(self, pine, size=24, style="full", dx=0, dy=0, slot=SLOT):
+        self.pine, self.size, self.slot = pine, size, slot
+        self.text, width = STYLES[style]
+        # The string is drawn from its top-left corner.
+        self.x = SCREEN_W // 2 - round(size * width / 2) + dx
         self.y = SCREEN_H // 2 - size // 2 + dy
         self.shown = False
 
@@ -105,14 +111,14 @@ def cmd_check():
     return 0 if ok else 2
 
 
-def cmd_show(seconds):
+def cmd_show(seconds, style="full"):
     pine, _ = phase2_check.connect_game()
-    c = Crosshair(pine)
+    c = Crosshair(pine, style=style)
     try:
         if not c.show():
             print("the slot is in use by the game; not drawing")
             return 2
-        print(f"drawing '+' at ({c.x},{c.y}) for {seconds:g} s ...")
+        print(f"drawing the {style} crosshair at ({c.x},{c.y}) for {seconds:g} s ...")
         t_end = time.time() + seconds
         while time.time() < t_end:
             time.sleep(0.5)
@@ -128,5 +134,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "check":
         sys.exit(cmd_check())
     if len(sys.argv) > 1 and sys.argv[1] == "show":
-        sys.exit(cmd_show(float(sys.argv[2]) if len(sys.argv) > 2 else 5))
+        sys.exit(cmd_show(float(sys.argv[2]) if len(sys.argv) > 2 else 5,
+                          sys.argv[3] if len(sys.argv) > 3 else "full"))
     print(__doc__)

@@ -463,7 +463,8 @@ def cmd_run(a):
     if a.modern_buttons:
         buttons = f1_buttons.ButtonMap(pine, cross_runs=a.cross_runs)
         print(buttons.apply())
-    cross = f1_crosshair.Crosshair(pine, size=a.crosshair_size) if a.crosshair else None
+    cross = (f1_crosshair.Crosshair(pine, size=a.crosshair_size, style=a.crosshair_style)
+             if a.crosshair else None)
     t_cross = 0.0
     servo = None
     if a.free_aim:
@@ -642,8 +643,19 @@ def cmd_run(a):
             if free_aiming:
                 # She faces where the camera looks and the gun takes its elevation, so the shot
                 # lines up with the view (0x10000 per turn). The hook applies these every frame.
-                face = smooth_heading + yaw_off           # the heading field; the camera adds --yaw-offset
-                elev = math.atan2(look[1] - eye[1], math.hypot(look[0] - eye[0], look[2] - eye[2]))
+                # Converge: the camera sits a shoulder to the side, so its centre ray (the crosshair)
+                # runs parallel to her gun line and the shots landed beside it (device: "slightly
+                # off to the right"). Find what the crosshair is on -- the first wall down that ray,
+                # else --converge ahead -- and point her and the gun from her chest at that point.
+                d = [look[i] - eye[i] for i in range(3)]
+                n = math.sqrt(sum(c * c for c in d)) or 1.0
+                d = [c / n for c in d]
+                far = tuple(eye[i] + d[i] * a.converge for i in range(3))
+                hit = room.first_hit(eye, far) if (room and room.grids) else None
+                aim_pt = tuple(eye[i] + d[i] * a.converge * (hit if hit is not None else 1.0) for i in range(3))
+                chest = (p[0], p[1] + rig.target_height, p[2])
+                face = math.atan2(aim_pt[0] - chest[0], aim_pt[2] - chest[2]) - math.radians(a.yaw_offset)
+                elev = math.atan2(aim_pt[1] - chest[1], math.hypot(aim_pt[0] - chest[0], aim_pt[2] - chest[2]))
                 lim = round(a.aim_max / 360 * 65536)
                 writes.append((block + B_AIM_HEADING,
                                [round(face / (2 * math.pi) * 65536) & 0xFFFF,
@@ -764,6 +776,10 @@ def main(argv=None):
     r.add_argument("--no-crosshair", dest="crosshair", action="store_false",
                    help="don't draw the '+' crosshair while aiming")
     r.add_argument("--crosshair-size", type=int, default=24, help="crosshair text size")
+    r.add_argument("--crosshair-style", choices=sorted(f1_crosshair.STYLES), default="full",
+                   help="full: square plus (default); half: the narrow ASCII +; dot")
+    r.add_argument("--converge", type=float, default=1500,
+                   help="free aim: aim at the point this far down the crosshair if no wall is nearer")
     r.add_argument("--free-aim", action="store_true",
                    help="switch off the game's 3-position aim servo; the gun follows where the camera looks")
     r.add_argument("--aim-max", type=float, default=45, help="free aim limit up/down, degrees (game: 45)")
