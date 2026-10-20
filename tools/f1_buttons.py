@@ -17,14 +17,25 @@ import struct
 
 PAD_MAP = 0x00292C80
 ENTRIES = 16
-L2, R2, CIRCLE = 0x0001, 0x0002, 0x0020
+# The presets padread.c copies into PAD_MAP when a controller connects, by PadPort.kind
+# (D_00292D60[port] + 7: 0 digital, 1 analog, 2 analog with pressure).
+PAD_KIND = 0x00292D60 + 7
+PRESETS = {0: 0x00213620, 1: 0x002135A0, 2: 0x002135A0}
+L2, R2, R1, CIRCLE, CROSS = 0x0001, 0x0002, 0x0008, 0x0020, 0x0040
 
 # entry -> (mask, group). Group travels with the button (it looks like the pressure group:
 # 1 D-pad, 2 face, 3 shoulders, 0 none).
 MODERN = {
     6: (L2, 3),              # aim without a target: L2
     5: (R2 | CIRCLE, 3),     # fire / interact: R2, and circle still works
+    10: (0, 0),              # aim WITH lock-on (was R1): off; with free aim the camera aims
     7: (0, 0),               # L2's old action: off (it pairs with right-stick flicks; the camera owns that stick)
+}
+# Entry 4 (game bit 0x10) is both run and, while an aim bit 0x440 is held, Kevin's kick
+# (charmove.c func_0061E810). The map can't tell them apart, so it follows the context:
+RUN_WHEN = {
+    False: (R1, 3),          # not aiming: R1 runs, cross doesn't (user's choice)
+    True: (CROSS, 2),        # aiming: cross is the kick again, as in the original game
 }
 
 
@@ -33,25 +44,49 @@ class ButtonMap:
 
     def __init__(self, pine, layout=None):
         self.pine, self.layout, self.orig = pine, layout or MODERN, None
+        self.aiming = False
 
     def _read(self):
         raw = self.pine.read_block(PAD_MAP, ENTRIES * 8)
         return [struct.unpack_from("<II", raw, 8 * i) for i in range(ENTRIES)]
 
     def _wanted(self, base):
-        return [self.layout.get(i, base[i]) for i in range(ENTRIES)]
+        layout = {**self.layout, 4: RUN_WHEN[self.aiming]}
+        return [layout.get(i, base[i]) for i in range(ENTRIES)]
+
+    def set_aiming(self, aiming):
+        """Switch entry 4 between run (R1) and kick (cross). Returns True if it changed."""
+        if self.orig is None or aiming == self.aiming:
+            return False
+        self.aiming = aiming
+        self.pine.write_multi([(PAD_MAP + 4 * 8, list(RUN_WHEN[aiming]))])
+        return True
 
     def _write(self, entries):
         self.pine.write_multi([(PAD_MAP, [w for e in entries for w in e])])
+
+    def _preset(self):
+        """The game's own default map for this controller, or None if it doesn't look like one.
+        Restoring to it is right even if an earlier run left the map changed."""
+        kind = self.pine.read_block(PAD_KIND, 1)[0]
+        if kind not in PRESETS:
+            return None
+        raw = self.pine.read_block(PRESETS[kind], ENTRIES * 8)
+        table = [struct.unpack_from("<II", raw, 8 * i) for i in range(ENTRIES)]
+        single = all(m == 0 or (m & (m - 1) == 0 and m < 0x10000) for m, _ in table)
+        if single and all(g <= 3 for _, g in table) and sum(1 for m, _ in table if m) >= 12:
+            return table
+        return None
 
     def apply(self):
         cur = self._read()
         if not any(m for m, _ in cur):
             return "button map is empty (no controller read yet?); not changed"
         if self.orig is None:
-            self.orig = cur
+            self.orig = self._preset() or cur
         self._write(self._wanted(self.orig))
-        return "modern buttons: L2 aims, R2 fires (circle still works), L2's old action off"
+        return ("modern buttons: L2 aims, R2 fires (circle still works), R1 runs; cross only kicks "
+                "(while aiming); lock-on aim and L2's old action off")
 
     def ensure(self):
         """Re-apply if the game reset the map (controller reconnect). True if re-applied."""
@@ -60,7 +95,7 @@ class ButtonMap:
         cur = self._read()
         if cur == self._wanted(self.orig):
             return False
-        self.orig = cur if cur != self.orig else self.orig   # a new preset: build on it
+        self.orig = self._preset() or (cur if cur != self.orig else self.orig)   # reconnect: the preset
         self._write(self._wanted(self.orig))
         return True
 

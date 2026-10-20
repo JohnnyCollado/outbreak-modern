@@ -55,6 +55,7 @@ MAGIC = 0x434D424F  # "OBMC"
 B_FLAGS, B_POS, B_TARGET, B_FOV, B_COUNT, B_ORIG1, B_ORIG2, B_MAGIC, B_PLAYER, B_CODE = (
     0x00, 0x04, 0x10, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x40)
 B_AIM_HEADING, B_AIM_ELEV = 0x34, 0x36        # s16 each, used with F_AIM
+B_VEL_X, B_VEL_Z = 0x38, 0x3C                 # f32 each: strafe step per hook call, used with F_STRAFE
 BLOCK_SIZE = 0x200
 # flags: bit 0 override pos/target, bit 1 override fov, bit 2 pos/target are OFFSETS from the
 # player at B_PLAYER (the cave adds that frame's player position, so the camera moves with her
@@ -63,7 +64,9 @@ BLOCK_SIZE = 0x200
 # +0xCDC = 0xFF, as the game's own "aim at nothing" does), set heading +0x92 and gun elevation
 # +0xBC8 from the block. Done here, right after the game's logic each frame, so the game never
 # gets a whole tick to re-lock or turn her (from the PC it would be a race).
-F_POS, F_FOV, F_RELATIVE, F_AIM = 1, 2, 4, 8
+# bit 4: strafe. Each call, add (B_VEL_X, B_VEL_Z) to the player's position (File #1 roots her
+# while aiming; HeySnippy's notes: the engine still resolves her against walls afterwards).
+F_POS, F_FOV, F_RELATIVE, F_AIM, F_STRAFE = 1, 2, 4, 8, 16
 P_TARGET, P_TARGET_IDX, P_HEADING, P_ELEV = 0x24, 0xCDC, 0x92, 0xBC8
 PLAYER_POS = 0x38  # DrawObjFull position, f32[3]
 PLAYER_ACT = 0x08  # act[0]: the current action; 2 = aiming (game/charmove.c func_0061CE50)
@@ -149,6 +152,11 @@ def build_cave(block, orig1, orig2, hook=HOOK, camera=CAMERA):
          mips.addiu("t4", "zero", 0xFF), mips.sb("t4", P_TARGET_IDX, "t3"),
          mips.lh("t4", B_AIM_HEADING, "t0"), mips.sh("t4", P_HEADING, "t3"),
          mips.lh("t4", B_AIM_ELEV, "t0"), mips.sh("t4", P_ELEV, "t3"))
+    emit(mips.andi("t4", "t1", F_STRAFE))                                      # t3 = player still
+    branch("t4", "zero", "fov")
+    for off, vel in ((0, B_VEL_X), (8, B_VEL_Z)):                              # pos.x, pos.z += step
+        emit(mips.lwc1(0, PLAYER_POS + off, "t3"), mips.lwc1(1, vel, "t0"),
+             mips.add_s(2, 0, 1), mips.swc1(2, PLAYER_POS + off, "t3"))
     label("fov")
     emit(mips.andi("t3", "t1", F_FOV))
     branch("t3", "zero", "replay")
@@ -429,6 +437,7 @@ def cmd_run(a):
     flags = F_POS | F_RELATIVE | (F_FOV if a.fov else 0)
     free_aiming = False
     t_move = 0.0
+    hook_rate = 60.0                                      # hook calls/s, measured below
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -507,6 +516,8 @@ def cmd_run(a):
                 if free_aiming:
                     smooth_heading, yaw_off = smooth_heading + yaw_off, 0.0   # keep the view where it is
             was_aiming = aiming
+            if buttons:
+                buttons.set_aiming(aiming)              # cross: kick while aiming, nothing otherwise
             free_aiming = aiming and servo is not None and servo.orig is not None
             target = struct.unpack_from("<I", pl, PLAYER_TARGET)[0] if aiming else None
             if target != last_target and aiming:
@@ -555,6 +566,20 @@ def cmd_run(a):
             rel = [eye[i] - p[i] for i in range(3)] + [look[i] - p[i] for i in range(3)]
             writes = [(block + B_POS, [*map(f2u, rel), f2u(a.fov or 0.0)]),
                       (block + B_PLAYER, [player])]
+            strafing = False
+            if free_aiming and a.strafe_speed > 0:
+                # Left stick -> camera-relative step. ots_camera's "right" (cos yaw, -sin yaw) is
+                # screen-LEFT on the device (+shoulder put her right of centre), so negate it.
+                lx, ly = stick(pad[PAD_LX]), stick(pad[PAD_LY])
+                if lx or ly:
+                    yaw = smooth_heading + yaw_off + math.radians(a.yaw_offset)
+                    fwd = (math.sin(yaw), math.cos(yaw))
+                    scr_right = (-math.cos(yaw), math.sin(yaw))
+                    per_call = a.strafe_speed / max(hook_rate, 30.0)    # the hook runs 60-120 times/s
+                    vx = (scr_right[0] * lx - fwd[0] * ly) * per_call    # stick up (ly < 0) = away
+                    vz = (scr_right[1] * lx - fwd[1] * ly) * per_call
+                    writes.append((block + B_VEL_X, [f2u(vx), f2u(vz)]))
+                    strafing = True
             if free_aiming:
                 # She faces where the camera looks and the gun takes its elevation, so the shot
                 # lines up with the view (0x10000 per turn). The hook applies these every frame.
@@ -564,7 +589,8 @@ def cmd_run(a):
                 writes.append((block + B_AIM_HEADING,
                                [round(face / (2 * math.pi) * 65536) & 0xFFFF,
                                 max(-lim, min(lim, round(elev / (2 * math.pi) * 65536))) & 0xFFFF], 2))
-            writes.append((block + B_FLAGS, [flags | (F_AIM if free_aiming else 0)]))   # flags last
+            writes.append((block + B_FLAGS, [flags | (F_AIM if free_aiming else 0)
+                                             | (F_STRAFE if strafing else 0)]))   # flags last
             pine.write_multi(writes)
             # Which camera does the game's camera-relative movement use? wanted dir = camera yaw +
             # stick angle (&0xFFF0 both, as func_006307E0 does), so camera yaw = wanted - stick.
@@ -582,6 +608,7 @@ def cmd_run(a):
                 count0 = count
             if now - t_stats >= 2 and not cycle:
                 fps = (count - count0) / (now - t_stats)
+                hook_rate = fps if fps > 0 else hook_rate
                 print(f"  {loops / (now - t_stats):5.1f} updates/s, game {fps:5.1f} frames/s, "
                       f"{fps / max(loops / (now - t_stats), 1e-9):4.2f} frames per update", flush=True)
                 t_stats, loops, count0 = now, 0, count
@@ -598,6 +625,9 @@ def cmd_run(a):
                 if servo:
                     servo.pine = clean
                     print("\nfree aim: " + servo.restore())
+                if buttons:
+                    buttons.pine = clean
+                    print(buttons.restore())
                 clean.write_words(block + B_FLAGS, [0])
                 print("\ncamera handed back to the game (hook left installed, inert)")
             finally:
@@ -639,7 +669,9 @@ def main(argv=None):
     r.add_argument("--pitch", type=float, default=8, help="starting tilt, degrees")
     r.add_argument("--fov", type=float, default=0, help="override FOV in degrees (0 = keep the game's)")
     r.add_argument("--follow", type=float, default=0.15, help="seconds to swing behind a turn (0 = rigid)")
-    r.add_argument("--orbit-speed", type=float, default=150, help="degrees/s at full right stick")
+    r.add_argument("--orbit-speed", type=float, default=100, help="degrees/s at full right stick (device: 150 felt fast)")
+    r.add_argument("--strafe-speed", type=float, default=150,
+                   help="units/s at full left stick while free-aiming (about half her walk; 0 = off)")
     r.add_argument("--recenter", type=float, default=1.0,
                    help="seconds to ease back behind once the right stick is released (0 = stay put)")
     r.add_argument("--invert-x", action="store_true", help="stick right turns the view left")

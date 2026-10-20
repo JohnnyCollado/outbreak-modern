@@ -135,13 +135,14 @@ def test_cave():
     player = 0x00476DD0
     code = C.build_cave(block, orig1, orig2)
     ours = [f2u(v) for v in (10.0, 20.0, 30.0, 1.5, 2.5, 3.5)]
-    for flags in range(16):
+    for flags in range(32):
         for has_player in (True, False):
             mem = {block + C.B_FLAGS: flags, block + C.B_COUNT: 41, block + C.B_FOV: 0xAAAAAAAA,
                    block + C.B_PLAYER: player if has_player else 0,
                    block + C.B_AIM_HEADING: (0xF000 << 16) | 0x1234,       # heading 0x1234, elev -0x1000
                    player + C.P_TARGET: 0x004017C0, player + 0xCDC: 0x11223305,
-                   player + 0x90: 0x7777AAAA, player + 0xBC8: 0x55550000}
+                   player + 0x90: 0x7777AAAA, player + 0xBC8: 0x55550000,
+                   block + C.B_VEL_X: f2u(1.5), block + C.B_VEL_Z: f2u(-2.0)}
             for i, v in enumerate((100.0, 200.0, 300.0)):
                 mem[player + C.PLAYER_POS + 4 * i] = f2u(v)
             for i, v in enumerate(ours):
@@ -163,6 +164,10 @@ def test_cave():
                    f"{tag}: original prologue replayed once, in order, right before the jump back")
             expect(exit_to == C.HOOK + 8, f"{tag}: returns to hook+8")
             aim_on = bool(flags & C.F_AIM) and has_player
+            strafe_on = aim_on and bool(flags & C.F_STRAFE)
+            pos = [mem.get(player + C.PLAYER_POS + 4 * i) for i in range(3)]
+            want_pos = [f2u(101.5), f2u(200.0), f2u(298.0)] if strafe_on else [f2u(100.0), f2u(200.0), f2u(300.0)]
+            expect(pos == want_pos, f"{tag}: position stepped by (1.5, -, -2) only with bits 3+4")
             expect((mem[player + C.P_TARGET] == 0) == aim_on, f"{tag}: lock-on cleared only with bit 3")
             expect(mem[player + 0xCDC] == (0x112233FF if aim_on else 0x11223305),
                    f"{tag}: target index byte set to 0xFF only with bit 3, neighbours untouched")
