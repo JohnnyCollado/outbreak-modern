@@ -22,12 +22,16 @@ from f1_live import PAD_NOW, our_player  # noqa: E402
 
 PAD_MAP = 0x00292C80
 CTRL_CUR = 0xF78 + 0x08
-# DualShock 2 button bits as the report carries them (bytes 2-3 as a little-endian u16, after the
-# game flips them to active-high). Standard PS2 order; check against `watch`.
-DS2 = ["SELECT", "L3", "R3", "START", "UP", "RIGHT", "DOWN", "LEFT",
-       "L2", "R2", "L1", "R1", "TRIANGLE", "CIRCLE", "CROSS", "SQUARE"]
-GAME_BITS = {0x1: "forward", 0x2: "back", 0x4: "turn", 0x8: "turn", 0x10: "run", 0x40: "aim (no target)",
-             0x400: "aim (nearest target)"}
+# DualShock 2 button bits of the u16 at PadData +2 as the game stores it (active-high). The two
+# report bytes are swapped against the usual PS2 listing: shoulders/face buttons in the low byte,
+# Select/sticks/Start/D-pad in the high byte. Confirmed on the device (watch, 2026-10-20):
+# 0x1000 -> forward, 0x8000/0x2000 -> turn, 0x0008 (R1) -> aim with lock-on, 0x0002 (R2) -> aim
+# without a target, 0x0040 (cross) -> run.
+DS2 = ["L2", "R2", "L1", "R1", "TRIANGLE", "CIRCLE", "CROSS", "SQUARE",
+       "SELECT", "L3", "R3", "START", "UP", "RIGHT", "DOWN", "LEFT"]
+GAME_BITS = {0x1: "forward", 0x2: "back", 0x4: "turn left", 0x8: "turn right", 0x10: "run",
+             0x20: "circle action", 0x40: "aim (no target)", 0x80: "L2 action", 0x400: "aim (nearest target)",
+             0x4000: "select action"}
 
 
 def names(mask, table):
@@ -62,6 +66,8 @@ def cmd_watch(seconds):
             pad, cur = pine.read_multi([(PAD_NOW + 2, 2), (base + CTRL_CUR, 4)])
             raw = struct.unpack("<H", pad)[0]
             game = struct.unpack("<I", cur)[0]
+            if raw == 0xFFFF or (raw != 0 and raw ^ 0xFFFF in (last[0] if last else -1,)):
+                continue                      # a read caught mid-update: every bit set (or flipped)
             if (raw, game) != last:
                 gb = "+".join(n for b, n in GAME_BITS.items() if game & b) or "-"
                 print(f"  {1000 * (time.perf_counter() - t0):7.0f} ms  raw 0x{raw:04X} {names(raw, DS2):>22}"
