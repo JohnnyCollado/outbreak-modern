@@ -83,19 +83,19 @@ static const char cross_glyph[] = "\x81\x7b";     /* the full-width plus (Shift-
    still land "slightly off": the game fires from the gun in her hand, not from the middle of her
    chest, and by how much isn't known. While aiming, R3 + D-pad turns the aim up/down/left/right
    in TRIM_STEP steps, shown on screen, to be reported and built in. */
-#define TRIM_STEP       DEG(0.5f)
-#define TRIM_MAX        40              /* steps: +-20 deg */
+#define TRIM_STEP       DEG(0.1f)       /* device: 0.5 was too coarse for the last nudge */
+#define TRIM_MAX        200             /* steps: +-20 deg */
 
 static int show_line(int slot, const char *text, s16 x, s16 y, s16 frames, u8 size);
 
-/* "+12.5" for n half-degree steps, into out[0..4]. */
-static void fmt_half(char *out, int n) {
+/* "+12.3" for n tenth-degree steps, into out[0..4]. */
+static void fmt_tenths(char *out, int n) {
     int a = n < 0 ? -n : n;
     out[0] = n < 0 ? '-' : '+';
-    out[1] = (char)(a / 20 ? '0' + a / 20 : ' ');
-    out[2] = (char)('0' + (a / 2) % 10);
+    out[1] = (char)(a / 100 ? '0' + (a / 100) % 10 : ' ');
+    out[2] = (char)('0' + (a / 10) % 10);
     out[3] = '.';
-    out[4] = (a & 1) ? '5' : '0';
+    out[4] = (char)('0' + a % 10);
 }
 
 /* "aim trim: up +0.0  right +0.0  (R3 + D-pad)" (built on the stack: initialised writable data
@@ -105,8 +105,8 @@ static void show_trim(int up, int right) {
     char msg[sizeof(tmpl)];
     int i;
     for (i = 0; i < (int)sizeof(tmpl); i++) msg[i] = tmpl[i];
-    fmt_half(msg + 13, up);
-    fmt_half(msg + 26, right);
+    fmt_tenths(msg + 13, up);
+    fmt_tenths(msg + 26, right);
     show_line(TEXT_SLOT, msg, 16, 16, 180, 16);
 }
 
@@ -448,8 +448,8 @@ void mod_frame(u32 caller) {
         /* right is -yaw here (the right stick turns the view right by decreasing yaw) */
         face -= (float)st.trim_right * TRIM_STEP;
         elev += (float)st.trim_up * TRIM_STEP;
-        ms->trim_up = (float)st.trim_up * 0.5f;
-        ms->trim_right = (float)st.trim_right * 0.5f;
+        ms->trim_up = (float)st.trim_up * 0.1f;
+        ms->trim_right = (float)st.trim_right * 0.1f;
         if (!st.aim_face_set) {
             st.aim_face = heading_of(p);
             st.aim_face_set = 1;
