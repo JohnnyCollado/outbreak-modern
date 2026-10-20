@@ -40,7 +40,7 @@ MODERN = {
 #                                does what it did in the original game)
 DIRECTIONS = 0xF000           # the D-pad bits of the raw button word
 DPAD_DOWN = 0x4000
-SELECT, R3 = 0x0100, 0x0400
+SELECT, R3, L1 = 0x0100, 0x0400, 0x0004
 QUIT_COMBO = SELECT | R3      # held ~1 s: stop the mod from the pad (on the device, no Ctrl+C)
 
 
@@ -142,3 +142,42 @@ class ButtonMap:
             return "buttons untouched"
         self._write(self.orig)
         return "original buttons restored"
+
+
+# Callouts: the game turns the RIGHT stick into flick bits 0xF00000 (padread.c func_001A5420; the
+# decomp calls it the "left" stick, from raw stick bytes +4/+5, which the device showed is the
+# right one), and charmove.c func_0061D0F0 starts the flick steps from them -- with the camera on
+# the right stick, looking around fired callouts (device report). Before that, func_001A5940
+# zeroes a stick pushed less than its dead zone (D_0023BAE8 {x, y, z, w}: z for this stick,
+# set from a default at boot, input.c). A dead zone above the stick's top (0x7F) makes the game
+# see it centred; the camera reads the raw bytes, so it doesn't mind. Held L1 = the game's own
+# dead zone back: L1 + right stick does the callouts.
+DEAD_ZONES = 0x0023BAE8
+CALLOUT_DZ = DEAD_ZONES + 4
+STICK_OFF = 0x80
+
+
+class CalloutGate:
+    """The right stick reaches the game only while L1 is held."""
+
+    def __init__(self, pine):
+        self.pine = pine
+        self.orig = struct.unpack("<h", pine.read_block(CALLOUT_DZ, 2))[0]
+        self.ok = 0 <= self.orig < STICK_OFF          # a dead zone; anything else: wrong build, leave it
+
+    def describe(self):
+        if not self.ok:
+            return f"callouts: right-stick dead zone at 0x{CALLOUT_DZ:08X} reads {self.orig}, not a dead zone; left alone"
+        return f"callouts: L1 + right stick (the right stick alone only moves the camera; game dead zone {self.orig})"
+
+    def write(self, raw):
+        """The write for this update: (address, [value], 2), or None."""
+        if not self.ok:
+            return None
+        return (CALLOUT_DZ, [self.orig if raw & L1 else STICK_OFF], 2)
+
+    def restore(self):
+        if not self.ok:
+            return "callouts untouched"
+        self.pine.write_multi([(CALLOUT_DZ, [self.orig], 2)])
+        return "right stick handed back to the game"

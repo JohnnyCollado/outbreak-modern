@@ -468,6 +468,9 @@ def cmd_run(a):
     if a.modern_buttons:
         buttons = f1_buttons.ButtonMap(pine, cross_runs=a.cross_runs)
         print(buttons.apply())
+    callouts = f1_buttons.CalloutGate(pine) if a.callout_gate else None
+    if callouts:
+        print(callouts.describe())
     cross = (f1_crosshair.Crosshair(pine, size=a.crosshair_size, style=a.crosshair_style)
              if a.crosshair else None)
     t_cross = 0.0
@@ -599,6 +602,8 @@ def cmd_run(a):
                 k = 1 - math.exp(-dt / tau) if tau > 0 else 1
                 smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
             sx, sy = stick(pad[PAD_RX]), stick(pad[PAD_RY])
+            if callouts and callouts.ok and raw_buttons & f1_buttons.L1:
+                sx = sy = 0.0                             # L1 + right stick is a callout, not a look
             # Stick right turns the view right. That is -yaw here: the device felt "southpaw" with +yaw.
             yaw_off -= sx * math.radians(a.orbit_speed) * dt * (-1 if a.invert_x else 1)
             low = -a.aim_max if (aiming and servo) else -30   # free aim may look further up
@@ -663,6 +668,8 @@ def cmd_run(a):
             rel = [eye[i] - p[i] for i in range(3)] + [look[i] - p[i] for i in range(3)]
             writes = [(block + B_POS, [*map(f2u, rel), f2u(a.fov or 0.0)]),
                       (block + B_PLAYER, [player])]
+            if callouts and callouts.write(raw_buttons):
+                writes.append(callouts.write(raw_buttons))    # every update: the game may reset it
             strafing = False
             if free_aiming and a.strafe_speed > 0:
                 # Left stick -> camera-relative step. ots_camera's "right" (cos yaw, -sin yaw) is
@@ -767,6 +774,9 @@ def cmd_run(a):
                 if buttons:
                     buttons.pine = clean
                     print(buttons.restore())
+                if callouts:
+                    callouts.pine = clean
+                    print(callouts.restore())
                 if cross and cross.shown:
                     cross.pine = clean
                     cross.hide()
@@ -839,6 +849,8 @@ def main(argv=None):
                    help="seconds the camera takes to swing round to a locked-on target")
     r.add_argument("--classic-buttons", dest="modern_buttons", action="store_false",
                    help="keep the game's buttons (default: L2 aims, R2 fires while the camera runs)")
+    r.add_argument("--right-stick-callouts", dest="callout_gate", action="store_false",
+                   help="let the right stick fire callouts on its own, as originally (default: only with L1 held)")
     r.add_argument("--cross-runs", action="store_true",
                    help="cross runs as in the original game (default: R1 runs, cross kicks/backs out only)")
     r.add_argument("--no-crosshair", dest="crosshair", action="store_false",

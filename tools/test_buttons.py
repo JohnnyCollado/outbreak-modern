@@ -26,8 +26,8 @@ class FakePine:
         return bytes(self.ram[addr:addr + size])
 
     def write_multi(self, writes):
-        for addr, words in writes:
-            struct.pack_into(f"<{len(words)}I", self.ram, addr, *words)
+        for addr, words, *w in writes:
+            struct.pack_into(f"<{len(words)}{'H' if w == [2] else 'I'}", self.ram, addr, *words)
 
 
 def game_bits(ram, raw):
@@ -91,6 +91,17 @@ def main():
     expect(not B.plausible(0xFFFF) and not B.plausible(0xFFF7), "glitched pad reads (device: 0xFFFF, 0xFFF7) are rejected")
     expect(all(B.plausible(r) for r in (0, B.CROSS | B.DPAD_DOWN, 0x1000 | 0x2000, B.L2 | B.R2 | B.R1)),
            "...real button states are kept")
+    gram = bytearray(32 << 20)
+    struct.pack_into("<4h", gram, B.DEAD_ZONES, 0x10, 0x20, 0x20, 0)
+    gate = B.CalloutGate(FakePine(gram))
+    expect(gate.ok and gate.write(0) == (B.CALLOUT_DZ, [0x80], 2), "callouts: right stick dead zone maxed without L1")
+    expect(gate.write(B.L1) == (B.CALLOUT_DZ, [0x20], 2), "...the game's own dead zone with L1 held")
+    struct.pack_into("<h", gram, B.CALLOUT_DZ, 0x80)
+    gate.restore()
+    expect(struct.unpack_from("<h", gram, B.CALLOUT_DZ)[0] == 0x20, "...and restored on exit")
+    struct.pack_into("<h", gram, B.CALLOUT_DZ, -5)
+    odd = B.CalloutGate(FakePine(gram))
+    expect(not odd.ok and odd.write(0) is None and "untouched" in odd.restore(), "...a value that isn't a dead zone is left alone")
     qt = B.quick_turn
     expect(qt(B.CROSS, 0, 0.0, 0.9) == "stick", "quick turn: cross pressed with the stick pulled down")
     expect(qt(B.CROSS, B.CROSS, 0.0, 0.9) is None, "...only on the press, not while cross is held")
