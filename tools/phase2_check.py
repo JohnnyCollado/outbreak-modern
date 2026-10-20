@@ -134,12 +134,22 @@ def ensure_forward(adb_exe, port, serial=None):
     return True, f"forwarded tcp:{port} to {serial}"
 
 
+def on_android():
+    """True when these tools run on the Android device itself (e.g. in Termux)."""
+    return "ANDROID_ROOT" in os.environ or "TERMUX_VERSION" in os.environ
+
+
 def connect_game(port=28011, quiet=False):
     """Forward the port, connect to PINE and identify the game. Returns (pine, info).
     Exits with a plain explanation instead of a traceback when PINE can't be used."""
-    ok, msg = ensure_forward(shutil.which("adb") or "adb", port)
-    if not quiet:
-        print(("adb: " if ok else "adb problem: ") + msg)
+    if on_android():
+        # Running on the device itself (Termux): ARMSX2's PINE is on this loopback, no adb needed.
+        if not quiet:
+            print("on the device: connecting to ARMSX2 directly")
+    else:
+        ok, msg = ensure_forward(shutil.which("adb") or "adb", port)
+        if not quiet:
+            print(("adb: " if ok else "adb problem: ") + msg)
     try:
         pine = pine_diag.Pine("127.0.0.1", port, 5.0)
         info = pine_diag.identify(pine)

@@ -454,6 +454,7 @@ def cmd_run(a):
     prev_heading, t_snap = None, 0.0                      # her facing last update: snap report
     good_pad, bad_pads = None, 0                          # the last believable pad read; glitches skipped
     aim_face = None                                       # free aim: her facing, turned toward the aim
+    t_combo = None                                        # since when the stop combo is held
     idx, player = our_player(pine)
     t_player, t_stats, loops, count0 = time.perf_counter(), time.perf_counter(), 0, None
     room = f1_collide.RoomCollision(pine) if a.collide else None
@@ -488,7 +489,7 @@ def cmd_run(a):
         print("CALIBRATE: the camera visits 4 angles around her, 4 s each, twice. Stand still (stick and\n"
               "D-pad untouched). Note the yaw-offset whose view shows HER BACK.")
     else:
-        print("camera live. Right stick orbits/tilts, Ctrl+C hands control back to the game.")
+        print("camera live. Right stick orbits/tilts. Ctrl+C, or hold SELECT + R3 for a second, hands control back to the game.")
     try:
         while True:
             now = time.perf_counter()
@@ -536,6 +537,13 @@ def cmd_run(a):
             aiming = pl[PLAYER_ACT] == ACT_AIM
             raw_buttons = struct.unpack_from("<H", pad, 2)[0]
             lx, ly = stick(pad[PAD_LX]), stick(pad[PAD_LY])
+            if raw_buttons & f1_buttons.QUIT_COMBO == f1_buttons.QUIT_COMBO:
+                t_combo = t_combo or now
+                if now - t_combo > 1.0:
+                    print("  SELECT + R3 held: stopping", flush=True)
+                    break
+            else:
+                t_combo = None
             if aiming and not was_aiming:
                 if a.free_aim and servo is not None and servo.active and not a.chase:
                     # RE5 style: she turns to the camera (the hook writes her heading), the view
