@@ -481,6 +481,8 @@ Why this beats both earlier options:
 | Framing | Over-the-shoulder view confirmed in J's Bar with defaults at `--yaw-offset 0` (camera over the **left** shoulder; `--shoulder -35` gives the right). Right-stick orbit and recenter fixes (`97fe870`) not yet tested on the device | Confirmed (device, screenshot) |
 | Room collision data (`0x3938A8`, CollTri layout) | `walls`: two 9 x 5 grids of 300 x 300 cells; 181 triangles read, **0 failed the plane check**; wall distances 101–505 around the player, one direction clear | Confirmed (device) |
 | Camera jerk (stale absolute camera) | Gone after the hook started adding the player's position every frame (`489948e`) | Confirmed (device, user) |
+| Aim state and target | Aiming = action 2 (`+0x08`) confirmed: `aiming`/`aim released` track the weapon. Auto-aim targets (`+0x24`) seen: all `type 2 (enemy), kind 0x01` in the thing pool (`0x3FFCA0`), slots 47/49; no partner targeted in that run. Type map 0 player / 1 NPC / 2 enemy: the enemy case is confirmed, player/NPC not yet observed | Partially verified (device) |
+| Hook call rate | ~60/s normally; ~120/s in some states (called twice per frame, harmless); 0/s for a few seconds during loads | Confirmed (device) |
 | Free EE RAM | `0x00084000`–`0x00100000` stayed zero for 720 passes (60 s of play) | Confirmed (measured) |
 
 This agrees with the f1_live travel fit (`atan2(dx, dz)`), so the "back-step" reinterpretation

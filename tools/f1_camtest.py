@@ -434,9 +434,10 @@ def cmd_run(a):
             if target != last_target and aiming:
                 print(f"  aim target: {describe_target(pine, target)}", flush=True)
             last_target = target
-            if not aiming:
-                # Follow her facing. NOT while aiming: the game's auto-target snaps her toward the
-                # nearest character, and the camera must not be dragged along with it.
+            if not (aiming and target):
+                # Follow her facing, except while the auto-aim holds a target: then the game snaps
+                # her from target to target and the camera must not be dragged along. Aiming at
+                # nothing, her turning is the player's own, so the camera follows it (device report).
                 k = 1 - math.exp(-dt / a.follow) if a.follow > 0 else 1
                 smooth_heading += ((heading - smooth_heading + math.pi) % (2 * math.pi) - math.pi) * k
             sx, sy = stick(pad[6]), stick(pad[7])
