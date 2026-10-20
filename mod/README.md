@@ -16,8 +16,10 @@ loads by itself: `patches/SLPM-65428_32088394.pnach`.
 
 ## Using it (ARMSX2 on Android)
 
-1. Copy `patches/SLPM-65428_32088394.pnach` to the device. In ARMSX2's Patch Manager, import it
-   (or put it in ARMSX2's `patches` folder) and enable "Modern Camera (standalone)".
+1. Copy `patches/SLPM-65428_32088394.pnach` to the device: `python tools/push_patch.py` finds
+   ARMSX2's data folder over adb (the app folder, or the one picked in ARMSX2's setup) and puts
+   it in its `patches` folder. Or import it from ARMSX2's Patch Manager. Then enable "Modern
+   Camera (standalone)" there.
 2. Start File #1. When gameplay starts, a line "Modern Camera patch: running" shows at the top
    left for about 5 seconds.
 3. Optional: `python tools/f1_patchcheck.py` (PC or Termux) shows the code's status.
