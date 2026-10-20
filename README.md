@@ -31,3 +31,5 @@ Results land in `results/`.
   game action bits), groundwork for the modern button layout
 - `tools/f1_buttons.py`: modern button layout while `run` is active (L2 aims, R2 fires, R1 runs; ✕ kicks while aiming and backs out of menus; restored on exit)
 - `tools/test_buttons.py`: layout tests on a map laid out like the device's
+- `tools/f1_crosshair.py`: `check` (read-only) and `show`; `run` draws a "+" while aiming using the
+  game's own on-screen text lines (data only, removed on exit)

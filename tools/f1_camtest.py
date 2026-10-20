@@ -40,6 +40,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import f1_buttons  # noqa: E402
 import f1_collide  # noqa: E402
+import f1_crosshair  # noqa: E402
 import f1_freeaim  # noqa: E402
 import f1_hookcheck  # noqa: E402
 import mips  # noqa: E402
@@ -462,6 +463,8 @@ def cmd_run(a):
     if a.modern_buttons:
         buttons = f1_buttons.ButtonMap(pine, cross_runs=a.cross_runs)
         print(buttons.apply())
+    cross = f1_crosshair.Crosshair(pine, size=a.crosshair_size) if a.crosshair else None
+    t_cross = 0.0
     servo = None
     if a.free_aim:
         servo = f1_freeaim.Servo(pine)
@@ -534,6 +537,16 @@ def cmd_run(a):
                 if free_aiming:
                     smooth_heading, yaw_off = smooth_heading + yaw_off, 0.0   # keep the view where it is
             was_aiming = aiming
+            if cross:
+                # "+" at the centre while aiming (the game's own text line, data only); topped up
+                # every 5 s in case the game cleared it, removed when the aim ends.
+                if aiming and now - t_cross > 5.0:
+                    if not cross.show() and t_cross == 0.0:
+                        print("  crosshair: the game is using its text line; not drawing", flush=True)
+                    t_cross = now
+                elif not aiming and cross.shown:
+                    cross.hide()
+                    t_cross = 0.0
             if buttons:
                 raw_buttons = struct.unpack_from("<H", pad, 2)[0]
                 moving = bool(raw_buttons & f1_buttons.DIRECTIONS or stick(pad[PAD_LX]) or stick(pad[PAD_LY]))
@@ -676,6 +689,9 @@ def cmd_run(a):
                 if buttons:
                     buttons.pine = clean
                     print(buttons.restore())
+                if cross and cross.shown:
+                    cross.pine = clean
+                    cross.hide()
                 clean.write_words(block + B_FLAGS, [0])
                 print("\ncamera handed back to the game (hook left installed, inert)")
             finally:
@@ -745,6 +761,9 @@ def main(argv=None):
                    help="keep the game's buttons (default: L2 aims, R2 fires while the camera runs)")
     r.add_argument("--cross-runs", action="store_true",
                    help="cross runs as in the original game (default: R1 runs, cross kicks/backs out only)")
+    r.add_argument("--no-crosshair", dest="crosshair", action="store_false",
+                   help="don't draw the '+' crosshair while aiming")
+    r.add_argument("--crosshair-size", type=int, default=24, help="crosshair text size")
     r.add_argument("--free-aim", action="store_true",
                    help="switch off the game's 3-position aim servo; the gun follows where the camera looks")
     r.add_argument("--aim-max", type=float, default=45, help="free aim limit up/down, degrees (game: 45)")
