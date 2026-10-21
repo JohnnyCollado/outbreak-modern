@@ -3,6 +3,9 @@ results/*-state.json
 __pycache__/
 mod/build/
 
+# user's disc dump: never stored in the repo (docs/native-port-design.md)
+game_files/
+
 # Texture packs: gigabytes, and someone else's work -- keep them out of git (docs/native-port-design.md)
 textures/
 replacements/
