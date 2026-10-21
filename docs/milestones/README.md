@@ -1,8 +1,11 @@
-# Milestone plans for the native Windows + Android port
+# Milestone plans for the native Windows + Android + Linux port
 
 One plan per milestone of `docs/native-port-design.md`, plus a milestone 0 (a decision this
 research showed is missing). Each plan lists the goal, the check that says it is done, the work,
 what is needed to do it, the limitations, and **what is not known**.
+
+Linux was added as a third platform on 2026-10-21 (`docs/native-port-design.md`, "Linux"). Where a
+plan says "both platforms", read "Windows, Linux and Android".
 
 Status: plans only. Nothing has been built or run. **No time estimates**: nothing has been
 measured to base one on.

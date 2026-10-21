@@ -1,6 +1,7 @@
 # Native Windows + Android port: design proposal
 
-Goal: one codebase that builds a native Windows game and a native Android game (Odin 3 first) of
+Goal: one codebase that builds a native Windows game, a native Android game (Odin 3 first) and a
+native Linux game (added 2026-10-21) of
 Biohazard Outbreak File #1, from the player's own disc, and that can later play online on Obsrv
 **with PS2, PCSX2, Windows and Android players in the same room** (cross-play).
 
@@ -71,8 +72,8 @@ Bonus: the Modern Camera mod (`mod/`) is already written as reads and writes of 
 
 | Need | Choice | Why |
 |---|---|---|
-| Window, input, controllers, rumble, audio device, file dialogs, Android activity | **SDL3** | one API on Windows and Android (SDL3's Android support covers the activity, game controllers and storage access) |
-| Graphics | **Vulkan** on both | Windows and the Odin's Adreno both have it: one renderer, no D3D/GL split |
+| Window, input, controllers, rumble, audio device, file dialogs, Android activity | **SDL3** | one API on Windows, Android and Linux (SDL3's Android support covers the activity, game controllers and storage access; on Linux it covers X11 and Wayland) |
+| Graphics | **Vulkan** on all three | Windows, Linux (Mesa and vendor drivers) and the Odin's Adreno have it: one renderer, no D3D/GL split |
 | Audio output | SDL3 audio (or miniaudio) | WASAPI and AAudio behind one API |
 | Network | a thin sockets shim (Winsock / POSIX) + **mbedTLS** | the KDDI/DNAS pages need legacy TLS ciphers that modern OS stacks refuse |
 | Build | **CMake** for everything; Gradle + the NDK only wraps it for Android | one build description |
@@ -166,6 +167,7 @@ floor: a 64-bit CPU (guest memory reserves a 4 GiB range), Vulkan with descripto
 | | Minimum (original textures, 1-2x resolution, 60 fps) | 4K texture pack (2-3x resolution) |
 |---|---|---|
 | Android | Android 10+, 64-bit, Vulkan 1.1 + descriptor indexing (Adreno 6xx / Mali-G72 class, e.g. Snapdragon 660-730), 3 GB RAM | Snapdragon 865 / 8 Gen 1 class GPU or newer, 8 GB RAM, ~2-4 GB storage for the converted pack |
+| Linux | **Unknown, not estimated yet.** Unverified guess: near the Windows row, since it runs the same x86-64 code with Vulkan through Mesa or vendor drivers | Unknown |
 | Windows | Windows 10 64-bit, x64 with SSE4.1, Vulkan 1.2 GPU (GTX 650 / Radeon HD 7000 / Intel HD 500 or newer), 4 GB RAM | 8 GB RAM, 4 GB VRAM (GTX 970 / RX 470 class or newer) |
 
 Every tier runs the same logic and maths, so tiers never affect cross-play. Ways to widen later: a
@@ -190,6 +192,19 @@ When single player works end to end (milestone 6), open a beta:
 - **Online beta later** (milestone 7), on a local server first, then on Obsrv only with the
   admins' agreement; mixed rooms (PS2/PCSX2 + Windows + Android) are the cross-play test.
 
+## Linux (added 2026-10-21)
+
+Linux is a third target. It costs little because every choice above already covers it: SDL3,
+Vulkan, CMake, POSIX sockets (shared with Android) and `mmap` for guest memory (shared with
+Android). PS2Recomp, the chosen base (`docs/milestones/m0-decision.md`), builds on Linux with GCC
+and Clang once SSE4.1 is enabled; that fix is in `upstream/ps2recomp/` (2026-10-21; 445/445 of
+its tests pass with both compilers). Linux is also where CI and the cross-play test server
+(BioServer, which runs in Docker) are easiest to run.
+
+What is not known yet: how SteamOS / Steam Deck and Flatpak packaging would fit (user-built
+binaries can't go on Flathub, same distribution rule as the other platforms), and whether a
+Linux arm64 build is wanted.
+
 ## Repository layout (a new repository)
 
 ```
@@ -203,6 +218,7 @@ outbreak-native/
   game/              decompiled C (the decomp as a submodule) and our mods (Modern Camera)
   apps/windows/      CMake target
   apps/android/      Gradle + NDK wrapper around the same CMake
+  apps/linux/        CMake target
   tests/             recompiler instruction tests (EE semantics), golden-frame tests
 ```
 
@@ -210,7 +226,7 @@ This repository (`outbreak-modern-camera-mod-android`) stays the ARMSX2 patch an
 
 ## Milestones (each ends with something that runs on both platforms)
 
-1. **Skeleton**: CMake + SDL3 + Vulkan window on Windows and the Odin; guest memory; ISO/AFS reader.
+1. **Skeleton**: CMake + SDL3 + Vulkan window on Windows, Linux and the Odin; guest memory; ISO/AFS reader.
 2. **Recompiler, main ELF**: boots `main()` to the first `sceGsSyncV`; EE instruction tests pass
    (FPU rules included).
 3. **2D**: GS packet interpreter -- boot image, logos, title screen; pad input.
