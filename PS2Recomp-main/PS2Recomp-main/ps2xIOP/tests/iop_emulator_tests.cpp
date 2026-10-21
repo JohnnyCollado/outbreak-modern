@@ -1,5 +1,6 @@
 #include "ps2x/iop/iop_subsystem.h"
 #include "emulator/services/iop_module_loader.h"
+#include "emulator/core/iop_memory.h"
 
 #include <algorithm>
 #include <chrono>
@@ -584,6 +585,55 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    // A module whose entry calls sceSifGetOtherData(rd, src = EE 0xC00, dst = IOP 0x101A0, 4, 0)
+    // and returns its result. Resident Evil Outbreak's sound driver fetches every sound-bank block
+    // from EE memory this way before uploading it to the SPU2.
+    void writeGetOtherDataIrx(TestHost &host, uint32_t address)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t importTableAddress = loadAddress + 0x100u;
+        constexpr uint32_t getOtherDataStub = importTableAddress + 20u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+        header.type = 2u; header.machine = 8u; header.version = 1u;
+        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+        program.filesz = 0x200u; program.memsz = 0x200u; program.flags = 7u; program.align = 4u;
+
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const uint32_t entry[] = {
+            0x27BDFFE8u, 0xAFBF0014u,             // addiu sp,-24; sw ra,20(sp)
+            0x3C040001u, 0x34840180u,             // a0 = 0x10180 (rd)
+            0x24050C00u,                          // a1 = 0xC00 (EE source)
+            0x3C060001u, 0x34C601A0u,             // a2 = 0x101A0 (IOP destination)
+            0x24070004u,                          // a3 = 4 (size)
+            0xAFA00010u,                          // mode = 0 (5th argument, on the stack)
+            0x24020055u,                          // v0 = 0x55: stays if the stub is not dispatched
+            jal(getOtherDataStub), 0x00000000u,
+            0x8FBF0014u, 0x27BD0018u, 0x03E00008u, 0x00000000u,
+        };
+        const uint32_t imports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x63666973u, 0x0000646Du, // "sifcmd"
+            0x03E00008u, 0x24000017u, // sceSifGetOtherData (ordinal 23)
+            0u, 0u,
+        };
+
+        std::vector<uint8_t> segment(program.filesz, 0u);
+        std::memcpy(segment.data(), entry, sizeof(entry));
+        std::memcpy(segment.data() + 0x100u, imports, sizeof(imports));
+        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+    }
+
     void writeSifDmaIrx(TestHost &host, uint32_t address)
     {
         constexpr uint32_t codeOffset = 0x100u;
@@ -1112,6 +1162,49 @@ int main()
                 "sceSifDmaStat did not report the synchronous transfer as complete")) return 1;
     if (!expect(sifDmaPayload == 0x53494621u,
                 "IOP sceSifSetDma did not copy the payload into EE memory")) return 1;
+
+    iop.reset();
+    constexpr uint32_t otherDataPayload = 0x4B4E4142u; // "BANK"
+    std::memcpy(host.guest.data() + 0xC00u, &otherDataPayload, sizeof(otherDataPayload));
+    writeGetOtherDataIrx(host, 0x100u);
+    const ModuleLoadResult otherDataModule = iop.loadModuleBuffer(0x100u);
+    uint32_t stubWord = 0u;
+    if (!expect(iop.readMemory(0x10114u, &stubWord, sizeof(stubWord)) && stubWord == 0x03E00008u,
+                "GetOtherData test module did not load at 0x10000 (stub word mismatch)")) return 1;
+    uint32_t fetchedPayload = 0u;
+    if (!expect(otherDataModule.handled && otherDataModule.startResult != 0x55,
+                "sceSifGetOtherData import was not dispatched at all")) return 1;
+    if (!expect(otherDataModule.startResult == 0,
+                "sceSifGetOtherData must return 0 for a completed synchronous fetch")) return 1;
+    if (!expect(iop.readMemory(0x101A0u, &fetchedPayload, sizeof(fetchedPayload)) &&
+                    fetchedPayload == otherDataPayload,
+                "sceSifGetOtherData did not copy the EE bytes into IOP memory")) return 1;
+
+    {
+        // SPU2 DMA timing. A voice transfer (sound-bank upload) is as fast as the DMA bus. A block
+        // transfer streams PCM into a core, which the SPU2 plays at 48 kHz x 2 channels x 16 bits
+        // = 192,000 bytes/s: 192 IOP cycles per byte at 36.864 MHz. libsd marks block transfers by
+        // writing 1 << core to 0x1B0 + core * 1024. Resident Evil Outbreak's ADX streaming thread
+        // polls the DMA address and waits for the completion interrupt; completed in 512 cycles
+        // instead of ~5 ms it never blocks and starves the sound driver's lower-priority worker.
+        ps2x::iop::detail::IopMemory memory;
+        memory.write32(0x1F8010C0u, 0x12000u);               // MADR
+        memory.write32(0x1F8010C4u, (0x10u << 16) | 0x10u);  // BCR: 16 blocks of 16 words = 1024 bytes
+        memory.write32(0x1F8010C8u, 0x01000201u);            // CHCR: start
+        const auto voice = memory.takeDmaStart();
+        if (!expect(voice.has_value() && voice->delayCycles < 1024u * 192u,
+                    "a voice transfer must not be paced to the playback rate")) return 1;
+        memory.write16(0x1F9001B0u, 1u);                     // core 0 block-transfer mode (libsd)
+        memory.write32(0x1F8010C0u, 0x12000u);
+        memory.write32(0x1F8010C4u, (0x10u << 16) | 0x10u);
+        memory.write32(0x1F8010C8u, 0x01000201u);
+        const auto block = memory.takeDmaStart();
+        if (!expect(block.has_value() && block->delayCycles == 1024u * 192u,
+                    "a block transfer must take the SPU2's playback time: 192 cycles per byte")) return 1;
+        memory.completeDma(*block);
+        if (!expect(memory.read32(0x1F8010C0u) == 0x12000u + 1024u,
+                    "MADR must point past the transferred bytes once the DMA completes")) return 1;
+    }
 
     iop.reset();
     writeVblankSchedulingIrx(host, 0x100u);

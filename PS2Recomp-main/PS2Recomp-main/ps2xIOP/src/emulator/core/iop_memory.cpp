@@ -10,6 +10,7 @@ namespace ps2x::iop::detail
         constexpr uint32_t kDmaSpu0Chcr = 0x1F8010C8u;
         constexpr uint32_t kDmaSpu1Chcr = 0x1F801508u;
         constexpr uint32_t kDmaStart = 1u << 24u;
+        constexpr uint64_t kSpu2CyclesPerStreamedByte = 192u; // 36,864,000 Hz / 192,000 bytes per second
         constexpr int kDmaSpu0Irq = 0x24;
         constexpr int kDmaSpu1Irq = 0x28;
 
@@ -269,10 +270,31 @@ namespace ps2x::iop::detail
         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
+        const uint64_t transferBytes = transferWords * 4u;
+
+        // libsd marks a block (streaming) transfer by writing 1 << core to 0x1B0 + core * 1024
+        // (sceSdBlockTrans); voice transfers leave it 0. The SPU2 plays streamed PCM at
+        // 48 kHz x 2 channels x 16 bits = 192,000 bytes/s, i.e. 192 IOP cycles per byte at
+        // 36.864 MHz, and games pace their streaming threads on that. A voice transfer is a plain
+        // DMA upload and stays fast.
+        const uint32_t blockModeAddress = 0x1F9001B0u + (secondCore ? 0x400u : 0u);
+        const bool blockTransfer = (readHardware32(blockModeAddress & ~3u) >> ((blockModeAddress & 2u) * 8u) & 0xFFFFu) != 0u;
+        const uint64_t delayCycles = blockTransfer ? transferBytes * kSpu2CyclesPerStreamedByte
+                                                   : std::max<uint64_t>(transferWords * 2u, 64u);
+        const uint32_t channelBase = address - 8u; // MADR
+        const uint32_t startAddress = readHardware32(channelBase);
         m_dmaStart = DmaStart{
             secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
-            std::max<uint64_t>(transferWords * 2u, 64u),
+            delayCycles,
+            channelBase,
+            static_cast<uint32_t>(startAddress + transferBytes),
         };
+    }
+
+    void IopMemory::completeDma(const DmaStart &dma)
+    {
+        if (dma.channelBase != 0u)
+            m_hardware[dma.channelBase] = dma.endAddress;
     }
 
     std::optional<IopMemory::DmaStart> IopMemory::takeDmaStart() noexcept

@@ -35,6 +35,8 @@ namespace ps2x::iop::detail
         {
             int irq = 0;
             uint64_t delayCycles = 0;
+            uint32_t channelBase = 0;  // MADR of the SPU2 DMA channel that started
+            uint32_t endAddress = 0;   // where MADR points once the transfer is done
         };
 
         IopMemory();
@@ -68,6 +70,7 @@ namespace ps2x::iop::detail
         void setInterruptControl(uint32_t value) noexcept { m_interruptControl = value & 1u; }
 
         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
+        void completeDma(const DmaStart &dma);
         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
 
         [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;

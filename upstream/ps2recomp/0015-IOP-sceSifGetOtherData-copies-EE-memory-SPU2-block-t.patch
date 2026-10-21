@@ -1,0 +1,314 @@
+From faf547056d53dcb0aa26b3755c109f8311784337 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 13:51:17 -0400
+Subject: [PATCH] IOP: sceSifGetOtherData copies EE memory; SPU2 block
+ transfers take playback time
+
+sceSifGetOtherData (sifcmd 23) was a stub returning 0: the IOP believed it
+had read EE memory and had nothing. It now copies src (EE) to dest (IOP)
+synchronously and fills the receive-data record.
+
+SPU2 DMA completed in max(words x 2, 64) IOP cycles, about 14 us for a 1 KB
+half-buffer, and the channel's MADR never moved. The SPU2 plays a streamed
+half-buffer in milliseconds (48 kHz x 2 channels x 16 bits = 192,000 bytes/s,
+192 IOP cycles per byte), and games pace their streaming threads on the
+completion interrupt and on sceSdBlockTransStatus (which returns MADR).
+Block transfers, which libsd marks by writing 1 << core to 0x1B0 + core *
+1024, now complete after bytes x 192 cycles, and MADR is advanced to the end
+of the transfer at completion. Voice transfers (sound-bank uploads) are
+unchanged.
+
+Found with Resident Evil Outbreak (SLPM-65428): the CRI ADX streaming
+thread (priority 39) never blocked, so the Tamsoft sound driver's worker
+(priority 50) that uploads sound banks never ran, and the game polled the
+driver forever. With both fixes the bank loads in 6 vsyncs (PCSX2: 5).
+---
+ ps2xIOP/src/emulator/core/iop_memory.cpp  | 24 +++++-
+ ps2xIOP/src/emulator/core/iop_memory.h    |  3 +
+ ps2xIOP/src/emulator/iop_emulator.cpp     | 16 ++--
+ ps2xIOP/src/emulator/services/iop_rpc.cpp | 29 ++++++-
+ ps2xIOP/tests/iop_emulator_tests.cpp      | 93 +++++++++++++++++++++++
+ 5 files changed, 158 insertions(+), 7 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index 25e9b36..23ca035 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -10,6 +10,7 @@ namespace ps2x::iop::detail
+         constexpr uint32_t kDmaSpu0Chcr = 0x1F8010C8u;
+         constexpr uint32_t kDmaSpu1Chcr = 0x1F801508u;
+         constexpr uint32_t kDmaStart = 1u << 24u;
++        constexpr uint64_t kSpu2CyclesPerStreamedByte = 192u; // 36,864,000 Hz / 192,000 bytes per second
+         constexpr int kDmaSpu0Irq = 0x24;
+         constexpr int kDmaSpu1Irq = 0x28;
+ 
+@@ -269,12 +270,33 @@ namespace ps2x::iop::detail
+         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
+         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
+         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
++        const uint64_t transferBytes = transferWords * 4u;
++
++        // libsd marks a block (streaming) transfer by writing 1 << core to 0x1B0 + core * 1024
++        // (sceSdBlockTrans); voice transfers leave it 0. The SPU2 plays streamed PCM at
++        // 48 kHz x 2 channels x 16 bits = 192,000 bytes/s, i.e. 192 IOP cycles per byte at
++        // 36.864 MHz, and games pace their streaming threads on that. A voice transfer is a plain
++        // DMA upload and stays fast.
++        const uint32_t blockModeAddress = 0x1F9001B0u + (secondCore ? 0x400u : 0u);
++        const bool blockTransfer = (readHardware32(blockModeAddress & ~3u) >> ((blockModeAddress & 2u) * 8u) & 0xFFFFu) != 0u;
++        const uint64_t delayCycles = blockTransfer ? transferBytes * kSpu2CyclesPerStreamedByte
++                                                   : std::max<uint64_t>(transferWords * 2u, 64u);
++        const uint32_t channelBase = address - 8u; // MADR
++        const uint32_t startAddress = readHardware32(channelBase);
+         m_dmaStart = DmaStart{
+             secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
+-            std::max<uint64_t>(transferWords * 2u, 64u),
++            delayCycles,
++            channelBase,
++            static_cast<uint32_t>(startAddress + transferBytes),
+         };
+     }
+ 
++    void IopMemory::completeDma(const DmaStart &dma)
++    {
++        if (dma.channelBase != 0u)
++            m_hardware[dma.channelBase] = dma.endAddress;
++    }
++
+     std::optional<IopMemory::DmaStart> IopMemory::takeDmaStart() noexcept
+     {
+         std::optional<DmaStart> result = m_dmaStart;
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index a932a5d..ece10a3 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -35,6 +35,8 @@ namespace ps2x::iop::detail
+         {
+             int irq = 0;
+             uint64_t delayCycles = 0;
++            uint32_t channelBase = 0;  // MADR of the SPU2 DMA channel that started
++            uint32_t endAddress = 0;   // where MADR points once the transfer is done
+         };
+ 
+         IopMemory();
+@@ -68,6 +70,7 @@ namespace ps2x::iop::detail
+         void setInterruptControl(uint32_t value) noexcept { m_interruptControl = value & 1u; }
+ 
+         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
++        void completeDma(const DmaStart &dma);
+         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
+ 
+         [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 0463774..f2254b3 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -178,7 +178,7 @@ namespace ps2x::iop::detail
+         void schedulePendingDma()
+         {
+             if (const auto dma = memory.takeDmaStart())
+-                pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
++                pendingDmaInterrupts[dma->irq] = PendingDma{totalCycles + dma->delayCycles, *dma};
+         }
+ 
+         bool readRam(uint32_t address, void *destination, size_t size) const
+@@ -498,11 +498,12 @@ namespace ps2x::iop::detail
+             std::vector<int> completed;
+             for (auto it = pendingDmaInterrupts.begin(); it != pendingDmaInterrupts.end();)
+             {
+-                if (it->second > totalCycles)
++                if (it->second.completionCycle > totalCycles)
+                 {
+                     ++it;
+                     continue;
+                 }
++                memory.completeDma(it->second.dma);
+                 completed.push_back(it->first);
+                 it = pendingDmaInterrupts.erase(it);
+             }
+@@ -574,8 +575,8 @@ namespace ps2x::iop::detail
+                     if (!next)
+                     {
+                         uint64_t nextWake = kernel.nextWakeCycle(target);
+-                        for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
+-                            nextWake = std::min(nextWake, completionCycle);
++                        for (const auto &[irq, pending] : pendingDmaInterrupts)
++                            nextWake = std::min(nextWake, pending.completionCycle);
+                         if (!pendingGuestCallbacks.empty())
+                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
+                         nextWake = timrman.nextEventCycle(nextWake);
+@@ -710,7 +711,12 @@ namespace ps2x::iop::detail
+         IopImportRegistry imports;
+         IopLoadcore loadcore;
+         std::map<int, Module> modules;
+-        std::map<int, uint64_t> pendingDmaInterrupts;
++        struct PendingDma
++        {
++            uint64_t completionCycle = 0;
++            IopMemory::DmaStart dma;
++        };
++        std::map<int, PendingDma> pendingDmaInterrupts;
+         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
+         uint32_t nextModuleId = 1;
+         uint32_t moduleCursor = kModuleLoadBase;
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index cf4fdc6..5e09b3e 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -244,9 +244,36 @@ namespace ps2x::iop::detail
+             m_kernel.sleepCurrent(cpu);
+             setV0(0);
+             return true;
+-        case 23:
++        case 23: // sceSifGetOtherData(rd, src (EE), dest (IOP), size, mode): the IOP reads EE memory
++        {
++            const uint32_t receiveData = cpu.gpr[4];
++            const uint32_t source = cpu.gpr[5];
++            const uint32_t destination = cpu.gpr[6];
++            const uint32_t size = cpu.gpr[7];
++            if (size == 0u)
++            {
++                setV0(0);
++                return true;
++            }
++            std::vector<uint8_t> payload(size);
++            const bool readOk = m_host.readGuest(source, payload.data(), payload.size());
++            const bool writeOk = readOk && m_memory.writeRam(destination, payload.data(), payload.size());
++            if (!readOk || !writeOk)
++            {
++                setV0(static_cast<uint32_t>(-1));
++                return true;
++            }
++            if (receiveData != 0u)
++            {
++                // SifRpcReceiveData_t: hdr (12 bytes), src, dest, size.
++                m_memory.write32(receiveData + 12u, source);
++                m_memory.write32(receiveData + 16u, destination);
++                m_memory.write32(receiveData + 20u, size);
++            }
++            // Synchronous: the data is in place when the call returns, whatever the mode.
+             setV0(0);
+             return true;
++        }
+         case 24: // RemoveRpc
+         {
+             const uint32_t serverData = cpu.gpr[4];
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 395161e..f278a4d 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -1,5 +1,6 @@
+ #include "ps2x/iop/iop_subsystem.h"
+ #include "emulator/services/iop_module_loader.h"
++#include "emulator/core/iop_memory.h"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -584,6 +585,55 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+     }
+ 
++    // A module whose entry calls sceSifGetOtherData(rd, src = EE 0xC00, dst = IOP 0x101A0, 4, 0)
++    // and returns its result. Resident Evil Outbreak's sound driver fetches every sound-bank block
++    // from EE memory this way before uploading it to the SPU2.
++    void writeGetOtherDataIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t importTableAddress = loadAddress + 0x100u;
++        constexpr uint32_t getOtherDataStub = importTableAddress + 20u;
++
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x200u; program.memsz = 0x200u; program.flags = 7u; program.align = 4u;
++
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++        const uint32_t entry[] = {
++            0x27BDFFE8u, 0xAFBF0014u,             // addiu sp,-24; sw ra,20(sp)
++            0x3C040001u, 0x34840180u,             // a0 = 0x10180 (rd)
++            0x24050C00u,                          // a1 = 0xC00 (EE source)
++            0x3C060001u, 0x34C601A0u,             // a2 = 0x101A0 (IOP destination)
++            0x24070004u,                          // a3 = 4 (size)
++            0xAFA00010u,                          // mode = 0 (5th argument, on the stack)
++            0x24020055u,                          // v0 = 0x55: stays if the stub is not dispatched
++            jal(getOtherDataStub), 0x00000000u,
++            0x8FBF0014u, 0x27BD0018u, 0x03E00008u, 0x00000000u,
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x63666973u, 0x0000646Du, // "sifcmd"
++            0x03E00008u, 0x24000017u, // sceSifGetOtherData (ordinal 23)
++            0u, 0u,
++        };
++
++        std::vector<uint8_t> segment(program.filesz, 0u);
++        std::memcpy(segment.data(), entry, sizeof(entry));
++        std::memcpy(segment.data() + 0x100u, imports, sizeof(imports));
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
++    }
++
+     void writeSifDmaIrx(TestHost &host, uint32_t address)
+     {
+         constexpr uint32_t codeOffset = 0x100u;
+@@ -1113,6 +1163,49 @@ int main()
+     if (!expect(sifDmaPayload == 0x53494621u,
+                 "IOP sceSifSetDma did not copy the payload into EE memory")) return 1;
+ 
++    iop.reset();
++    constexpr uint32_t otherDataPayload = 0x4B4E4142u; // "BANK"
++    std::memcpy(host.guest.data() + 0xC00u, &otherDataPayload, sizeof(otherDataPayload));
++    writeGetOtherDataIrx(host, 0x100u);
++    const ModuleLoadResult otherDataModule = iop.loadModuleBuffer(0x100u);
++    uint32_t stubWord = 0u;
++    if (!expect(iop.readMemory(0x10114u, &stubWord, sizeof(stubWord)) && stubWord == 0x03E00008u,
++                "GetOtherData test module did not load at 0x10000 (stub word mismatch)")) return 1;
++    uint32_t fetchedPayload = 0u;
++    if (!expect(otherDataModule.handled && otherDataModule.startResult != 0x55,
++                "sceSifGetOtherData import was not dispatched at all")) return 1;
++    if (!expect(otherDataModule.startResult == 0,
++                "sceSifGetOtherData must return 0 for a completed synchronous fetch")) return 1;
++    if (!expect(iop.readMemory(0x101A0u, &fetchedPayload, sizeof(fetchedPayload)) &&
++                    fetchedPayload == otherDataPayload,
++                "sceSifGetOtherData did not copy the EE bytes into IOP memory")) return 1;
++
++    {
++        // SPU2 DMA timing. A voice transfer (sound-bank upload) is as fast as the DMA bus. A block
++        // transfer streams PCM into a core, which the SPU2 plays at 48 kHz x 2 channels x 16 bits
++        // = 192,000 bytes/s: 192 IOP cycles per byte at 36.864 MHz. libsd marks block transfers by
++        // writing 1 << core to 0x1B0 + core * 1024. Resident Evil Outbreak's ADX streaming thread
++        // polls the DMA address and waits for the completion interrupt; completed in 512 cycles
++        // instead of ~5 ms it never blocks and starves the sound driver's lower-priority worker.
++        ps2x::iop::detail::IopMemory memory;
++        memory.write32(0x1F8010C0u, 0x12000u);               // MADR
++        memory.write32(0x1F8010C4u, (0x10u << 16) | 0x10u);  // BCR: 16 blocks of 16 words = 1024 bytes
++        memory.write32(0x1F8010C8u, 0x01000201u);            // CHCR: start
++        const auto voice = memory.takeDmaStart();
++        if (!expect(voice.has_value() && voice->delayCycles < 1024u * 192u,
++                    "a voice transfer must not be paced to the playback rate")) return 1;
++        memory.write16(0x1F9001B0u, 1u);                     // core 0 block-transfer mode (libsd)
++        memory.write32(0x1F8010C0u, 0x12000u);
++        memory.write32(0x1F8010C4u, (0x10u << 16) | 0x10u);
++        memory.write32(0x1F8010C8u, 0x01000201u);
++        const auto block = memory.takeDmaStart();
++        if (!expect(block.has_value() && block->delayCycles == 1024u * 192u,
++                    "a block transfer must take the SPU2's playback time: 192 cycles per byte")) return 1;
++        memory.completeDma(*block);
++        if (!expect(memory.read32(0x1F8010C0u) == 0x12000u + 1024u,
++                    "MADR must point past the transferred bytes once the DMA completes")) return 1;
++    }
++
+     iop.reset();
+     writeVblankSchedulingIrx(host, 0x100u);
+     const ModuleLoadResult vblankModule = iop.loadModuleBuffer(0x100u);
+-- 
+2.46.2.windows.1
+

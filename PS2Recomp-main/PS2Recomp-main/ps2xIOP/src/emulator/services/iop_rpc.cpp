@@ -244,9 +244,36 @@ namespace ps2x::iop::detail
             m_kernel.sleepCurrent(cpu);
             setV0(0);
             return true;
-        case 23:
+        case 23: // sceSifGetOtherData(rd, src (EE), dest (IOP), size, mode): the IOP reads EE memory
+        {
+            const uint32_t receiveData = cpu.gpr[4];
+            const uint32_t source = cpu.gpr[5];
+            const uint32_t destination = cpu.gpr[6];
+            const uint32_t size = cpu.gpr[7];
+            if (size == 0u)
+            {
+                setV0(0);
+                return true;
+            }
+            std::vector<uint8_t> payload(size);
+            const bool readOk = m_host.readGuest(source, payload.data(), payload.size());
+            const bool writeOk = readOk && m_memory.writeRam(destination, payload.data(), payload.size());
+            if (!readOk || !writeOk)
+            {
+                setV0(static_cast<uint32_t>(-1));
+                return true;
+            }
+            if (receiveData != 0u)
+            {
+                // SifRpcReceiveData_t: hdr (12 bytes), src, dest, size.
+                m_memory.write32(receiveData + 12u, source);
+                m_memory.write32(receiveData + 16u, destination);
+                m_memory.write32(receiveData + 20u, size);
+            }
+            // Synchronous: the data is in place when the call returns, whatever the mode.
             setV0(0);
             return true;
+        }
         case 24: // RemoveRpc
         {
             const uint32_t serverData = cpu.gpr[4];

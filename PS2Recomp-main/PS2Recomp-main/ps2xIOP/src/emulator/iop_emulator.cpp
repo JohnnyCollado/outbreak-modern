@@ -178,7 +178,7 @@ namespace ps2x::iop::detail
         void schedulePendingDma()
         {
             if (const auto dma = memory.takeDmaStart())
-                pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
+                pendingDmaInterrupts[dma->irq] = PendingDma{totalCycles + dma->delayCycles, *dma};
         }
 
         bool readRam(uint32_t address, void *destination, size_t size) const
@@ -498,11 +498,12 @@ namespace ps2x::iop::detail
             std::vector<int> completed;
             for (auto it = pendingDmaInterrupts.begin(); it != pendingDmaInterrupts.end();)
             {
-                if (it->second > totalCycles)
+                if (it->second.completionCycle > totalCycles)
                 {
                     ++it;
                     continue;
                 }
+                memory.completeDma(it->second.dma);
                 completed.push_back(it->first);
                 it = pendingDmaInterrupts.erase(it);
             }
@@ -574,8 +575,8 @@ namespace ps2x::iop::detail
                     if (!next)
                     {
                         uint64_t nextWake = kernel.nextWakeCycle(target);
-                        for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
-                            nextWake = std::min(nextWake, completionCycle);
+                        for (const auto &[irq, pending] : pendingDmaInterrupts)
+                            nextWake = std::min(nextWake, pending.completionCycle);
                         if (!pendingGuestCallbacks.empty())
                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                         nextWake = timrman.nextEventCycle(nextWake);
@@ -710,7 +711,12 @@ namespace ps2x::iop::detail
         IopImportRegistry imports;
         IopLoadcore loadcore;
         std::map<int, Module> modules;
-        std::map<int, uint64_t> pendingDmaInterrupts;
+        struct PendingDma
+        {
+            uint64_t completionCycle = 0;
+            IopMemory::DmaStart dma;
+        };
+        std::map<int, PendingDma> pendingDmaInterrupts;
         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
         uint32_t nextModuleId = 1;
         uint32_t moduleCursor = kModuleLoadBase;
