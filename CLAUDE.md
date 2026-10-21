@@ -19,8 +19,10 @@ for the full story; this file is the hand-off.
 
 - **No game data in git, ever**: no disc files, IOP modules, archives, disassembly, recompiler
   output, generated `register_functions.cpp`/`ps2_recompiled_*.h`. Hashes, addresses, names and
-  sizes are fine. (`game_files/` on `main` breaks this; Johnny deferred the cleanup. Don't merge
-  that commit into working branches.)
+  sizes are fine. (`game_files/` was committed to `main` on 2026-10-21; a later commit `de60c78`
+  removed it from the tree and git-ignored the folder, but commits `bb0c282` and `e012448` still
+  hold the files in `main`'s history. Full removal needs a history rewrite of `main`, which only
+  Johnny can OK. Don't merge those commits into working branches.)
 - PS2Recomp is GPL-3.0 and vendored at `PS2Recomp-main/PS2Recomp-main/` (upstream `eb8688b`
   + our patches 0001-0009 applied). Every change to it also goes into `upstream/ps2recomp/` as
   a numbered patch with its own test, and its README row. **Nothing is sent to ran-j
@@ -38,7 +40,7 @@ for the full story; this file is the hand-off.
 | Reports | `reports/` |
 | PS2Recomp patches | `upstream/ps2recomp/0001-0009` + README (what, why, how tested) |
 | Tools | `tools/q_scan.py` (+test), `tools/splat_functions.py` (+test), `tools/recomp_cycle.sh` |
-| Game files Johnny provided | `game_files/` on `main` **only**: `SLPM_654.28`, `SYSTEM.CNF`, `prog/*.bin` (8 overlays), `iop/modules/` (33 files). SLPM-65428 v1.04 **with the English patch v2.1**: 4 binaries match the decomp's `english.sha1`, 5 match `build.sha1`. |
+| Game files Johnny provided | In `main`'s **history only**, commit `e012448` (`git archive e012448 game_files \| tar -x -C <scratch>`): `SLPM_654.28`, `SYSTEM.CNF`, `prog/*.bin` (8 overlays), `iop/modules/` (33 files). If that history gets rewritten, Johnny has to provide them again (Dropbox/Drive). SLPM-65428 v1.04 **with the English patch v2.1**: 4 binaries match the decomp's `english.sha1`, 5 match `build.sha1`. |
 
 ## State of the port (what works, what's next)
 
@@ -63,7 +65,7 @@ for the full story; this file is the hand-off.
 Keep all of this **outside the repo** (the session's scratchpad dir). Steps, in order:
 
 1. `apt-get install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev xvfb gdb`
-2. Game files: `git archive origin/main game_files | tar -x -C <scratch>`; then make the run
+2. Game files: `git archive e012448 game_files | tar -x -C <scratch>` (see the table above); then make the run
    folder with **upper-case** names: `RUN/SLPM_654.28`, `RUN/SYSTEM.CNF`, `RUN/PROG/GAME.BIN`...,
    `RUN/IOP/MODULES/<the 33 files>`, later `RUN/NETBIO0*.DAT`.
 3. Decomp: `git clone --depth 1 https://github.com/GalaxyNostalgia/Outbreak-decomp` (was
