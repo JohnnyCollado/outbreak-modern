@@ -56,10 +56,10 @@ PY = C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe
   the close deletes it; a tool deletes its own temp folders when it finishes.
 
 ## Build / run / test <!-- roles: claude expert coder planner review auditor curator -->
-- Build: `<!-- TODO BUILD_COMMAND: no source found -->`
-- Run: `<!-- TODO RUN_COMMAND: no source found -->`
-- Test / the gate: `<!-- TODO TEST_COMMAND: no source found -->` — green means <!-- TODO GREEN_MEANS: no source found -->
-- Modes: <!-- TODO TEST_MODES: no source found -->
+- Build: `bash tools/run.sh ob-tools -- bash tools/ob.sh tools` (MSVC analyzer, recompiler, ps2x_tests -> C:\ob\t); `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` (main ELF + overlays demo/submain/netdnas, then ps2EntryRunner -> C:\ob\r). Long: background shell.
+- Run: `bash tools/ob.sh boot [--secs N] [--tag T]` (auto-press, frame dump to C:\ob\frames, log C:\ob\logs\boot-<tag>.log, killed after N s, default 200). Opens a VISIBLE window: needs a specific developer proceed until a hidden flag exists.
+- Test / the gate: `bash tools/run.sh ob-test -- bash tools/ob.sh test` — green means ps2x_tests 461/461, IOP ctest 4/4, gs_cache ctest 45/45 (one line per suite, exit 0).
+- Modes: paths from env vars, defaults under C:\ob: OB_ROOT, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT (C:\ob\splat\SLPM_654.28), OB_RUN (repo game_files, read only), OB_VCVARS. MSVC steps run through tools/ob/vc.bat.
 Long gates go through `tools/run.sh` with a raised timeout, never a poll loop.
 
 ## Conventions & house style <!-- roles: claude expert coder planner review auditor curator -->
