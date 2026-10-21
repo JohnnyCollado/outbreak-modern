@@ -14,3 +14,7 @@ replacements/
 *.rar
 REOB by NoBigDeal La*/
 ps2_emu/
+
+# Project Architect 3.0
+.run/
+__pycache__/
