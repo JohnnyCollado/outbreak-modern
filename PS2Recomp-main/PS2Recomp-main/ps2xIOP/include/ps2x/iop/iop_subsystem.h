@@ -26,6 +26,9 @@ namespace ps2x::iop
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result = nullptr);
+        // SifSearchModuleByName: the id of a loaded module by its .iopmod name (HLE modules by their
+        // module key), or -1 when none is loaded.
+        [[nodiscard]] int32_t findModuleByName(std::string_view name) const;
         void runEeCycles(uint64_t eeCycles) noexcept;
 
         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;

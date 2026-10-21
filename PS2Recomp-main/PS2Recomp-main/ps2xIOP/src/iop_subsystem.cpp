@@ -147,7 +147,19 @@ namespace ps2x::iop
 
     ModuleLoadResult IopSubsystem::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
     {
-        return m_impl->emulator.loadModuleBuffer(guestAddress, arguments, argumentSize);
+        ModuleLoadResult physical = m_impl->emulator.loadModuleBuffer(guestAddress, arguments, argumentSize);
+        if (physical.moduleId > 0)
+        {
+            m_impl->moduleManager.observePhysicalLoad(physical.moduleId, m_impl->emulator.moduleName(physical.moduleId));
+            m_impl->rebuildRoutes();
+        }
+        return physical;
+    }
+
+    int32_t IopSubsystem::findModuleByName(std::string_view name) const
+    {
+        const int32_t physical = m_impl->emulator.findModuleByName(name);
+        return physical > 0 ? physical : m_impl->moduleManager.findHle(name);
     }
 
     bool IopSubsystem::stopModule(int32_t moduleId, int32_t *result)

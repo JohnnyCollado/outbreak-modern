@@ -162,6 +162,107 @@ namespace
                expect(static_cast<int32_t>(cpu.gpr[2]) == expected, "PollEventFlag returned an unexpected result");
     }
 
+    // thmsgbx: CreateMbx 4, DeleteMbx 5, SendMbx 6, ReceiveMbx 8, PollMbx 9, ReferMbxStatus 11.
+    bool testMessageBox()
+    {
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+
+        const auto call = [&](uint16_t ordinal, uint32_t a0, uint32_t a1 = 0u)
+        {
+            IopCpuState cpu{};
+            cpu.gpr[4] = a0;
+            cpu.gpr[5] = a1;
+            const bool handled = kernel.dispatchMessageBoxImport(ordinal, cpu);
+            return handled ? static_cast<int32_t>(cpu.gpr[2]) : 0x7FFFFFFF;
+        };
+        const auto createBox = [&](uint32_t attr)
+        {
+            memory.write32(0x2000u, attr);
+            memory.write32(0x2004u, 0u);
+            return call(4u, 0x2000u);
+        };
+        const auto message = [&](uint32_t address, uint8_t priority)
+        {
+            memory.write32(address, 0u);
+            memory.write8(address + 4u, priority);
+            return address;
+        };
+        constexpr uint32_t kMsgvar = 0x2100u;
+        const auto poll = [&](int32_t id)
+        {
+            memory.write32(kMsgvar, 0u);
+            const int32_t result = call(9u, kMsgvar, static_cast<uint32_t>(id));
+            return result == 0 ? memory.read32(kMsgvar) : static_cast<uint32_t>(result);
+        };
+
+        const int32_t fifo = createBox(0u);
+        if (!expect(fifo > 0, "CreateMbx did not return an id") ||
+            !expect(call(9u, kMsgvar, static_cast<uint32_t>(fifo)) == -424, "PollMbx on an empty box must return KE_MBOX_NOMSG") ||
+            !expect(call(6u, 0x7777u, 0x3000u) == -410, "SendMbx to an unknown id must return KE_UNKNOWN_MBXID") ||
+            !expect(createBox(0x8u) == -401, "CreateMbx must reject unknown attributes"))
+            return false;
+
+        call(6u, static_cast<uint32_t>(fifo), message(0x3000u, 9u));
+        call(6u, static_cast<uint32_t>(fifo), message(0x3100u, 1u));
+        if (!expect(poll(fifo) == 0x3000u && poll(fifo) == 0x3100u, "A FIFO box must deliver in sending order"))
+            return false;
+
+        const int32_t byPriority = createBox(0x4u); // MBA_MSPRI
+        call(6u, static_cast<uint32_t>(byPriority), message(0x3200u, 5u));
+        call(6u, static_cast<uint32_t>(byPriority), message(0x3300u, 1u));
+        call(6u, static_cast<uint32_t>(byPriority), message(0x3400u, 5u));
+        memory.write32(0x2200u, 0xFFFFFFFFu);
+        if (!expect(call(11u, static_cast<uint32_t>(byPriority), 0x2200u) == 0 && memory.read32(0x220Cu) == 3u &&
+                        memory.read32(0x2210u) == 0x3300u,
+                    "ReferMbxStatus must report 3 messages with the priority-1 one on top") ||
+            !expect(poll(byPriority) == 0x3300u && poll(byPriority) == 0x3200u && poll(byPriority) == 0x3400u,
+                    "An MBA_MSPRI box must deliver lowest priority first, equal priorities in sending order"))
+            return false;
+
+        // A thread that waits in ReceiveMbx gets the next message sent.
+        memory.write32(0x2300u, 0u);      // attr
+        memory.write32(0x2304u, 0u);      // option
+        memory.write32(0x2308u, 0x1000u); // entry
+        memory.write32(0x230Cu, 0x400u);  // stack size
+        memory.write32(0x2310u, 0x20u);   // priority
+        IopCpuState create{};
+        create.gpr[4] = 0x2300u;
+        if (!expect(kernel.dispatchThreadImport(4u, create, 0u) && static_cast<int32_t>(create.gpr[2]) > 0, "CreateThread failed"))
+            return false;
+        IopCpuState start{};
+        start.gpr[4] = create.gpr[2];
+        if (!expect(kernel.dispatchThreadImport(6u, start, 0u), "StartThread failed"))
+            return false;
+        IopThread *waiter = kernel.beginNextReady(0u);
+        if (!expect(waiter != nullptr, "The thread did not become ready"))
+            return false;
+        memory.write32(kMsgvar, 0u);
+        waiter->cpu.gpr[4] = kMsgvar;
+        waiter->cpu.gpr[5] = static_cast<uint32_t>(fifo);
+        if (!expect(kernel.dispatchMessageBoxImport(8u, waiter->cpu) && waiter->cpu.yielded &&
+                        waiter->state == IopThreadState::MessageBox,
+                    "ReceiveMbx on an empty box must make the thread wait"))
+            return false;
+        waiter->cpu.gpr[2] = 0x55u;
+        if (!expect(call(6u, static_cast<uint32_t>(fifo), message(0x3500u, 0u)) == 0, "SendMbx to a waiting thread failed") ||
+            !expect(waiter->state == IopThreadState::Ready && memory.read32(kMsgvar) == 0x3500u && waiter->cpu.gpr[2] == 0u,
+                    "SendMbx must hand the message to the waiting thread and wake it with KE_OK") ||
+            !expect(poll(fifo) == static_cast<uint32_t>(-424), "A message handed to a waiter must not also be queued"))
+            return false;
+
+        // DeleteMbx wakes waiters with KE_WAIT_DELETE.
+        waiter = kernel.beginNextReady(0u);
+        waiter->cpu.gpr[4] = kMsgvar;
+        waiter->cpu.gpr[5] = static_cast<uint32_t>(fifo);
+        (void)kernel.dispatchMessageBoxImport(8u, waiter->cpu);
+        return expect(call(5u, static_cast<uint32_t>(fifo)) == 0, "DeleteMbx failed") &&
+               expect(waiter->state == IopThreadState::Ready && static_cast<int32_t>(waiter->cpu.gpr[2]) == -425,
+                      "DeleteMbx must wake waiters with KE_WAIT_DELETE") &&
+               expect(call(9u, kMsgvar, static_cast<uint32_t>(fifo)) == -410, "A deleted box must be unknown");
+    }
+
     bool testCdvdSpecialControl()
     {
         NullHost host;
@@ -330,7 +431,7 @@ namespace
 
 int main()
 {
-    if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
+    if (!testMessageBox() || !testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";

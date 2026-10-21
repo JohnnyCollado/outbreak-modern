@@ -557,6 +557,21 @@ namespace ps2_stubs
         ps2_syscalls::sceSifLoadModuleBuffer(rdram, ctx, runtime);
     }
 
+    void _sceSifLoadModuleBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_syscalls::_sceSifLoadModuleBuffer(rdram, ctx, runtime);
+    }
+
+    void _sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_syscalls::_sceSifLoadModule(rdram, ctx, runtime);
+    }
+
+    void sceSifSearchModuleByName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_syscalls::sceSifSearchModuleByName(rdram, ctx, runtime);
+    }
+
     void sceSifRebootIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         PS2IopTransport::reset(runtime);

@@ -1,0 +1,140 @@
+From ced5bd85753e11a2b55a415a0cd539ec6a142b91 Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 07:41:39 +0000
+Subject: [PATCH] VFS: match host file names whatever their case
+
+PS2 paths are case-insensitive (ISO 9660 names are upper case), but a game's files
+copied off a disc can arrive in any case. PS2Vfs::resolveHostPath joined the path
+with exact case, so on Linux and Android fioOpen("cdrom0:\\IOP\\MODULES\\DRIVE.DAT;1")
+missed iop/modules/drive.dat and the game retried forever. When the exact path
+doesn't exist, match each existing component ignoring ASCII case; with no match,
+keep the exact path so new files are created under the requested name. Windows
+is unchanged (its file system already ignores case).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRuntime/src/lib/ps2_vfs.cpp       | 46 ++++++++++++++++++++++++++-
+ ps2xTest/src/ps2_runtime_io_tests.cpp | 40 ++++++++++++++++++++++-
+ 2 files changed, 84 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/ps2_vfs.cpp b/ps2xRuntime/src/lib/ps2_vfs.cpp
+index aff25e6..41530d5 100644
+--- a/ps2xRuntime/src/lib/ps2_vfs.cpp
++++ b/ps2xRuntime/src/lib/ps2_vfs.cpp
+@@ -145,6 +145,50 @@ namespace
+         return true;
+     }
+ 
++    // PS2 paths are case-insensitive (ISO 9660 names are upper case), but files copied off a disc
++    // can arrive in any case, and Linux/Android file systems are case-sensitive. When the exact
++    // path is missing, match each existing component ignoring ASCII case. Returns the exact path
++    // when nothing matches, so new files are still created under the name the game asked for.
++    std::filesystem::path matchPathCase(const std::filesystem::path &base, const std::filesystem::path &relative)
++    {
++        const std::filesystem::path exact = (base / relative).lexically_normal();
++        std::error_code ec;
++        if (std::filesystem::exists(exact, ec))
++            return exact;
++
++        const auto lower = [](std::string text)
++        {
++            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c)
++                           { return static_cast<char>((c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c); });
++            return text;
++        };
++
++        std::filesystem::path current = base;
++        for (const auto &component : relative)
++        {
++            const std::filesystem::path direct = current / component;
++            if (std::filesystem::exists(direct, ec))
++            {
++                current = direct;
++                continue;
++            }
++            const std::string wanted = lower(component.string());
++            bool matched = false;
++            for (const auto &entry : std::filesystem::directory_iterator(current, ec))
++            {
++                if (lower(entry.path().filename().string()) == wanted)
++                {
++                    current = entry.path();
++                    matched = true;
++                    break;
++                }
++            }
++            if (!matched)
++                return exact;
++        }
++        return current.lexically_normal();
++    }
++
+     std::time_t toTimeT(std::filesystem::file_time_type value)
+     {
+         const auto systemValue = std::chrono::time_point_cast<std::chrono::system_clock::duration>(value - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+@@ -297,7 +341,7 @@ bool PS2Vfs::resolveHostPath(std::string_view path, const PS2VfsMounts &mounts,
+     std::filesystem::path relative;
+     if (base.empty() || !safeRelativePath(parsed.path, relative))
+         return false;
+-    result = (base / relative).lexically_normal();
++    result = matchPathCase(base, relative);
+     return true;
+ }
+ 
+diff --git a/ps2xTest/src/ps2_runtime_io_tests.cpp b/ps2xTest/src/ps2_runtime_io_tests.cpp
+index 4f979be..7fe122f 100644
+--- a/ps2xTest/src/ps2_runtime_io_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_io_tests.cpp
+@@ -462,10 +462,48 @@ void register_ps2_runtime_io_tests()
+             // Verify mcRoot directory structure
+             t.IsTrue(std::filesystem::exists(test.paths.mcRoot / "ISOLATED"), 
+                 "mc0: directory should exist under mcRoot");
+-            t.IsFalse(std::filesystem::exists(test.paths.cdRoot / "ISOLATED"), 
++            t.IsFalse(std::filesystem::exists(test.paths.cdRoot / "ISOLATED"),
+                 "mc0: directory should NOT exist under cdRoot");
+         });
+ 
++        tc.Run("cdrom0 paths match host files whatever their case", [](TestCase &t)
++        {
++            TestContext test;
++
++            // Files copied off a disc in lower case; the game asks for the ISO 9660 upper-case name.
++            std::filesystem::create_directories(test.paths.cdRoot / "iop" / "modules");
++            const std::string payload = "drive";
++            {
++                std::ofstream out(test.paths.cdRoot / "iop" / "modules" / "drive.dat", std::ios::binary);
++                out << payload;
++            }
++
++            const uint32_t pathAddr = GUEST_STRING_AREA_START;
++            writeGuestString(test.rdram.data(), pathAddr, "cdrom0:\\IOP\\MODULES\\DRIVE.DAT;1");
++            setRegU32(test.ctx, 4, pathAddr);
++            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
++            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
++            const int32_t fd = getRegS32(&test.ctx, 2);
++            t.IsTrue(fd >= 0, "cdrom0:\\IOP\\MODULES\\DRIVE.DAT;1 should open iop/modules/drive.dat");
++
++            const uint32_t bufAddr = GUEST_BUFFER_AREA_START;
++            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
++            setRegU32(test.ctx, 5, bufAddr);
++            setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
++            fioRead(test.rdram.data(), &test.ctx, &test.runtime);
++            t.Equals(getRegS32(&test.ctx, 2), static_cast<int32_t>(payload.size()), "the whole file should be read");
++            t.IsTrue(std::memcmp(test.rdram.data() + bufAddr, payload.data(), payload.size()) == 0,
++                     "the bytes should come from the lower-case file");
++            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
++            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
++
++            writeGuestString(test.rdram.data(), pathAddr, "cdrom0:\\IOP\\MODULES\\MISSING.DAT;1");
++            setRegU32(test.ctx, 4, pathAddr);
++            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
++            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
++            t.IsTrue(getRegS32(&test.ctx, 2) < 0, "a file that doesn't exist in any case should still fail to open");
++        });
++
+         tc.Run("sceMc open write read and close roundtrip through sync", [](TestCase &t)
+         {
+             TestContext test;
+-- 
+2.43.0
+

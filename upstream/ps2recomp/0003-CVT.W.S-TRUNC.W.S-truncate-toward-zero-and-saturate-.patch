@@ -1,0 +1,84 @@
+From 6924c2881f4c32b2885738d179fd3f1ca4ce70b2 Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 06:32:55 +0000
+Subject: [PATCH 3/5] CVT.W.S/TRUNC.W.S: truncate toward zero and saturate by
+ sign
+
+CVT.W.S rounded to nearest (nearbyintf) and neither conversion saturated: an
+out-of-range value was cast straight to int32_t, which is undefined in C++, and
+x86 (0x80000000) and ARM (saturating) give different answers. The EE truncates
+and saturates to 0x7FFFFFFF/0x80000000, as PCSX2's interpreter does (FPU.cpp
+CVT_W); exponent-255 values saturate too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRuntime/include/ps2_runtime_macros.h   | 15 +++++++++++++--
+ ps2xTest/src/ps2_float_semantics_tests.cpp | 15 +++++++++++++++
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index 0485d50..6608264 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -311,6 +311,17 @@ inline float ps2_frsqrt(float a, float b)
+     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
+ }
+ 
++// CVT.W.S: truncate toward zero; anything of 2^31 or more (exponent-255 values included) saturates by
++// sign. A plain cast would be undefined there, and x86 and ARM give different results. Same as PCSX2's
++// interpreter (FPU.cpp CVT_W).
++inline int32_t ps2_cvt_w_s(float a)
++{
++    const uint32_t b = std::bit_cast<uint32_t>(a);
++    if ((b & PS2_FLOAT_EXP_MASK) <= 0x4E800000u)
++        return static_cast<int32_t>(a);
++    return (b & PS2_FLOAT_SIGN_MASK) ? INT32_MIN : INT32_MAX;
++}
++
+ enum class Ps2VecOp
+ {
+     Add,
+@@ -848,12 +859,12 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
+ #define FPU_CEIL_L_S(a) ((int64_t)ceilf((float)(a)))
+ #define FPU_FLOOR_L_S(a) ((int64_t)floorf((float)(a)))
+ #define FPU_ROUND_W_S(a) ((int32_t)nearbyintf((float)(a)))
+-#define FPU_TRUNC_W_S(a) ((int32_t)(float)(a))
++#define FPU_TRUNC_W_S(a) ps2_cvt_w_s((float)(a))
+ #define FPU_CEIL_W_S(a) ((int32_t)ceilf((float)(a)))
+ #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
+ #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
+ #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
+-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
++#define FPU_CVT_W_S(a) ps2_cvt_w_s((float)(a))
+ #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
+ #define FPU_C_F_S(a, b) (0)
+ #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
+diff --git a/ps2xTest/src/ps2_float_semantics_tests.cpp b/ps2xTest/src/ps2_float_semantics_tests.cpp
+index 2866d2b..22b3908 100644
+--- a/ps2xTest/src/ps2_float_semantics_tests.cpp
++++ b/ps2xTest/src/ps2_float_semantics_tests.cpp
+@@ -178,6 +178,21 @@ void register_ps2_float_semantics_tests()
+             t.Equals(bitsOf(FPU_SQRT_S(-0.0f)), bitsOf(0.0f), "sqrt(-0) should be +0");
+         });
+ 
++        tc.Run("FPU CVT.W.S truncates toward zero and saturates by sign", [](TestCase &t)
++        {
++            t.Equals(FPU_CVT_W_S(2.75f), 2, "2.75 should truncate to 2, not round to 3");
++            t.Equals(FPU_CVT_W_S(-2.75f), -2, "-2.75 should truncate toward zero to -2");
++            t.Equals(FPU_CVT_W_S(0.5f), 0, "0.5 should truncate to 0");
++            t.Equals(FPU_CVT_W_S(floatOf(0x4EFFFFFFu)), 2147483520, "the largest float below 2^31 should convert exactly");
++            t.Equals(FPU_CVT_W_S(floatOf(0x4F000000u)), INT32_MAX, "2^31 should saturate to 0x7FFFFFFF");
++            t.Equals(FPU_CVT_W_S(floatOf(0xCF000000u)), INT32_MIN, "-2^31 should saturate to 0x80000000");
++            t.Equals(FPU_CVT_W_S(floatOf(0xDF000000u)), INT32_MIN, "-2^63 should saturate to 0x80000000");
++            t.Equals(FPU_CVT_W_S(floatOf(kTwoPow128)), INT32_MAX, "2^128 (exponent 255) should saturate, not become Inf/NaN");
++            t.Equals(FPU_CVT_W_S(floatOf(kPlusMax)), INT32_MAX, "+max should saturate to 0x7FFFFFFF");
++            t.Equals(FPU_CVT_W_S(floatOf(kMinusMax)), INT32_MIN, "-max should saturate to 0x80000000");
++            t.Equals(FPU_TRUNC_W_S(floatOf(kPlusMax)), INT32_MAX, "TRUNC.W.S should saturate the same way");
++        });
++
+         tc.Run("VU vector ADD/SUB/MUL follow the same rules in every lane", [](TestCase &t)
+         {
+             // _mm_set_ps lists lanes 3..0
+-- 
+2.43.0
+

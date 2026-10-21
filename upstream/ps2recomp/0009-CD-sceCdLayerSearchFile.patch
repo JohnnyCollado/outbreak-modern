@@ -1,0 +1,105 @@
+From bf0a614036a6c7ab0b02ee7db8d6ec8956bd75d4 Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 08:42:03 +0000
+Subject: [PATCH 9/9] CD: sceCdLayerSearchFile
+
+The dual-layer DVD form of sceCdSearchFile (CRI's DVD file system calls it; without a
+handler the game's own library code waited on the CD RPC forever). A folder of
+extracted files has one layer, so layer 0 is searched like sceCdSearchFile and layer 1
+returns 0 (not found).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRuntime/include/ps2_call_list.h     |  1 +
+ ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp | 13 +++++++++++++
+ ps2xRuntime/src/lib/Kernel/Stubs/CD.h   |  1 +
+ ps2xTest/src/ps2_runtime_io_tests.cpp   | 25 +++++++++++++++++++++++++
+ 4 files changed, 40 insertions(+)
+
+diff --git a/ps2xRuntime/include/ps2_call_list.h b/ps2xRuntime/include/ps2_call_list.h
+index a1285bb..edddefa 100644
+--- a/ps2xRuntime/include/ps2_call_list.h
++++ b/ps2xRuntime/include/ps2_call_list.h
+@@ -310,6 +310,7 @@
+     X(sceCdReadClock)                         \
+     X(sceCdReadIOPm)                          \
+     X(sceCdSearchFile)                        \
++    X(sceCdLayerSearchFile)                   \
+     X(sceCdSeek)                              \
+     X(sceCdStInit)                            \
+     X(sceCdStPause)                           \
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+index 56a978e..d2011b1 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+@@ -542,6 +542,19 @@ namespace ps2_stubs
+         sceCdRead(rdram, ctx, runtime);
+     }
+ 
++    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        // sceCdLayerSearchFile(sceCdlFILE *file, const char *name, int layer): the dual-layer DVD
++        // form of sceCdSearchFile. A folder of extracted files has only one layer, so layer 0 is
++        // searched like sceCdSearchFile and layer 1 never has the file (0, as for "not found").
++        if (getRegU32(ctx, 6) != 0u)
++        {
++            setReturnS32(ctx, 0);
++            return;
++        }
++        sceCdSearchFile(rdram, ctx, runtime);
++    }
++
+     void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         uint32_t fileAddr = getRegU32(ctx, 4);
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.h b/ps2xRuntime/src/lib/Kernel/Stubs/CD.h
+index dd5bae9..8cacb4e 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.h
+@@ -65,6 +65,7 @@ namespace ps2_stubs
+     void sceCdReadClock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceCdReadIOPm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceCdSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceCdStandby(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+diff --git a/ps2xTest/src/ps2_runtime_io_tests.cpp b/ps2xTest/src/ps2_runtime_io_tests.cpp
+index 7fe122f..1a8f98f 100644
+--- a/ps2xTest/src/ps2_runtime_io_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_io_tests.cpp
+@@ -745,6 +745,31 @@ void register_ps2_runtime_io_tests()
+                      "sceCdSearchFile should assign a pseudo LSN for the resolved host file");
+         });
+ 
++        tc.Run("sceCdLayerSearchFile finds layer-0 files and nothing on layer 1", [](TestCase &t)
++        {
++            TestContext test;
++            {
++                std::ofstream out(test.paths.cdRoot / "SYSTEM.CNF", std::ios::binary);
++                out << "BOOT2";
++            }
++            constexpr uint32_t fileAddr = GUEST_BUFFER_AREA_START + 0x1B00;
++            constexpr uint32_t pathAddr = GUEST_STRING_AREA_START + 0xB00;
++            writeGuestString(test.rdram.data(), pathAddr, "\\SYSTEM.CNF;1");
++
++            const auto search = [&](uint32_t layer)
++            {
++                clearContext(test.ctx);
++                setRegU32(test.ctx, 4, fileAddr);
++                setRegU32(test.ctx, 5, pathAddr);
++                setRegU32(test.ctx, 6, layer);
++                ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
++                return getRegS32(&test.ctx, 2);
++            };
++            t.Equals(search(0u), 1, "layer 0 should find the file like sceCdSearchFile");
++            t.Equals(readGuestU32(test.rdram.data(), fileAddr + 4), 5u, "layer 0 should report the file size");
++            t.Equals(search(1u), 0, "layer 1 should not find the file");
++        });
++
+         tc.Run("sceCdRead reads from explicit cdImage path", [](TestCase &t)
+         {
+             TestContext test;
+-- 
+2.43.0
+

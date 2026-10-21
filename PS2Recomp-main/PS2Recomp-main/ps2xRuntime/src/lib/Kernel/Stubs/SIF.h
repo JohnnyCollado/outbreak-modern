@@ -35,6 +35,9 @@ namespace ps2_stubs
     void sceSifLoadFileReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifLoadIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifLoadModuleBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void _sceSifLoadModuleBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void _sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifSearchModuleByName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifRebootIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifRemoveCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

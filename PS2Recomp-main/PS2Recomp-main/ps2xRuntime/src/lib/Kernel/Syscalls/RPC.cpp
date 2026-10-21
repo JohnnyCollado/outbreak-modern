@@ -187,7 +187,9 @@ namespace ps2_syscalls
         setReturnS32(ctx, ret);
     }
 
-    void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    // Loads (and starts) the IRX at path $a0 with $a1 bytes of arguments at $a2. Returns false, with
+    // the guest return value set to -1, when the module can't be loaded.
+    static bool loadSifModuleFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, ps2x::iop::ModuleLoadResult &loaded)
     {
         const uint32_t pathAddr = getRegU32(ctx, 4);     // $a0
         const uint32_t argumentSize = getRegU32(ctx, 5); // $a1
@@ -196,7 +198,7 @@ namespace ps2_syscalls
         if (modulePath.empty())
         {
             setReturnS32(ctx, -1);
-            return;
+            return false;
         }
 
         std::vector<uint8_t> arguments;
@@ -204,24 +206,51 @@ namespace ps2_syscalls
         if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
         {
             setReturnS32(ctx, -1);
-            return;
+            return false;
         }
 
         if (!runtime)
         {
             setReturnS32(ctx, -1);
-            return;
+            return false;
         }
 
-        const auto loaded = runtime->loadIopModule(modulePath, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
+        loaded = runtime->loadIopModule(modulePath, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
         if (!loaded.handled || loaded.moduleId <= 0)
         {
             setReturnS32(ctx, -1);
-            return;
+            return false;
         }
 
         trackSifModuleLoadExternal(modulePath, loaded.moduleId);
         logSifModuleAction("load-emulated", loaded.moduleId, modulePath, 1u);
+        return true;
+    }
+
+    void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2x::iop::ModuleLoadResult loaded;
+        if (loadSifModuleFile(rdram, ctx, runtime, loaded))
+            setReturnS32(ctx, loaded.moduleId);
+    }
+
+    void _sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // The libkernel function behind sceSifLoadModule/sceSifLoadStartModule: same as SifLoadModule,
+        // plus the module's start result written to *$a3. Both public wrappers pass a valid pointer
+        // there (sceSifLoadModule a slot on its own stack).
+        const uint32_t resultAddr = getRegU32(ctx, 7); // $a3
+        ps2x::iop::ModuleLoadResult loaded;
+        if (!loadSifModuleFile(rdram, ctx, runtime, loaded))
+            return;
+        if (resultAddr != 0u)
+        {
+            if (uint8_t *result = getMemPtr(rdram, resultAddr))
+            {
+                const int32_t startResult = loaded.startResult;
+                std::memcpy(result, &startResult, sizeof(startResult));
+            }
+        }
         setReturnS32(ctx, loaded.moduleId);
     }
 

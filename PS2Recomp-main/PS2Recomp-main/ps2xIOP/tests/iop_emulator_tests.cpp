@@ -1,4 +1,5 @@
 #include "ps2x/iop/iop_subsystem.h"
+#include "emulator/services/iop_module_loader.h"
 
 #include <algorithm>
 #include <chrono>
@@ -180,6 +181,28 @@ namespace
         std::memcpy(host.guest.data() + address, &header, sizeof(header));
         std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
+    }
+
+    // writeMinimalIrx's module with a .iopmod header naming it.
+    void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name)
+    {
+        writeMinimalIrx(host, address);
+        constexpr uint32_t iopmodOffset = 0x200u;
+        ElfHeader header{};
+        std::memcpy(&header, host.guest.data() + address, sizeof(header));
+        header.phnum = 2u;
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+
+        uint8_t iopmod[26u + 16u] = {};
+        std::memcpy(iopmod + 26u, name, std::strlen(name));
+        ProgramHeader iopModule{};
+        iopModule.type = 0x70000080u; // PT_SCE_IOPMOD
+        iopModule.offset = iopmodOffset;
+        iopModule.filesz = sizeof(iopmod);
+        iopModule.memsz = sizeof(iopmod);
+        iopModule.align = 4u;
+        std::memcpy(host.guest.data() + address + sizeof(header) + sizeof(ProgramHeader), &iopModule, sizeof(iopModule));
+        std::memcpy(host.guest.data() + address + iopmodOffset, iopmod, sizeof(iopmod));
     }
 
     void writeRpcServerIrx(TestHost &host,
@@ -891,8 +914,37 @@ namespace
     }
 }
 
+// An ELF with one PT_SCE_IOPMOD program header whose .iopmod holds `iopmodSize` bytes,
+// the module name (if any) starting at offset 26.
+static std::vector<uint8_t> makeIopmodImage(const char *name, uint32_t iopmodSize)
+{
+    constexpr uint32_t kPhoff = 0x34u;
+    constexpr uint32_t kIopmodOffset = kPhoff + 32u;
+    std::vector<uint8_t> image(kIopmodOffset + iopmodSize, 0u);
+    std::memcpy(image.data(), "\x7f" "ELF", 4);
+    const uint32_t phoff = kPhoff;
+    const uint16_t phentsize = 32u;
+    const uint16_t phnum = 1u;
+    std::memcpy(image.data() + 0x1Cu, &phoff, sizeof(phoff));
+    std::memcpy(image.data() + 0x2Au, &phentsize, sizeof(phentsize));
+    std::memcpy(image.data() + 0x2Cu, &phnum, sizeof(phnum));
+    const uint32_t program[5] = {0x70000080u, kIopmodOffset, 0u, 0u, iopmodSize};
+    std::memcpy(image.data() + kPhoff, program, sizeof(program));
+    if (name)
+        std::memcpy(image.data() + kIopmodOffset + 26u, name, std::strlen(name));
+    return image;
+}
+
 int main()
 {
+    using ps2x::iop::detail::IopModuleLoader;
+    if (!expect(IopModuleLoader::moduleName(makeIopmodImage("sio2man", 26u + 8u)) == "sio2man",
+                "The module name must come from the .iopmod header")) return 1;
+    if (!expect(IopModuleLoader::moduleName(makeIopmodImage(nullptr, 12u)).empty(),
+                "A .iopmod without a name must give an empty name")) return 1;
+    if (!expect(IopModuleLoader::moduleName(std::vector<uint8_t>(64u, 0u)).empty(),
+                "A buffer that is not an ELF must give an empty name")) return 1;
+
     TestHost host(0x20000u);
     IopSubsystem iop(host);
 
@@ -910,6 +962,35 @@ int main()
     if (!expect(iop.stopModule(result.moduleId, &stopResult), "Emulated module stop failed")) return 1;
     if (!expect(stopResult == 0, "Emulated module stop result mismatch")) return 1;
     if (!expect(iop.debugSnapshot().emulatorLoadedModules == 0u, "Module was not released")) return 1;
+
+    // SifSearchModuleByName: modules are found by their .iopmod name until they stop.
+    {
+        writeNamedMinimalIrx(host, 0x100u, "testmod");
+        const ModuleLoadResult named = iop.loadModuleBuffer(0x100u);
+        if (!expect(named.moduleId > 0, "Named IRX did not load")) return 1;
+        if (!expect(iop.findModuleByName("testmod") == named.moduleId, "Module not found by its .iopmod name")) return 1;
+        if (!expect(iop.findModuleByName("othermod") < 0, "An unknown name must not match")) return 1;
+        int32_t ignored = 0;
+        if (!expect(iop.stopModule(named.moduleId, &ignored), "Named module stop failed")) return 1;
+        if (!expect(iop.findModuleByName("testmod") < 0, "A stopped module must not be found")) return 1;
+    }
+
+    // SifLoadModuleBuffer's buffer is in IOP RAM on a PS2: load from there when the EE copy is gone.
+    {
+        constexpr uint32_t kIrxBytes = 0x1000u;
+        writeMinimalIrx(host, 0x100u);
+        std::vector<uint8_t> irx(host.guest.begin() + 0x100, host.guest.begin() + 0x100 + kIrxBytes);
+        std::fill(host.guest.begin(), host.guest.end(), uint8_t{0});
+        const uint32_t iopAddress = iop.allocateMemory(kIrxBytes);
+        if (!expect(iopAddress != 0u && iop.writeMemory(iopAddress, irx.data(), irx.size()),
+                    "Could not place the IRX in IOP RAM")) return 1;
+        const ModuleLoadResult fromIop = iop.loadModuleBuffer(iopAddress);
+        if (!expect(fromIop.moduleId > 0 && fromIop.startResult == 7,
+                    "An IRX in IOP RAM must load from its IOP address")) return 1;
+        int32_t ignored = 0;
+        if (!expect(iop.stopModule(fromIop.moduleId, &ignored), "IOP-RAM module stop failed")) return 1;
+        if (!expect(iop.freeMemory(iopAddress), "IOP RAM release failed")) return 1;
+    }
 
     constexpr uint32_t rpcSid = 0xF00DCAFEu;
     writeRpcServerIrx(host, 0x100u);

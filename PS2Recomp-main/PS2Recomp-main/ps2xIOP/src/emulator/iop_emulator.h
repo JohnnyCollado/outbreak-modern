@@ -39,6 +39,9 @@ namespace ps2x::iop::detail
         [[nodiscard]] uint64_t cycles() const noexcept;
         [[nodiscard]] uint64_t instructions() const noexcept;
         [[nodiscard]] uint32_t loadedModuleCount() const noexcept;
+        [[nodiscard]] std::string moduleName(int32_t moduleId) const;
+        // The id of the loaded module whose .iopmod name is `name`, or -1.
+        [[nodiscard]] int32_t findModuleByName(std::string_view name) const;
         [[nodiscard]] uint32_t threadCount() const noexcept;
         [[nodiscard]] uint32_t rpcServerCount() const noexcept;
 

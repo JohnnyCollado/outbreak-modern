@@ -1,0 +1,235 @@
+From 8252c539000d805d0fe164390bc77478d9bb65cc Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 06:32:55 +0000
+Subject: [PATCH 5/5] VU0 macro-mode memory ops: VU0 data memory, field order,
+ VI0/VF0
+
+VLQI/VSQI/VLQD/VSQD/VILWR/VISWR read and wrote EE RAM at 0-0x3FFF instead of
+VU0 data memory (0x11004000, 4 KiB), and:
+- VSQI/VSQD took the address from VI[rd] and stored VF[rt]; the instruction is
+  vfs (rd) into (vit) (rt), as in PCSX2's _vuSQI/_vuSQD;
+- VI was incremented with a 10-bit wrap and even when it was VI0, and VLQI/VLQD
+  loaded into VF0; VI0 and VF0 are constant;
+- VILWR/VISWR addressed vi << 2 instead of vi * 16 and ignored the field;
+- VI register numbers are 4 bits; the 5-bit field indexed past ctx->vi[16].
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRecomp/src/lib/vu_translation_helpers.cpp | 114 ++++++++++++------
+ ps2xTest/src/code_generator_tests.cpp         |  41 +++++++
+ 2 files changed, 116 insertions(+), 39 deletions(-)
+
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 9aa1ebe..981baad 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -115,12 +115,30 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVU_VILWR(const Instruction &inst)
+     {
+-        return fmt::format("{{ uint32_t addr = (uint32_t)(ctx->vi[{}] << 2) & 0x3FFC; ctx->vi[{}] = static_cast<uint16_t>(READ32(addr)); }}", inst.rd, inst.rt); // VILWR.<f> vit, (vis)
++        // VILWR.<f> vit, (vis): the low 16 bits of field <f> of VU0 data memory at vis * 16.
++        uint8_t vis = inst.rd & 0xF;
++        uint8_t vit = inst.rt & 0xF;
++        uint8_t dest_mask = inst.vectorInfo.vectorField;
++        if (vit == 0)
++            return "";
++        uint32_t lane = (dest_mask & 0x1) ? 3u : (dest_mask & 0x2) ? 2u : (dest_mask & 0x4) ? 1u : 0u;
++        return fmt::format("{{ uint32_t addr = PS2_VU0_DATA_BASE + ((((uint32_t)ctx->vi[{}] & 0xFFu) << 4) | {}u); ctx->vi[{}] = READ16(addr); }}", vis, lane * 4u, vit);
+     }
+ 
+     std::string CodeGenerator::translateVU_VISWR(const Instruction &inst)
+     {
+-        return fmt::format("{{ uint32_t addr = (uint32_t)(ctx->vi[{}] << 2) & 0x3FFC; WRITE32(addr, (uint32_t)ctx->vi[{}]); }}", inst.rd, inst.rt); // VISWR.<f> vit, (vis)
++        // VISWR.<f> vit, (vis): vit, zero-extended, into each field <f> of VU0 data memory at vis * 16.
++        uint8_t vis = inst.rd & 0xF;
++        uint8_t vit = inst.rt & 0xF;
++        uint8_t dest_mask = inst.vectorInfo.vectorField;
++        std::string out = fmt::format("{{ uint32_t addr = PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[{}] & 0xFFu) << 4); uint32_t value = ctx->vi[{}];", vis, vit);
++        const uint8_t laneBits[4] = {0x8, 0x4, 0x2, 0x1};
++        for (uint32_t lane = 0; lane < 4; ++lane)
++        {
++            if (dest_mask & laneBits[lane])
++                out += fmt::format(" WRITE32(addr + {}u, value);", lane * 4u);
++        }
++        return out + " }";
+     }
+ 
+     std::string CodeGenerator::translateVU_VIADD(const Instruction &inst)
+@@ -769,66 +787,84 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVU_VLQI(const Instruction &inst)
+     {
+-        uint8_t vis = inst.rd;
++        // VLQI.<dest> vft, (vis++): VU0 data memory at vis * 16, then vis += 1. VF0 and VI0 stay constant.
++        uint8_t vis = inst.rd & 0xF;
++        uint8_t vft = inst.rt;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+-                           "__m128 res = _mm_castsi128_ps(READ128(addr)); "
+-                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+-                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
+-                           "ctx->vi[{}] = (ctx->vi[{}] + 1) & 0x3FF; }}",
+-                           vis,
+-                           (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+-                           (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
+-                           inst.rt, inst.rt,
+-                           vis, vis);
++        std::string out = "{ ";
++        if (vft != 0)
++            out += fmt::format("{{ uint32_t addr = PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[{}] & 0xFFu) << 4); "
++                               "__m128 res = _mm_castsi128_ps(READ128(addr)); "
++                               "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
++                               "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }} ",
++                               vis,
++                               (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
++                               (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
++                               vft, vft);
++        if (vis != 0)
++            out += fmt::format("ctx->vi[{}] = (uint16_t)(ctx->vi[{}] + 1); ", vis, vis);
++        return out + "}";
+     }
+ 
+     std::string CodeGenerator::translateVU_VSQI(const Instruction &inst)
+     {
+-        uint8_t vis = inst.rd;
++        // VSQI.<dest> vfs, (vit++): vfs into VU0 data memory at vit * 16, then vit += 1. VI0 stays 0.
++        uint8_t vfs = inst.rd;
++        uint8_t vit = inst.rt & 0xF;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
++        std::string out = "{ ";
++        out += fmt::format("{{ uint32_t addr = PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[{}] & 0xFFu) << 4); "
+                            "__m128i old_val = READ128(addr); "
+                            "__m128 res = _mm_blendv_ps(_mm_castsi128_ps(old_val), ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))); "
+-                           "WRITE128(addr, _mm_castps_si128(res)); "
+-                           "ctx->vi[{}] = (ctx->vi[{}] + 1) & 0x3FF; }}",
+-                           vis,
+-                           inst.rt,
++                           "WRITE128(addr, _mm_castps_si128(res)); }} ",
++                           vit,
++                           vfs,
+                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+-                           (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
+-                           vis, vis);
++                           (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0);
++        if (vit != 0)
++            out += fmt::format("ctx->vi[{}] = (uint16_t)(ctx->vi[{}] + 1); ", vit, vit);
++        return out + "}";
+     }
+ 
+     std::string CodeGenerator::translateVU_VLQD(const Instruction &inst)
+     {
+-        uint8_t vis = inst.rd;
++        // VLQD.<dest> vft, (--vis): vis -= 1, then VU0 data memory at vis * 16. VF0 and VI0 stay constant.
++        uint8_t vis = inst.rd & 0xF;
++        uint8_t vft = inst.rt;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
+-                           "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
+-                           "__m128 res = _mm_castsi128_ps(READ128(addr)); "
+-                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+-                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+-                           vis, vis,
+-                           vis,
+-                           (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+-                           (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
+-                           inst.rt, inst.rt);
++        std::string out = "{ ";
++        if (vis != 0)
++            out += fmt::format("ctx->vi[{}] = (uint16_t)(ctx->vi[{}] - 1); ", vis, vis);
++        if (vft != 0)
++            out += fmt::format("{{ uint32_t addr = PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[{}] & 0xFFu) << 4); "
++                               "__m128 res = _mm_castsi128_ps(READ128(addr)); "
++                               "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
++                               "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }} ",
++                               vis,
++                               (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
++                               (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
++                               vft, vft);
++        return out + "}";
+     }
+ 
+     std::string CodeGenerator::translateVU_VSQD(const Instruction &inst)
+     {
+-        uint8_t vis = inst.rd;
++        // VSQD.<dest> vfs, (--vit): vit -= 1, then vfs into VU0 data memory at vit * 16. VI0 stays 0.
++        uint8_t vfs = inst.rd;
++        uint8_t vit = inst.rt & 0xF;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
+-                           "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
++        std::string out = "{ ";
++        if (vit != 0)
++            out += fmt::format("ctx->vi[{}] = (uint16_t)(ctx->vi[{}] - 1); ", vit, vit);
++        out += fmt::format("{{ uint32_t addr = PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[{}] & 0xFFu) << 4); "
+                            "__m128i old_val = READ128(addr); "
+                            "__m128 res = _mm_blendv_ps(_mm_castsi128_ps(old_val), ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))); "
+-                           "WRITE128(addr, _mm_castps_si128(res)); }}",
+-                           vis, vis,
+-                           vis,
+-                           inst.rt,
++                           "WRITE128(addr, _mm_castps_si128(res)); }} ",
++                           vit,
++                           vfs,
+                            (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0);
++        return out + "}";
+     }
+ 
+     std::string CodeGenerator::translateVU_VRGET(const Instruction &inst)
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 09e4f7b..92f5804 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1505,6 +1505,47 @@ void register_code_generator_tests()
+             t.IsTrue(rsqrt.find("_MM_SHUFFLE(0,0,0,1)") != std::string::npos, "VRSQRT should read the fsf field of fs");
+         });
+ 
++        tc.Run("VU0 memory ops address VU0 data memory and keep VI0/VF0 constant", [](TestCase &t) {
++            CodeGenerator gen({}, {});
++
++            std::string lqi = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQI, 6, 14, 0xF));
++            t.IsTrue(lqi.find("PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[14] & 0xFFu) << 4)") != std::string::npos,
++                     "VLQI should read VU0 data memory at vi * 16");
++            t.IsTrue(lqi.find("ctx->vi[14] = (uint16_t)(ctx->vi[14] + 1);") != std::string::npos,
++                     "VLQI should post-increment the full 16-bit VI");
++
++            std::string lqiVi0 = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQI, 6, 0, 0xF));
++            t.IsTrue(lqiVi0.find("ctx->vi[0] =") == std::string::npos, "VLQI must not increment VI0");
++
++            std::string lqiVf0 = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQI, 0, 14, 0xF));
++            t.IsTrue(lqiVf0.find("ctx->vu0_vf[0] =") == std::string::npos, "VLQI must not load into VF0");
++
++            std::string lqd = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQD, 6, 14, 0xF));
++            t.IsTrue(lqd.find("ctx->vi[14] = (uint16_t)(ctx->vi[14] - 1);") < lqd.find("READ128"),
++                     "VLQD should pre-decrement VI before the load");
++
++            // VSQI.<dest> vfs, (vit++): vfs is rd, vit is rt.
++            std::string sqi = gen.translateInstruction(makeVu0Special2(VU0_S2_VSQI, 6, 9, 0x8));
++            t.IsTrue(sqi.find("ctx->vi[6] & 0xFFu") != std::string::npos, "VSQI should take the address from VI[rt]");
++            t.IsTrue(sqi.find("ctx->vu0_vf[9]") != std::string::npos, "VSQI should store VF[rd]");
++            t.IsTrue(sqi.find("ctx->vi[6] = (uint16_t)(ctx->vi[6] + 1);") != std::string::npos, "VSQI should post-increment VI[rt]");
++            t.IsTrue(sqi.find("PS2_VU0_DATA_BASE") != std::string::npos, "VSQI should write VU0 data memory");
++
++            std::string sqdVi0 = gen.translateInstruction(makeVu0Special2(VU0_S2_VSQD, 0, 9, 0x8));
++            t.IsTrue(sqdVi0.find("ctx->vi[0] =") == std::string::npos, "VSQD must not decrement VI0");
++
++            std::string ilwr = gen.translateInstruction(makeVu0Special2(VU0_S2_VILWR, 3, 5, 0x4)); // .y
++            t.IsTrue(ilwr.find("PS2_VU0_DATA_BASE + ((((uint32_t)ctx->vi[5] & 0xFFu) << 4) | 4u)") != std::string::npos,
++                     "VILWR.y should read the y field of VU0 data memory at vi * 16");
++            t.IsTrue(ilwr.find("ctx->vi[3] = READ16(addr);") != std::string::npos, "VILWR should load the low 16 bits");
++            t.IsTrue(gen.translateInstruction(makeVu0Special2(VU0_S2_VILWR, 0, 5, 0x4)).empty(), "VILWR into VI0 should do nothing");
++
++            std::string iswr = gen.translateInstruction(makeVu0Special2(VU0_S2_VISWR, 3, 5, 0x9)); // .xw
++            t.IsTrue(iswr.find("WRITE32(addr + 0u, value);") != std::string::npos, "VISWR.x should write the x field");
++            t.IsTrue(iswr.find("WRITE32(addr + 12u, value);") != std::string::npos, "VISWR.w should write the w field");
++            t.IsTrue(iswr.find("WRITE32(addr + 4u, value);") == std::string::npos, "VISWR.xw must not write the y field");
++        });
++
+         tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
+             Instruction inst{};
+             inst.opcode = OPCODE_COP2;
+-- 
+2.43.0
+

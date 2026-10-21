@@ -28,9 +28,11 @@ namespace ps2x::iop::detail
         m_threads.clear();
         m_semaphores.clear();
         m_eventFlags.clear();
+        m_messageBoxes.clear();
         m_nextThreadId = 1;
         m_nextSemaphoreId = 1;
         m_nextEventFlagId = 1;
+        m_nextMessageBoxId = 1;
         m_currentThread = nullptr;
     }
 
@@ -164,7 +166,8 @@ namespace ps2x::iop::detail
             if (it->second.state == IopThreadState::Sleep ||
                 it->second.state == IopThreadState::Delay ||
                 it->second.state == IopThreadState::Semaphore ||
-                it->second.state == IopThreadState::EventFlag)
+                it->second.state == IopThreadState::EventFlag ||
+                it->second.state == IopThreadState::MessageBox)
             {
                 it->second.state = IopThreadState::Ready;
             }
@@ -322,6 +325,7 @@ namespace ps2x::iop::detail
         case IopThreadState::Delay:
         case IopThreadState::Semaphore:
         case IopThreadState::EventFlag:
+        case IopThreadState::MessageBox:
             status = 0x04u;
             break;
         case IopThreadState::Suspended:
@@ -344,6 +348,7 @@ namespace ps2x::iop::detail
         m_memory.write32(outputAddress + 36u, thread.state == IopThreadState::Sleep ? 1u : thread.state == IopThreadState::Delay   ? 2u
                                                                                        : thread.state == IopThreadState::Semaphore ? 3u
                                                                                        : thread.state == IopThreadState::EventFlag ? 4u
+                                                                                       : thread.state == IopThreadState::MessageBox ? 5u
                                                                                                                                    : 0u);
         m_memory.write32(outputAddress + 40u, static_cast<uint32_t>(thread.waitId));
         m_memory.write32(outputAddress + 44u, static_cast<uint32_t>(thread.wakeupCount));
@@ -444,6 +449,184 @@ namespace ps2x::iop::detail
                 m_memory.write32(outputAddress + 20u, waiters);
             }
             setV0(0);
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+
+    bool IopKernel::dispatchMessageBoxImport(uint16_t ordinal, IopCpuState &cpu)
+    {
+        constexpr int32_t kOk = 0;
+        constexpr int32_t kIllegalAttr = -401;
+        constexpr int32_t kUnknownMbxId = -410;
+        constexpr int32_t kMboxNoMsg = -424;
+        constexpr int32_t kWaitDelete = -425;
+        constexpr uint32_t kThreadPriority = 0x001u; // MBA_THPRI: waiters by priority, else FIFO
+        constexpr uint32_t kMessagePriority = 0x004u; // MBA_MSPRI: messages by priority, else FIFO
+
+        const auto setV0 = [&](int32_t value)
+        {
+            cpu.gpr[2] = static_cast<uint32_t>(value);
+        };
+        const auto find = [&](uint32_t id)
+        {
+            return m_messageBoxes.find(static_cast<int>(id));
+        };
+        // A lower priority byte goes first; equal priorities keep their sending order.
+        const auto enqueue = [&](MessageBox &box, uint32_t message)
+        {
+            if ((box.attr & kMessagePriority) == 0u)
+            {
+                box.messages.push_back(message);
+                return;
+            }
+            const uint8_t priority = m_memory.read8(message + 4u);
+            auto it = box.messages.begin();
+            while (it != box.messages.end() && m_memory.read8(*it + 4u) <= priority)
+                ++it;
+            box.messages.insert(it, message);
+        };
+        const auto writeStatus = [&](const MessageBox &box, uint32_t output)
+        {
+            m_memory.write32(output + 0u, box.attr);
+            m_memory.write32(output + 4u, box.option);
+            m_memory.write32(output + 8u, static_cast<uint32_t>(box.waiters.size()));
+            m_memory.write32(output + 12u, static_cast<uint32_t>(box.messages.size()));
+            m_memory.write32(output + 16u, box.messages.empty() ? 0u : box.messages.front());
+        };
+
+        switch (ordinal)
+        {
+        case 4: // CreateMbx(iop_mbx_t *)
+        {
+            const uint32_t descriptor = cpu.gpr[4];
+            MessageBox box;
+            box.attr = m_memory.read32(descriptor + 0u);
+            box.option = m_memory.read32(descriptor + 4u);
+            if ((box.attr & ~(kThreadPriority | kMessagePriority)) != 0u)
+            {
+                setV0(kIllegalAttr);
+                return true;
+            }
+            box.id = static_cast<int>(m_nextMessageBoxId++);
+            m_messageBoxes.emplace(box.id, box);
+            setV0(box.id);
+            return true;
+        }
+        case 5: // DeleteMbx(id): waiters return KE_WAIT_DELETE
+        {
+            const auto it = find(cpu.gpr[4]);
+            if (it == m_messageBoxes.end())
+            {
+                setV0(kUnknownMbxId);
+                return true;
+            }
+            for (const int threadId : it->second.waiters)
+            {
+                const auto thread = m_threads.find(threadId);
+                if (thread == m_threads.end() || thread->second.state != IopThreadState::MessageBox)
+                    continue;
+                thread->second.cpu.gpr[2] = static_cast<uint32_t>(kWaitDelete);
+                thread->second.state = IopThreadState::Ready;
+                thread->second.waitId = 0;
+                thread->second.waitResultAddress = 0;
+            }
+            m_messageBoxes.erase(it);
+            setV0(kOk);
+            return true;
+        }
+        case 6: // SendMbx(id, msg)
+        case 7: // iSendMbx(id, msg)
+        {
+            const auto it = find(cpu.gpr[4]);
+            if (it == m_messageBoxes.end())
+            {
+                setV0(kUnknownMbxId);
+                return true;
+            }
+            MessageBox &box = it->second;
+            const uint32_t message = cpu.gpr[5];
+            IopThread *receiver = nullptr;
+            auto chosen = box.waiters.end();
+            for (auto waiter = box.waiters.begin(); waiter != box.waiters.end(); ++waiter)
+            {
+                const auto thread = m_threads.find(*waiter);
+                if (thread == m_threads.end() || thread->second.state != IopThreadState::MessageBox)
+                    continue;
+                if (receiver == nullptr || ((box.attr & kThreadPriority) != 0u && thread->second.priority < receiver->priority))
+                {
+                    receiver = &thread->second;
+                    chosen = waiter;
+                }
+                if ((box.attr & kThreadPriority) == 0u)
+                    break;
+            }
+            if (receiver == nullptr)
+            {
+                box.waiters.clear();
+                enqueue(box, message);
+            }
+            else
+            {
+                box.waiters.erase(chosen);
+                if (receiver->waitResultAddress != 0u)
+                    m_memory.write32(receiver->waitResultAddress, message);
+                receiver->cpu.gpr[2] = static_cast<uint32_t>(kOk);
+                receiver->state = IopThreadState::Ready;
+                receiver->waitId = 0;
+                receiver->waitResultAddress = 0;
+            }
+            setV0(kOk);
+            return true;
+        }
+        case 8: // ReceiveMbx(void **msgvar, id): waits for a message
+        case 9: // PollMbx(void **msgvar, id): KE_MBOX_NOMSG when empty
+        {
+            const uint32_t msgvar = cpu.gpr[4];
+            const auto it = find(cpu.gpr[5]);
+            if (it == m_messageBoxes.end())
+            {
+                setV0(kUnknownMbxId);
+                return true;
+            }
+            MessageBox &box = it->second;
+            if (!box.messages.empty())
+            {
+                const uint32_t message = box.messages.front();
+                box.messages.pop_front();
+                if (msgvar != 0u)
+                    m_memory.write32(msgvar, message);
+                setV0(kOk);
+            }
+            else if (ordinal == 9)
+                setV0(kMboxNoMsg);
+            else if (m_currentThread != nullptr)
+            {
+                m_currentThread->state = IopThreadState::MessageBox;
+                m_currentThread->waitId = box.id;
+                m_currentThread->waitResultAddress = msgvar;
+                box.waiters.push_back(m_currentThread->id);
+                cpu.yielded = true;
+                setV0(kOk);
+            }
+            else
+                setV0(kMboxNoMsg);
+            return true;
+        }
+        case 11: // ReferMbxStatus(id, iop_mbx_status_t *)
+        case 12: // iReferMbxStatus
+        {
+            const auto it = find(cpu.gpr[4]);
+            if (it == m_messageBoxes.end())
+            {
+                setV0(kUnknownMbxId);
+                return true;
+            }
+            if (cpu.gpr[5] != 0u)
+                writeStatus(it->second, cpu.gpr[5]);
+            setV0(kOk);
             return true;
         }
         default:

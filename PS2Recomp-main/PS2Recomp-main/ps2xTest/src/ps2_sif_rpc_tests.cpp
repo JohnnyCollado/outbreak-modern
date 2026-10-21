@@ -203,6 +203,42 @@ void register_ps2_sif_rpc_tests()
                      "SifInitRpc must not reboot or reset the IOP");
         });
 
+        tc.Run("_sceSifLoadModule writes the start result to $a3 and the module can be searched by name", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kPathAddress = 0x00021000u;
+            constexpr uint32_t kResultAddress = 0x00021100u;
+            const auto putString = [&](std::string_view text)
+            {
+                std::memcpy(env.rdram.data() + kPathAddress, text.data(), text.size());
+                env.rdram[kPathAddress + text.size()] = 0u;
+            };
+
+            const uint32_t sentinel = 0xDEADBEEFu;
+            std::memcpy(env.rdram.data() + kResultAddress, &sentinel, sizeof(sentinel));
+            putString("rom0:LIBSD");
+            setRegU32(env.ctx, 4, kPathAddress);
+            setRegU32(env.ctx, 5, 0u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kResultAddress);
+            _sceSifLoadModule(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t libsdId = getRegS32(env.ctx, 2);
+            t.IsTrue(libsdId > 0, "_sceSifLoadModule should load the module and return its id");
+            int32_t startResult = 0;
+            std::memcpy(&startResult, env.rdram.data() + kResultAddress, sizeof(startResult));
+            t.Equals(startResult, 0, "the module's start result should be written to *$a3");
+
+            putString("libsd");
+            setRegU32(env.ctx, 4, kPathAddress);
+            sceSifSearchModuleByName(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), libsdId, "sceSifSearchModuleByName should find the loaded module");
+
+            putString("dev9");
+            setRegU32(env.ctx, 4, kPathAddress);
+            sceSifSearchModuleByName(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) < 0, "a module that isn't loaded should not be found");
+        });
+
         tc.Run("SifLoadModule validates ROM modules and activates their HLE service", [](TestCase &t)
         {
             TestEnv env;

@@ -36,6 +36,21 @@ static Instruction makeNop(uint32_t address)
     return inst;
 }
 
+static Instruction makeVu0Special2(uint32_t op, uint8_t rt, uint8_t rd, uint8_t dest)
+{
+    Instruction inst{};
+    inst.opcode = OPCODE_COP2;
+    inst.rs = COP2_CO | ((dest >> 1) & 0x7);
+    inst.rt = rt;
+    inst.rd = rd;
+    inst.function = 0x3C; // force Special2 path
+    inst.vectorInfo.vectorField = dest;
+    inst.vectorInfo.fsf = 1; // y
+    inst.vectorInfo.ftf = 2; // z
+    inst.raw = (((op >> 2) & 0x1F) << 6) | (op & 0x3);
+    return inst;
+}
+
 static uint32_t signExtend16(uint16_t value)
 {
     return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(value)));
@@ -1441,6 +1456,94 @@ void register_code_generator_tests()
             t.IsTrue(out.find("ctx->vu0_vf[12]") != std::string::npos, "S2 source VF should come from rd");
             t.IsTrue(out.find("ctx->vu0_vf[8]") != std::string::npos, "S2 destination VF should come from rt");
             t.IsTrue(out.find("ctx->vu0_vf[22]") == std::string::npos, "S2 must not use rs(format) as register index");
+        });
+
+        tc.Run("BLEZ/BGTZ/BLTZ/BGEZ compare the full 64-bit register", [](TestCase &t) {
+            struct Case { uint32_t opcode; uint32_t regimm; const char *expr; const char *name; };
+            const Case cases[] = {
+                {OPCODE_BLEZ, 0, "GPR_S64(ctx, 4) <= 0", "BLEZ"},
+                {OPCODE_BGTZ, 0, "GPR_S64(ctx, 4) > 0", "BGTZ"},
+                {OPCODE_REGIMM, REGIMM_BLTZ, "GPR_S64(ctx, 4) < 0", "BLTZ"},
+                {OPCODE_REGIMM, REGIMM_BGEZ, "GPR_S64(ctx, 4) >= 0", "BGEZ"},
+            };
+            for (const Case &c : cases)
+            {
+                Function func;
+                func.name = "branch_zero_compare";
+                func.start = 0x1400;
+                func.end = 0x1410;
+                func.isRecompiled = true;
+                func.isStub = false;
+
+                Instruction br{};
+                br.address = 0x1400;
+                br.opcode = c.opcode;
+                br.rs = 4;
+                br.rt = c.regimm;
+                br.simmediate = 1; // target = 0x1408
+                br.isBranch = true;
+                br.hasDelaySlot = true;
+
+                CodeGenerator gen({}, {});
+                std::string generated = gen.generateFunction(func, {br, makeNop(0x1404), makeNop(0x1408)}, false);
+                t.IsTrue(generated.find(c.expr) != std::string::npos, std::string(c.name) + " should test the 64-bit value");
+                t.IsTrue(generated.find("GPR_S32(ctx, 4)") == std::string::npos, std::string(c.name) + " must not truncate rs to 32 bits");
+            }
+        });
+
+        tc.Run("VU0 VDIV/VSQRT/VRSQRT use the PS2 float helpers", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string div = gen.translateInstruction(makeVu0Special2(VU0_S2_VDIV, 3, 5, 0));
+            t.IsTrue(div.find("ps2_fdiv(fs, ft)") != std::string::npos, "VDIV should divide with PS2 semantics (x/0 gives +-max)");
+
+            std::string sqrt = gen.translateInstruction(makeVu0Special2(VU0_S2_VSQRT, 3, 5, 0));
+            t.IsTrue(sqrt.find("ps2_fsqrt(ft)") != std::string::npos, "VSQRT should take the root of the magnitude");
+
+            std::string rsqrt = gen.translateInstruction(makeVu0Special2(VU0_S2_VRSQRT, 3, 5, 0));
+            t.IsTrue(rsqrt.find("ps2_frsqrt(fs, ft)") != std::string::npos, "VRSQRT should compute fs / sqrt(|ft|)");
+            t.IsTrue(rsqrt.find("ctx->vu0_vf[5]") != std::string::npos, "VRSQRT should read fs from rd");
+            t.IsTrue(rsqrt.find("_MM_SHUFFLE(0,0,0,1)") != std::string::npos, "VRSQRT should read the fsf field of fs");
+        });
+
+        tc.Run("VU0 memory ops address VU0 data memory and keep VI0/VF0 constant", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            std::string lqi = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQI, 6, 14, 0xF));
+            t.IsTrue(lqi.find("PS2_VU0_DATA_BASE + (((uint32_t)ctx->vi[14] & 0xFFu) << 4)") != std::string::npos,
+                     "VLQI should read VU0 data memory at vi * 16");
+            t.IsTrue(lqi.find("ctx->vi[14] = (uint16_t)(ctx->vi[14] + 1);") != std::string::npos,
+                     "VLQI should post-increment the full 16-bit VI");
+
+            std::string lqiVi0 = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQI, 6, 0, 0xF));
+            t.IsTrue(lqiVi0.find("ctx->vi[0] =") == std::string::npos, "VLQI must not increment VI0");
+
+            std::string lqiVf0 = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQI, 0, 14, 0xF));
+            t.IsTrue(lqiVf0.find("ctx->vu0_vf[0] =") == std::string::npos, "VLQI must not load into VF0");
+
+            std::string lqd = gen.translateInstruction(makeVu0Special2(VU0_S2_VLQD, 6, 14, 0xF));
+            t.IsTrue(lqd.find("ctx->vi[14] = (uint16_t)(ctx->vi[14] - 1);") < lqd.find("READ128"),
+                     "VLQD should pre-decrement VI before the load");
+
+            // VSQI.<dest> vfs, (vit++): vfs is rd, vit is rt.
+            std::string sqi = gen.translateInstruction(makeVu0Special2(VU0_S2_VSQI, 6, 9, 0x8));
+            t.IsTrue(sqi.find("ctx->vi[6] & 0xFFu") != std::string::npos, "VSQI should take the address from VI[rt]");
+            t.IsTrue(sqi.find("ctx->vu0_vf[9]") != std::string::npos, "VSQI should store VF[rd]");
+            t.IsTrue(sqi.find("ctx->vi[6] = (uint16_t)(ctx->vi[6] + 1);") != std::string::npos, "VSQI should post-increment VI[rt]");
+            t.IsTrue(sqi.find("PS2_VU0_DATA_BASE") != std::string::npos, "VSQI should write VU0 data memory");
+
+            std::string sqdVi0 = gen.translateInstruction(makeVu0Special2(VU0_S2_VSQD, 0, 9, 0x8));
+            t.IsTrue(sqdVi0.find("ctx->vi[0] =") == std::string::npos, "VSQD must not decrement VI0");
+
+            std::string ilwr = gen.translateInstruction(makeVu0Special2(VU0_S2_VILWR, 3, 5, 0x4)); // .y
+            t.IsTrue(ilwr.find("PS2_VU0_DATA_BASE + ((((uint32_t)ctx->vi[5] & 0xFFu) << 4) | 4u)") != std::string::npos,
+                     "VILWR.y should read the y field of VU0 data memory at vi * 16");
+            t.IsTrue(ilwr.find("ctx->vi[3] = READ16(addr);") != std::string::npos, "VILWR should load the low 16 bits");
+            t.IsTrue(gen.translateInstruction(makeVu0Special2(VU0_S2_VILWR, 0, 5, 0x4)).empty(), "VILWR into VI0 should do nothing");
+
+            std::string iswr = gen.translateInstruction(makeVu0Special2(VU0_S2_VISWR, 3, 5, 0x9)); // .xw
+            t.IsTrue(iswr.find("WRITE32(addr + 0u, value);") != std::string::npos, "VISWR.x should write the x field");
+            t.IsTrue(iswr.find("WRITE32(addr + 12u, value);") != std::string::npos, "VISWR.w should write the w field");
+            t.IsTrue(iswr.find("WRITE32(addr + 4u, value);") == std::string::npos, "VISWR.xw must not write the y field");
         });
 
         tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
