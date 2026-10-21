@@ -145,6 +145,50 @@ namespace
         return true;
     }
 
+    // PS2 paths are case-insensitive (ISO 9660 names are upper case), but files copied off a disc
+    // can arrive in any case, and Linux/Android file systems are case-sensitive. When the exact
+    // path is missing, match each existing component ignoring ASCII case. Returns the exact path
+    // when nothing matches, so new files are still created under the name the game asked for.
+    std::filesystem::path matchPathCase(const std::filesystem::path &base, const std::filesystem::path &relative)
+    {
+        const std::filesystem::path exact = (base / relative).lexically_normal();
+        std::error_code ec;
+        if (std::filesystem::exists(exact, ec))
+            return exact;
+
+        const auto lower = [](std::string text)
+        {
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c)
+                           { return static_cast<char>((c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c); });
+            return text;
+        };
+
+        std::filesystem::path current = base;
+        for (const auto &component : relative)
+        {
+            const std::filesystem::path direct = current / component;
+            if (std::filesystem::exists(direct, ec))
+            {
+                current = direct;
+                continue;
+            }
+            const std::string wanted = lower(component.string());
+            bool matched = false;
+            for (const auto &entry : std::filesystem::directory_iterator(current, ec))
+            {
+                if (lower(entry.path().filename().string()) == wanted)
+                {
+                    current = entry.path();
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched)
+                return exact;
+        }
+        return current.lexically_normal();
+    }
+
     std::time_t toTimeT(std::filesystem::file_time_type value)
     {
         const auto systemValue = std::chrono::time_point_cast<std::chrono::system_clock::duration>(value - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
@@ -297,7 +341,7 @@ bool PS2Vfs::resolveHostPath(std::string_view path, const PS2VfsMounts &mounts, 
     std::filesystem::path relative;
     if (base.empty() || !safeRelativePath(parsed.path, relative))
         return false;
-    result = (base / relative).lexically_normal();
+    result = matchPathCase(base, relative);
     return true;
 }
 

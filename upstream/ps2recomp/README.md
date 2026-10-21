@@ -13,11 +13,12 @@ adds its own test.
 | 0003 | CVT.W.S rounded instead of truncating; CVT.W.S/TRUNC.W.S didn't saturate. The out-of-range cast was undefined and **gave different results on x86 and ARM**. | PCSX2 `FPU.cpp` `CVT_W` |
 | 0004 | VU0 VRSQRT ignored fs. VDIV by zero gave 0. VSQRT clamped negatives to 0. Now uses the same PS2 float helpers as the EE FPU. | the repo's own ps2autotests-checked helpers |
 | 0005 | VU0 LQI/SQI/LQD/SQD/ILWR/ISWR used EE RAM instead of VU0 data memory. SQI/SQD had fs/it swapped. VI0/VF0 could be written. VILWR/VISWR addressed `vi << 2` and ignored the field. A 5-bit VI index could write past `ctx->vi[16]`. | PCSX2 `VUops.cpp` `_vuLQI`, `_vuSQI`, `_vuLQD`, `_vuSQD`, `_vuILWR`, `_vuISWR` |
+| 0006 | `fioOpen` and the rest of the VFS joined PS2 paths with exact case. On Linux/Android, `cdrom0:\IOP\MODULES\DRIVE.DAT;1` missed a disc copy named `iop/modules/drive.dat`, and Outbreak's boot retried forever. Now an exact-case miss falls back to matching each component ignoring case; Windows is unchanged. Found by booting Outbreak. | PS2 paths are case-insensitive (ISO 9660) |
 
 ## How they were tested (2026-10-21, Ubuntu 24.04)
 
-- `ps2x_tests`: **449 / 449 pass** with GCC 13.3 and with Clang 18.1, Release builds (445 before
-  these changes, plus 4 new tests).
+- `ps2x_tests`: **450 / 450 pass** with 0006 (449 before it) with GCC 13.3 and with Clang 18.1, Release builds (445 before
+  0002-0005, plus 4 new tests; 0006 adds 1). 0006's test fails without the fix (449/450).
 - The 4 new tests were run against the **old** code: exactly those 4 fail and the other 445 pass.
   So each test catches the bug it is for.
 - Patches 0002-0005 were checked one at a time: each commit builds and passes (446, 447, 448,

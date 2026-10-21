@@ -462,8 +462,46 @@ void register_ps2_runtime_io_tests()
             // Verify mcRoot directory structure
             t.IsTrue(std::filesystem::exists(test.paths.mcRoot / "ISOLATED"), 
                 "mc0: directory should exist under mcRoot");
-            t.IsFalse(std::filesystem::exists(test.paths.cdRoot / "ISOLATED"), 
+            t.IsFalse(std::filesystem::exists(test.paths.cdRoot / "ISOLATED"),
                 "mc0: directory should NOT exist under cdRoot");
+        });
+
+        tc.Run("cdrom0 paths match host files whatever their case", [](TestCase &t)
+        {
+            TestContext test;
+
+            // Files copied off a disc in lower case; the game asks for the ISO 9660 upper-case name.
+            std::filesystem::create_directories(test.paths.cdRoot / "iop" / "modules");
+            const std::string payload = "drive";
+            {
+                std::ofstream out(test.paths.cdRoot / "iop" / "modules" / "drive.dat", std::ios::binary);
+                out << payload;
+            }
+
+            const uint32_t pathAddr = GUEST_STRING_AREA_START;
+            writeGuestString(test.rdram.data(), pathAddr, "cdrom0:\\IOP\\MODULES\\DRIVE.DAT;1");
+            setRegU32(test.ctx, 4, pathAddr);
+            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
+            const int32_t fd = getRegS32(&test.ctx, 2);
+            t.IsTrue(fd >= 0, "cdrom0:\\IOP\\MODULES\\DRIVE.DAT;1 should open iop/modules/drive.dat");
+
+            const uint32_t bufAddr = GUEST_BUFFER_AREA_START;
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, bufAddr);
+            setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
+            fioRead(test.rdram.data(), &test.ctx, &test.runtime);
+            t.Equals(getRegS32(&test.ctx, 2), static_cast<int32_t>(payload.size()), "the whole file should be read");
+            t.IsTrue(std::memcmp(test.rdram.data() + bufAddr, payload.data(), payload.size()) == 0,
+                     "the bytes should come from the lower-case file");
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
+
+            writeGuestString(test.rdram.data(), pathAddr, "cdrom0:\\IOP\\MODULES\\MISSING.DAT;1");
+            setRegU32(test.ctx, 4, pathAddr);
+            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
+            t.IsTrue(getRegS32(&test.ctx, 2) < 0, "a file that doesn't exist in any case should still fail to open");
         });
 
         tc.Run("sceMc open write read and close roundtrip through sync", [](TestCase &t)

@@ -64,3 +64,34 @@ next run.
 - Overlays are still the next big blocker (PS2Recomp has no overlay support,
   `m0-decision.md`), but the main program now recompiles cleanly and runs until it needs disc
   files.
+
+## 4. Second and third boot (IOP\MODULES added, same day)
+
+You added the disc's `IOP\MODULES` folder (33 files: `drive.dat`, `dnas280.img`, `usbd.irx`,
+`usbkb.irx`, network and HDD modules), copied to scratch only.
+
+**The M2 check passes.** Run under gdb with a breakpoint on PS2Recomp's `sceGsSyncV` handler,
+the game reaches it through its own recompiled code: `_start` → `func_001A87F0` (main) →
+`func_001A85C0` (decomp port map: boot graphics: reset VU/DMA, 640x448 display, boot image) →
+`sceGsSyncV`, guest return address 0x1a8688. So the display setup seen in the first run is the
+game's.
+
+**Boot 2 stalled on the same `sceOpen`, with the file present.** Cause: PS2Recomp's VFS joins
+`cdrom0:` paths with exact case (`cdRoot / "IOP/MODULES/DRIVE.DAT"`), and the copied files are
+lower case. That works on Windows and fails on Linux **and Android**. My earlier statement that
+PS2Recomp matched names whatever their case was only true for the `sceCd*` helpers. Fixed in
+PS2Recomp (patch 0006, with a test that fails without it).
+
+**Boot 3, with the fix:** the game opens DRIVE.DAT, reads all 0x56D00 bytes and DMAs it to IOP
+memory at 0x120000 (`sceSifSetDma` logged). It then loops at 0x1aa7f8-0x1aa80c in
+`func_001AA7D0`: `while (sceSifLoadStartModuleBuffer(module, ...) < 0) {}`.
+
+**Why:** `sceSifLoadStartModuleBuffer` is the game's own (recompiled) Sony library code, which asks
+the IOP's LOADFILE service, over SIF RPC, to load and start a module already in IOP memory.
+PS2Recomp `eb8688b` has no LOADFILE service on its IOP side, so the call always fails. REO lists
+LOADFILE as working, but in its own fork, which we can't read. The module buffer address is an
+IOP address, so rerouting the call to the existing EE-side `sceSifLoadModuleBuffer` HLE would be
+wrong.
+
+**This is a design decision, not a bug fix:** how IOP modules are handled (see the summary to you
+in the session, and design Decision 4 "IOP: never emulated").
