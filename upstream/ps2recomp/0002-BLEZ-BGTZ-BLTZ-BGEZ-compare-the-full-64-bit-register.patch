@@ -1,0 +1,95 @@
+From 4741bcce05d2a86eee64f57765664128e2703717 Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 06:32:55 +0000
+Subject: [PATCH 2/5] BLEZ/BGTZ/BLTZ/BGEZ: compare the full 64-bit register
+
+The R5900's GPRs are 64-bit and these branches test the whole register (PCSX2's
+interpreter uses GPR.r[rs].SD[0]). The emitter tested only the low 32 bits, so
+a register holding e.g. 0x00000001_80000000 branched as if negative. Covers the
+likely and -AL variants, which share the expression.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRecomp/src/lib/control_flow_emitter.cpp |  8 ++---
+ ps2xTest/src/code_generator_tests.cpp       | 33 +++++++++++++++++++++
+ 2 files changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/ps2xRecomp/src/lib/control_flow_emitter.cpp b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index 4bf8dc5..95f69d7 100644
+--- a/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -406,10 +406,10 @@ namespace ps2recomp
+             return fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rsReg, rtReg);
+         case OPCODE_BLEZ:
+         case OPCODE_BLEZL:
+-            return fmt::format("GPR_S32(ctx, {}) <= 0", rsReg);
++            return fmt::format("GPR_S64(ctx, {}) <= 0", rsReg);
+         case OPCODE_BGTZ:
+         case OPCODE_BGTZL:
+-            return fmt::format("GPR_S32(ctx, {}) > 0", rsReg);
++            return fmt::format("GPR_S64(ctx, {}) > 0", rsReg);
+         case OPCODE_REGIMM:
+             switch (m_branchInst.rt)
+             {
+@@ -417,12 +417,12 @@ namespace ps2recomp
+             case REGIMM_BLTZL:
+             case REGIMM_BLTZAL:
+             case REGIMM_BLTZALL:
+-                return fmt::format("GPR_S32(ctx, {}) < 0", rsReg);
++                return fmt::format("GPR_S64(ctx, {}) < 0", rsReg);
+             case REGIMM_BGEZ:
+             case REGIMM_BGEZL:
+             case REGIMM_BGEZAL:
+             case REGIMM_BGEZALL:
+-                return fmt::format("GPR_S32(ctx, {}) >= 0", rsReg);
++                return fmt::format("GPR_S64(ctx, {}) >= 0", rsReg);
+             default:
+                 return "false";
+             }
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 463b6cf..f4703a6 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1443,6 +1443,39 @@ void register_code_generator_tests()
+             t.IsTrue(out.find("ctx->vu0_vf[22]") == std::string::npos, "S2 must not use rs(format) as register index");
+         });
+ 
++        tc.Run("BLEZ/BGTZ/BLTZ/BGEZ compare the full 64-bit register", [](TestCase &t) {
++            struct Case { uint32_t opcode; uint32_t regimm; const char *expr; const char *name; };
++            const Case cases[] = {
++                {OPCODE_BLEZ, 0, "GPR_S64(ctx, 4) <= 0", "BLEZ"},
++                {OPCODE_BGTZ, 0, "GPR_S64(ctx, 4) > 0", "BGTZ"},
++                {OPCODE_REGIMM, REGIMM_BLTZ, "GPR_S64(ctx, 4) < 0", "BLTZ"},
++                {OPCODE_REGIMM, REGIMM_BGEZ, "GPR_S64(ctx, 4) >= 0", "BGEZ"},
++            };
++            for (const Case &c : cases)
++            {
++                Function func;
++                func.name = "branch_zero_compare";
++                func.start = 0x1400;
++                func.end = 0x1410;
++                func.isRecompiled = true;
++                func.isStub = false;
++
++                Instruction br{};
++                br.address = 0x1400;
++                br.opcode = c.opcode;
++                br.rs = 4;
++                br.rt = c.regimm;
++                br.simmediate = 1; // target = 0x1408
++                br.isBranch = true;
++                br.hasDelaySlot = true;
++
++                CodeGenerator gen({}, {});
++                std::string generated = gen.generateFunction(func, {br, makeNop(0x1404), makeNop(0x1408)}, false);
++                t.IsTrue(generated.find(c.expr) != std::string::npos, std::string(c.name) + " should test the 64-bit value");
++                t.IsTrue(generated.find("GPR_S32(ctx, 4)") == std::string::npos, std::string(c.name) + " must not truncate rs to 32 bits");
++            }
++        });
++
+         tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
+             Instruction inst{};
+             inst.opcode = OPCODE_COP2;
+-- 
+2.43.0
+

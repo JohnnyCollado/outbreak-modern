@@ -178,6 +178,21 @@ void register_ps2_float_semantics_tests()
             t.Equals(bitsOf(FPU_SQRT_S(-0.0f)), bitsOf(0.0f), "sqrt(-0) should be +0");
         });
 
+        tc.Run("FPU CVT.W.S truncates toward zero and saturates by sign", [](TestCase &t)
+        {
+            t.Equals(FPU_CVT_W_S(2.75f), 2, "2.75 should truncate to 2, not round to 3");
+            t.Equals(FPU_CVT_W_S(-2.75f), -2, "-2.75 should truncate toward zero to -2");
+            t.Equals(FPU_CVT_W_S(0.5f), 0, "0.5 should truncate to 0");
+            t.Equals(FPU_CVT_W_S(floatOf(0x4EFFFFFFu)), 2147483520, "the largest float below 2^31 should convert exactly");
+            t.Equals(FPU_CVT_W_S(floatOf(0x4F000000u)), INT32_MAX, "2^31 should saturate to 0x7FFFFFFF");
+            t.Equals(FPU_CVT_W_S(floatOf(0xCF000000u)), INT32_MIN, "-2^31 should saturate to 0x80000000");
+            t.Equals(FPU_CVT_W_S(floatOf(0xDF000000u)), INT32_MIN, "-2^63 should saturate to 0x80000000");
+            t.Equals(FPU_CVT_W_S(floatOf(kTwoPow128)), INT32_MAX, "2^128 (exponent 255) should saturate, not become Inf/NaN");
+            t.Equals(FPU_CVT_W_S(floatOf(kPlusMax)), INT32_MAX, "+max should saturate to 0x7FFFFFFF");
+            t.Equals(FPU_CVT_W_S(floatOf(kMinusMax)), INT32_MIN, "-max should saturate to 0x80000000");
+            t.Equals(FPU_TRUNC_W_S(floatOf(kPlusMax)), INT32_MAX, "TRUNC.W.S should saturate the same way");
+        });
+
         tc.Run("VU vector ADD/SUB/MUL follow the same rules in every lane", [](TestCase &t)
         {
             // _mm_set_ps lists lanes 3..0

@@ -1,0 +1,97 @@
+From 57c10502f3935242bcbce24dfb2c43b638412882 Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 06:32:55 +0000
+Subject: [PATCH 4/5] VU0 VDIV/VSQRT/VRSQRT: PS2 float semantics, and VRSQRT
+ reads fs
+
+VRSQRT ignored fs and computed 1/sqrt(ft); it is fs / sqrt(|ft|). VDIV by zero
+gave 0 and VSQRT clamped negative input to 0. Use the same ps2_fdiv/ps2_fsqrt/
+ps2_frsqrt helpers as the EE FPU: x/0 gives +-max, sqrt takes the magnitude.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRecomp/src/lib/vu_translation_helpers.cpp |  8 +++--
+ ps2xTest/src/code_generator_tests.cpp         | 29 +++++++++++++++++++
+ 2 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 509fd07..9aa1ebe 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -75,21 +75,23 @@ namespace ps2recomp
+         uint8_t fs_reg = inst.rd;
+         uint8_t ft_reg = inst.rt;
+ 
+-        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft != 0.0f) ? (fs / ft) : 0.0f; }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
++        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = ps2_fdiv(fs, ft); }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
+     }
+ 
+     std::string CodeGenerator::translateVU_VSQRT(const Instruction &inst)
+     {
+         uint8_t ftf = inst.vectorInfo.ftf;
+         uint8_t ft_reg = inst.rt;
+-        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = sqrtf(std::max(0.0f, ft)); }}", ft_reg, ft_reg, ftf);
++        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = ps2_fsqrt(ft); }}", ft_reg, ft_reg, ftf);
+     }
+ 
+     std::string CodeGenerator::translateVU_VRSQRT(const Instruction &inst)
+     {
++        uint8_t fsf = inst.vectorInfo.fsf;
+         uint8_t ftf = inst.vectorInfo.ftf;
++        uint8_t fs_reg = inst.rd;
+         uint8_t ft_reg = inst.rt;
+-        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft > 0.0f) ? (1.0f / sqrtf(ft)) : 0.0f; }}", ft_reg, ft_reg, ftf);
++        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = ps2_frsqrt(fs, ft); }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
+     }
+ 
+     std::string CodeGenerator::translateVU_VMTIR(const Instruction &inst)
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index f4703a6..09e4f7b 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -36,6 +36,21 @@ static Instruction makeNop(uint32_t address)
+     return inst;
+ }
+ 
++static Instruction makeVu0Special2(uint32_t op, uint8_t rt, uint8_t rd, uint8_t dest)
++{
++    Instruction inst{};
++    inst.opcode = OPCODE_COP2;
++    inst.rs = COP2_CO | ((dest >> 1) & 0x7);
++    inst.rt = rt;
++    inst.rd = rd;
++    inst.function = 0x3C; // force Special2 path
++    inst.vectorInfo.vectorField = dest;
++    inst.vectorInfo.fsf = 1; // y
++    inst.vectorInfo.ftf = 2; // z
++    inst.raw = (((op >> 2) & 0x1F) << 6) | (op & 0x3);
++    return inst;
++}
++
+ static uint32_t signExtend16(uint16_t value)
+ {
+     return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(value)));
+@@ -1476,6 +1491,20 @@ void register_code_generator_tests()
+             }
+         });
+ 
++        tc.Run("VU0 VDIV/VSQRT/VRSQRT use the PS2 float helpers", [](TestCase &t) {
++            CodeGenerator gen({}, {});
++            std::string div = gen.translateInstruction(makeVu0Special2(VU0_S2_VDIV, 3, 5, 0));
++            t.IsTrue(div.find("ps2_fdiv(fs, ft)") != std::string::npos, "VDIV should divide with PS2 semantics (x/0 gives +-max)");
++
++            std::string sqrt = gen.translateInstruction(makeVu0Special2(VU0_S2_VSQRT, 3, 5, 0));
++            t.IsTrue(sqrt.find("ps2_fsqrt(ft)") != std::string::npos, "VSQRT should take the root of the magnitude");
++
++            std::string rsqrt = gen.translateInstruction(makeVu0Special2(VU0_S2_VRSQRT, 3, 5, 0));
++            t.IsTrue(rsqrt.find("ps2_frsqrt(fs, ft)") != std::string::npos, "VRSQRT should compute fs / sqrt(|ft|)");
++            t.IsTrue(rsqrt.find("ctx->vu0_vf[5]") != std::string::npos, "VRSQRT should read fs from rd");
++            t.IsTrue(rsqrt.find("_MM_SHUFFLE(0,0,0,1)") != std::string::npos, "VRSQRT should read the fsf field of fs");
++        });
++
+         tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
+             Instruction inst{};
+             inst.opcode = OPCODE_COP2;
+-- 
+2.43.0
+

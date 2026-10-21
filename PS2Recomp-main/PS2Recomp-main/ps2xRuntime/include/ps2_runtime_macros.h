@@ -311,6 +311,17 @@ inline float ps2_frsqrt(float a, float b)
     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
 }
 
+// CVT.W.S: truncate toward zero; anything of 2^31 or more (exponent-255 values included) saturates by
+// sign. A plain cast would be undefined there, and x86 and ARM give different results. Same as PCSX2's
+// interpreter (FPU.cpp CVT_W).
+inline int32_t ps2_cvt_w_s(float a)
+{
+    const uint32_t b = std::bit_cast<uint32_t>(a);
+    if ((b & PS2_FLOAT_EXP_MASK) <= 0x4E800000u)
+        return static_cast<int32_t>(a);
+    return (b & PS2_FLOAT_SIGN_MASK) ? INT32_MIN : INT32_MAX;
+}
+
 enum class Ps2VecOp
 {
     Add,
@@ -848,12 +859,12 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_CEIL_L_S(a) ((int64_t)ceilf((float)(a)))
 #define FPU_FLOOR_L_S(a) ((int64_t)floorf((float)(a)))
 #define FPU_ROUND_W_S(a) ((int32_t)nearbyintf((float)(a)))
-#define FPU_TRUNC_W_S(a) ((int32_t)(float)(a))
+#define FPU_TRUNC_W_S(a) ps2_cvt_w_s((float)(a))
 #define FPU_CEIL_W_S(a) ((int32_t)ceilf((float)(a)))
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
+#define FPU_CVT_W_S(a) ps2_cvt_w_s((float)(a))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
