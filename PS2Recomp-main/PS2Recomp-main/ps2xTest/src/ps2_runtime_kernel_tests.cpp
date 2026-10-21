@@ -22,6 +22,7 @@ namespace
 
     constexpr int KE_OK = 0;
     constexpr int KE_ERROR = -1;
+    constexpr int KE_ILLEGAL_PRIORITY = -403;
     constexpr int KE_ILLEGAL_THID = -406;
     constexpr int KE_UNKNOWN_THID = -407;
     constexpr int KE_UNKNOWN_SEMID = -408;
@@ -570,6 +571,77 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint64_t>(_mm_extract_epi64(ctx.r[2], 1)),
                      kUpper,
                      "SET_GPR_U32 must preserve the upper 64 bits of the 128-bit GPR");
+        });
+
+        tc.Run("EE thread priorities are 0-127: 0 is valid for CreateThread and ChangeThreadPriority", [](TestCase &t)
+        {
+            // Unlike the IOP kernel, the EE kernel accepts priority 0 (ps2sdk: MAX_PRIORITY 128).
+            // CRI ADX creates its server threads at priority 0 and its V-sync handler switches
+            // the main thread to priority 0; rejecting it left Outbreak's file system without threads.
+            TestEnv env;
+            EeThreadCreateAbi threadParam{};
+            threadParam.func = K_SCHED_HIGH;
+            threadParam.stack = 0x00018000u;
+            threadParam.stack_size = 0x1000;
+            threadParam.initial_priority = 0;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            const int threadId = getRegS32(env.ctx, 2);
+            const GuestThread *thread = env.runtime.eeScheduler().thread(threadId);
+            t.IsTrue(threadId >= 2 && thread != nullptr, "CreateThread must accept initial_priority 0");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
+            setRegU32(env.ctx, 5, 9u);
+            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
+            setRegU32(env.ctx, 5, 0u);
+            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) >= 0, "ChangeThreadPriority to 0 must succeed");
+            t.Equals(thread ? thread->currentPriority : -1, 0, "the thread must now be at priority 0");
+
+            threadParam.initial_priority = 128;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_PRIORITY, "priority 128 is out of range");
+
+            threadParam.initial_priority = -1;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_PRIORITY, "a negative priority is out of range");
+        });
+
+        tc.Run("ChangeThreadPriority returns the previous priority", [](TestCase &t)
+        {
+            // CRI ADX locks with old = ChangeThreadPriority(self, 1) and unlocks with
+            // ChangeThreadPriority(self, old). Returning KE_OK (0) left Outbreak's main
+            // thread at priority 0 after every unlock, starving ADX's server thread.
+            TestEnv env;
+            EeThreadCreateAbi threadParam{};
+            threadParam.func = K_SCHED_HIGH;
+            threadParam.stack = 0x00018000u;
+            threadParam.stack_size = 0x1000;
+            threadParam.initial_priority = 40;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            const int threadId = getRegS32(env.ctx, 2);
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
+            setRegU32(env.ctx, 5, 9u);
+            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 40, "ChangeThreadPriority must return the old priority");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
+            setRegU32(env.ctx, 5, 12u);
+            iChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 9, "iChangeThreadPriority must return the old priority");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
+            setRegU32(env.ctx, 5, 200u);
+            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_PRIORITY, "errors are still returned as error codes");
         });
 
         tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)

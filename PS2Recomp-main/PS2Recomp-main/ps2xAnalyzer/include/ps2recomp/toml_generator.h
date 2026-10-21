@@ -24,6 +24,7 @@ namespace ps2recomp
         const std::map<uint32_t, uint32_t> &patches;
         const std::map<uint32_t, std::string> &patchReasons;
         const std::map<uint32_t, std::string> &performanceCriticalReasons;
+        const std::vector<SelfModifyingStoreSuspect> &selfModifyingSuspects;
     };
 
     class TomlGenerator

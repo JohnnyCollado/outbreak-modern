@@ -10,6 +10,15 @@
 
 namespace ps2recomp
 {
+    // A store that looks like it writes code before a jump. Reported for manual review only.
+    struct SelfModifyingStoreSuspect
+    {
+        uint32_t storeAddress = 0;
+        uint32_t targetAddress = 0;
+        uint32_t jumpTarget = 0;
+        std::string functionName;
+    };
+
     struct ElfAnalysisContext
     {
         std::vector<Function> functions;

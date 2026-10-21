@@ -177,6 +177,46 @@ void register_elf_analyzer_tests()
             (void)hasLargeComplexMMI;
             (void)hasSelfModifying; });
 
+                       tc.Run("suspected self-modifying stores are reported, never patched", [](TestCase &t)
+                              {
+            // Outbreak (SLPM-65428): lui $s1,0x21 ... sw $s0,-0x4000($s1) at 0x141034; jal 0x11b5f0.
+            // Its ELF has one executable section over code and data, so this ordinary store to
+            // the global 0x20c000 looks like "write to code, then jump". The old auto-nop
+            // removed it and left a transfer buffer NULL, hanging the game.
+            Instruction lui = makeInstruction(0x141028, OPCODE_LUI);
+            lui.rt = 17;
+            lui.immediate = 0x21;
+            Instruction sw = makeInstruction(0x141034, OPCODE_SW);
+            sw.rs = 17;
+            sw.rt = 16;
+            sw.immediate = 0xC000;
+            Instruction jal = makeInstruction(0x141038, OPCODE_JAL);
+            jal.target = 0x11B5F0 >> 2;
+            Instruction delay = makeInstruction(0x14103C, OPCODE_ADDIU);
+
+            Function func{};
+            func.name = "func_00140FC0";
+            func.start = 0x141028;
+            func.end = 0x141040;
+            func.instructions = {lui, sw, jal, delay};
+
+            Section merged{};
+            merged.address = 0x100000;
+            merged.size = 0x13BA00;
+            merged.isCode = true;
+
+            std::vector<SelfModifyingStoreSuspect> suspects;
+            const auto patches = ElfAnalyzer::detectInstructionPatchesForHeuristics({func}, {merged}, &suspects);
+            t.IsTrue(patches.empty(), "the analyzer must not replace a suspected self-modifying store");
+            t.Equals(suspects.size(), static_cast<size_t>(1), "the store must still be reported for review");
+            if (suspects.size() == 1)
+            {
+                t.Equals(suspects[0].storeAddress, 0x141034u, "store address");
+                t.Equals(suspects[0].targetAddress, 0x20C000u, "written address");
+                t.Equals(suspects[0].jumpTarget, 0x11B5F0u, "jump target");
+                t.IsTrue(suspects[0].functionName == "func_00140FC0", "containing function");
+            } });
+
                        tc.Run("jump-table detection finds canonical sltiu/bne/lw/jr pattern", [](TestCase &t)
                               {
             // sltiu -> bne/beq bounds check -> ... -> lui/addiu base -> lw -> jr loadedReg

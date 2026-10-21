@@ -60,6 +60,9 @@ namespace ps2recomp
     public:
         static std::vector<JumpTable> detectJumpTablesForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections, const std::function<bool(uint32_t, uint32_t &)> &readWord);
         static std::unordered_set<std::string> findRecursiveFunctionsForHeuristics(const std::unordered_map<std::string, std::vector<std::string>> &callGraph);
+        static std::map<uint32_t, uint32_t> detectInstructionPatchesForHeuristics(const std::vector<Function> &functions,
+                                                                                  const std::vector<Section> &sections,
+                                                                                  std::vector<SelfModifyingStoreSuspect> *suspects = nullptr);
 
     private:
         std::string m_elfPath;
@@ -80,6 +83,7 @@ namespace ps2recomp
 
         std::map<uint32_t, uint32_t> m_patches;
         std::map<uint32_t, std::string> m_patchReasons;
+        std::vector<SelfModifyingStoreSuspect> m_selfModifyingSuspects;
 
         std::unordered_map<uint32_t, CFG> m_functionCFGs;
         std::vector<JumpTable> m_jumpTables;

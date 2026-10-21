@@ -201,6 +201,20 @@ namespace ps2recomp
             file << "]\n\n";
         }
 
+        if (!input.selfModifyingSuspects.empty())
+        {
+            file << "# Possible self-modifying code: a store into an executable section followed by a jump.\n";
+            file << "# NOT patched. Most are ordinary data writes when code and data share one section.\n";
+            file << "# After checking one by hand, copy its line into [patches] instructions to replace it.\n";
+            for (const auto &suspect : input.selfModifyingSuspects)
+            {
+                file << "#   { address = \"0x" << std::hex << suspect.storeAddress << "\", value = \"0x0\" },"
+                     << "  # writes 0x" << suspect.targetAddress << ", then jumps to 0x" << suspect.jumpTarget
+                     << std::dec << " in " << suspect.functionName << "\n";
+            }
+            file << "\n";
+        }
+
         file << "# Performance critical functions (may need manual optimization)\n";
         file << "[performance]\n";
         file << "critical = [\n";

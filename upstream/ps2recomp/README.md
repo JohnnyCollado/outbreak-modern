@@ -17,6 +17,10 @@ adds its own test.
 | 0007 | `sceSifLoadModuleBuffer`/`LoadStartModuleBuffer` read the module from **EE** RAM, but a PS2 game passes an **IOP** address (Outbreak DMAs DRIVE.DAT to IOP 0x120000 first), so every load failed. IOP RAM is now read first, falling back to EE RAM. Buffer loads are recorded like path loads and named after their `.iopmod` name. `_sceSifLoadModule`/`_sceSifLoadModuleBuffer` write the start result to `*$a3`; `sceSifSearchModuleByName` added. | the game's own wrappers (disassembled) and the decomp's `sys.c`/`iop.c` |
 | 0008 | The IOP interpreter had no `thmsgbx` (message boxes). Outbreak's sound driver creates one at start-up, so it never registered its RPC server and the game retried `SdrBind` forever. Ordinals 4-9, 11, 12; FIFO/priority order; error codes as on hardware. | ps2sdk `thmsgbx.h`/`thmsgbx.c`, `kerr.h` (behaviour only, reimplemented) |
 | 0009 | `sceCdLayerSearchFile` (dual-layer DVD search) had no handler, so CRI's DVD file system waited forever. Layer 0 = `sceCdSearchFile`; layer 1 = not found (a folder of files has one layer). | — |
+| 0010 | `CreateThread`/`ChangeThreadPriority` rejected priority 0 (`KE_ILLEGAL_PRIORITY`), although EE priorities are 0-127 and the runtime itself starts the main thread at 0. CRI ADX creates its server threads with the main thread's priority, so none existed and Outbreak's file system never finished loading. | ps2sdk `ee/kernel/src/thread.c` (`InitThread` creates `KernelTopThread` at priority 0 and checks for failure), `kernel.h` `MAX_PRIORITY 128` |
+| 0011 | `ChangeThreadPriority` returned `KE_OK`; the EE kernel returns the **previous** priority. CRI ADX's lock/unlock saves and restores it, so every unlock put Outbreak's main thread at priority 0 and ADX's server thread never ran. | the game's own ADX lock/unlock (disassembled: the return value is stored and passed back) |
+| 0012 | The **analyzer** replaced every "store into an executable section, then `j`/`jal`" with a NOP in the generated config, as possible self-modifying code. Outbreak's ELF has one executable section over code and data, so all 37 hits were ordinary data writes; 34 took effect and one hung the boot (a NULL transfer buffer). Now they are only printed and listed as commented-out lines in the TOML for review; nothing is replaced. Details: `results/analyzer-nops-20261021.md`. | the analyzer's own README ("flagged but requires manual review") |
+| 0013 | `sceDmaRecvN` was a TODO stub that stops the program. Now sets MADR/QWC and starts a normal-mode transfer into memory, as libdma does; Outbreak uses it to copy the scratchpad to RAM. | the game's own `sceDmaRecvN` (disassembled) |
 
 ## How they were tested (2026-10-21, Ubuntu 24.04)
 
@@ -36,6 +40,16 @@ adds its own test.
   started without a test name. They only printed a usage message, so "they pass" wasn't backed by
   anything until this run.)
 - Android arm64 (NDK r27c, API 29): `ps2_runtime` and `ps2_iop` build with the changes.
+
+## How 0010-0013 were tested (2026-10-21, Windows 11, MSVC 19.44 / Visual Studio 2022)
+
+- First Windows run of the whole set: **452 / 452** `ps2x_tests` with 0001-0009 under MSVC.
+- Each new test was run against the old code first and fails there: 0010 (452/453), 0011
+  (453/454), 0012 (454/455, the store was replaced), 0013 (455/456, "Unimplemented PS2 stub
+  called: sceDmaRecvN").
+- Each patch was built and tested on its own from a clean `eb8688b` + `git am`: 0010 **453/453**,
+  0011 **454/454**, 0012 **455/455**, 0013 **456/456**.
+- Not run for 0010-0013: GCC/Clang on Linux, the IOP and GS cache suites, Android.
 
 ## Known gaps, not fixed here
 

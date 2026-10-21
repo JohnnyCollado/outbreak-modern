@@ -84,6 +84,7 @@ namespace ps2recomp
         m_commonDataAccess.clear();
         m_patches.clear();
         m_patchReasons.clear();
+        m_selfModifyingSuspects.clear();
         m_functionCFGs.clear();
         m_jumpTables.clear();
         m_functionCalls.clear();
@@ -115,7 +116,8 @@ namespace ps2recomp
             m_jumpTables,
             m_patches,
             m_patchReasons,
-            m_performanceCriticalReasons};
+            m_performanceCriticalReasons,
+            m_selfModifyingSuspects};
 
         return TomlGenerator::generate(input, outputPath);
     }
@@ -537,6 +539,22 @@ namespace ps2recomp
         }
     }
 
+    std::map<uint32_t, uint32_t> ElfAnalyzer::detectInstructionPatchesForHeuristics(
+        const std::vector<Function> &functions,
+        const std::vector<Section> &sections,
+        std::vector<SelfModifyingStoreSuspect> *suspects)
+    {
+        ElfAnalyzer analyzer("");
+        analyzer.m_context.functions = functions;
+        analyzer.m_context.sections = sections;
+        analyzer.identifyPotentialPatches();
+        if (suspects)
+        {
+            *suspects = analyzer.m_selfModifyingSuspects;
+        }
+        return analyzer.m_patches;
+    }
+
     bool ElfAnalyzer::tryPatchSelfModifyingStore(
         const Function &func,
         const std::vector<Instruction> &instructions,
@@ -574,10 +592,12 @@ namespace ps2recomp
         std::cout << "Potential self-modifying code at " << formatAddress(storeInst.address)
                   << " writing to " << formatAddress(targetAddr)
                   << " then jumping to " << formatAddress(jumpTarget)
-                  << " in function " << func.name << std::endl;
+                  << " in function " << func.name << " (not patched; review by hand)" << std::endl;
 
-        m_patches[storeInst.address] = 0x00000000;
-        m_patchReasons[storeInst.address] = "Potential self-modifying code";
+        // Only reported: replacing the store with a NOP doesn't make self-modifying code work,
+        // and when code and data share one executable section (common in PS2 ELFs) most hits
+        // are ordinary data writes.
+        m_selfModifyingSuspects.push_back({storeInst.address, targetAddr, jumpTarget, func.name});
         return true;
     }
 

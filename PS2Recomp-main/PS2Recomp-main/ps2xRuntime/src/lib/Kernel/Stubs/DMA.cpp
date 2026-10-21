@@ -167,7 +167,26 @@ namespace ps2_stubs
 
     void sceDmaRecvN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceDmaRecvN", rdram, ctx, runtime);
+        // libdma: MADR = addr, QWC = qwc, CHCR = (CHCR & ~(MOD | DIR)) | STR. The source side
+        // (e.g. SADR for the from-scratchpad channel) is set by the caller beforehand.
+        const uint32_t channelBase = runtime ? resolveDmaChannelBase(rdram, getRegU32(ctx, 4)) : 0u;
+        if (channelBase == 0u)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        PS2Memory &mem = runtime->memory();
+        mem.writeIORegister(channelBase + 0x10u, toDmaPhys(getRegU32(ctx, 5)));
+        mem.writeIORegister(channelBase + 0x20u, getRegU32(ctx, 6) & 0xFFFFu);
+        mem.writeIORegister(channelBase + 0x00u, (mem.readIORegister(channelBase + 0x00u) & ~0xDu) | 0x100u);
+        mem.processPendingTransfers();
+
+        for (const uint32_t completedCause : mem.consumeCompletedDmacCauses())
+        {
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

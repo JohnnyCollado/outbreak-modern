@@ -2044,6 +2044,42 @@ void register_ps2_memory_tests()
                      "preserved TTE should deliver the tag high-half VIFcode");
         });
 
+        tc.Run("sceDmaRecvN copies from scratchpad in normal mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+
+            // Resident Evil Outbreak: chan = sceDmaGetChan(8); chan->sadr = 0x40;
+            // sceDmaRecvN(chan, dst, qwc). The caller sets SADR, libdma sets MADR/QWC/CHCR.
+            constexpr uint32_t kFromSprCh = 0x1000D000u;
+            constexpr uint32_t kDst = 0x0024AB40u;
+            PS2Memory &mem = runtime.memory();
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                mem.write32(PS2_SCRATCHPAD_BASE + 0x40u + i * 4u, 0xA0B0C000u + i);
+            }
+            t.IsTrue(mem.writeIORegister(kFromSprCh + 0x80u, 0x40u), "guest sets SADR");
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kFromSprCh);
+            setRegU32(ctx, 5, kDst);
+            setRegU32(ctx, 6, 2u); // quadwords
+            ps2_stubs::sceDmaRecvN(rdram, &ctx, &runtime);
+
+            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0, "sceDmaRecvN should return 0");
+            bool copied = true;
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                uint32_t word = 0;
+                std::memcpy(&word, rdram + kDst + i * 4u, sizeof(word));
+                copied = copied && word == 0xA0B0C000u + i;
+            }
+            t.IsTrue(copied, "32 bytes from scratchpad+0x40 should land at the destination");
+            t.Equals(mem.readIORegister(kFromSprCh + 0x00u) & 0x100u, 0u, "STR should be clear when done");
+            t.Equals(mem.readIORegister(kFromSprCh + 0x20u), 0u, "QWC should count down to 0");
+        });
+
         tc.Run("VIF1 DMA DIRECT image packet reaches GS through arbiter", [](TestCase &t)
         {
             PS2Memory mem;

@@ -1,0 +1,222 @@
+From 544552959966f4c411672b4df54818c4b30971f8 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 10:36:48 -0400
+Subject: [PATCH 12/12] Analyzer: report suspected self-modifying stores, never
+ patch them
+
+The analyzer replaced every "store into an executable section, then j/jal"
+with a NOP in the generated config. The README says self-modifying code is
+"flagged but requires manual review"; now it is: the store is printed and
+listed as a commented-out patch line in the TOML, and nothing is replaced.
+
+A NOP doesn't make real self-modifying code work (the recompiled code still
+runs the old instruction), and many PS2 ELFs have a single executable section
+over code and data, so most hits are ordinary writes to globals. In Resident
+Evil Outbreak (SLPM-65428) all 37 hits were data writes; 34 took effect, and
+one left a CRI transfer buffer NULL, hanging the boot.
+
+detectInstructionPatchesForHeuristics() runs the detection on given functions
+and sections, for tests.
+---
+ .../include/ps2recomp/elf_analysis_context.h  |  9 +++++
+ ps2xAnalyzer/include/ps2recomp/elf_analyzer.h |  4 ++
+ .../include/ps2recomp/toml_generator.h        |  1 +
+ ps2xAnalyzer/src/elf_analyzer.cpp             | 28 +++++++++++--
+ ps2xAnalyzer/src/toml_generator.cpp           | 14 +++++++
+ ps2xTest/src/elf_analyzer_tests.cpp           | 40 +++++++++++++++++++
+ 6 files changed, 92 insertions(+), 4 deletions(-)
+
+diff --git a/ps2xAnalyzer/include/ps2recomp/elf_analysis_context.h b/ps2xAnalyzer/include/ps2recomp/elf_analysis_context.h
+index 4d9c892..8b6ef01 100644
+--- a/ps2xAnalyzer/include/ps2recomp/elf_analysis_context.h
++++ b/ps2xAnalyzer/include/ps2recomp/elf_analysis_context.h
+@@ -10,6 +10,15 @@
+ 
+ namespace ps2recomp
+ {
++    // A store that looks like it writes code before a jump. Reported for manual review only.
++    struct SelfModifyingStoreSuspect
++    {
++        uint32_t storeAddress = 0;
++        uint32_t targetAddress = 0;
++        uint32_t jumpTarget = 0;
++        std::string functionName;
++    };
++
+     struct ElfAnalysisContext
+     {
+         std::vector<Function> functions;
+diff --git a/ps2xAnalyzer/include/ps2recomp/elf_analyzer.h b/ps2xAnalyzer/include/ps2recomp/elf_analyzer.h
+index df29dfc..39874b9 100644
+--- a/ps2xAnalyzer/include/ps2recomp/elf_analyzer.h
++++ b/ps2xAnalyzer/include/ps2recomp/elf_analyzer.h
+@@ -60,6 +60,9 @@ namespace ps2recomp
+     public:
+         static std::vector<JumpTable> detectJumpTablesForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections, const std::function<bool(uint32_t, uint32_t &)> &readWord);
+         static std::unordered_set<std::string> findRecursiveFunctionsForHeuristics(const std::unordered_map<std::string, std::vector<std::string>> &callGraph);
++        static std::map<uint32_t, uint32_t> detectInstructionPatchesForHeuristics(const std::vector<Function> &functions,
++                                                                                  const std::vector<Section> &sections,
++                                                                                  std::vector<SelfModifyingStoreSuspect> *suspects = nullptr);
+ 
+     private:
+         std::string m_elfPath;
+@@ -80,6 +83,7 @@ namespace ps2recomp
+ 
+         std::map<uint32_t, uint32_t> m_patches;
+         std::map<uint32_t, std::string> m_patchReasons;
++        std::vector<SelfModifyingStoreSuspect> m_selfModifyingSuspects;
+ 
+         std::unordered_map<uint32_t, CFG> m_functionCFGs;
+         std::vector<JumpTable> m_jumpTables;
+diff --git a/ps2xAnalyzer/include/ps2recomp/toml_generator.h b/ps2xAnalyzer/include/ps2recomp/toml_generator.h
+index 72d2b8c..d43416a 100644
+--- a/ps2xAnalyzer/include/ps2recomp/toml_generator.h
++++ b/ps2xAnalyzer/include/ps2recomp/toml_generator.h
+@@ -24,6 +24,7 @@ namespace ps2recomp
+         const std::map<uint32_t, uint32_t> &patches;
+         const std::map<uint32_t, std::string> &patchReasons;
+         const std::map<uint32_t, std::string> &performanceCriticalReasons;
++        const std::vector<SelfModifyingStoreSuspect> &selfModifyingSuspects;
+     };
+ 
+     class TomlGenerator
+diff --git a/ps2xAnalyzer/src/elf_analyzer.cpp b/ps2xAnalyzer/src/elf_analyzer.cpp
+index 5c57cdb..357af45 100644
+--- a/ps2xAnalyzer/src/elf_analyzer.cpp
++++ b/ps2xAnalyzer/src/elf_analyzer.cpp
+@@ -84,6 +84,7 @@ namespace ps2recomp
+         m_commonDataAccess.clear();
+         m_patches.clear();
+         m_patchReasons.clear();
++        m_selfModifyingSuspects.clear();
+         m_functionCFGs.clear();
+         m_jumpTables.clear();
+         m_functionCalls.clear();
+@@ -115,7 +116,8 @@ namespace ps2recomp
+             m_jumpTables,
+             m_patches,
+             m_patchReasons,
+-            m_performanceCriticalReasons};
++            m_performanceCriticalReasons,
++            m_selfModifyingSuspects};
+ 
+         return TomlGenerator::generate(input, outputPath);
+     }
+@@ -537,6 +539,22 @@ namespace ps2recomp
+         }
+     }
+ 
++    std::map<uint32_t, uint32_t> ElfAnalyzer::detectInstructionPatchesForHeuristics(
++        const std::vector<Function> &functions,
++        const std::vector<Section> &sections,
++        std::vector<SelfModifyingStoreSuspect> *suspects)
++    {
++        ElfAnalyzer analyzer("");
++        analyzer.m_context.functions = functions;
++        analyzer.m_context.sections = sections;
++        analyzer.identifyPotentialPatches();
++        if (suspects)
++        {
++            *suspects = analyzer.m_selfModifyingSuspects;
++        }
++        return analyzer.m_patches;
++    }
++
+     bool ElfAnalyzer::tryPatchSelfModifyingStore(
+         const Function &func,
+         const std::vector<Instruction> &instructions,
+@@ -574,10 +592,12 @@ namespace ps2recomp
+         std::cout << "Potential self-modifying code at " << formatAddress(storeInst.address)
+                   << " writing to " << formatAddress(targetAddr)
+                   << " then jumping to " << formatAddress(jumpTarget)
+-                  << " in function " << func.name << std::endl;
++                  << " in function " << func.name << " (not patched; review by hand)" << std::endl;
+ 
+-        m_patches[storeInst.address] = 0x00000000;
+-        m_patchReasons[storeInst.address] = "Potential self-modifying code";
++        // Only reported: replacing the store with a NOP doesn't make self-modifying code work,
++        // and when code and data share one executable section (common in PS2 ELFs) most hits
++        // are ordinary data writes.
++        m_selfModifyingSuspects.push_back({storeInst.address, targetAddr, jumpTarget, func.name});
+         return true;
+     }
+ 
+diff --git a/ps2xAnalyzer/src/toml_generator.cpp b/ps2xAnalyzer/src/toml_generator.cpp
+index cf4a251..00d2fc0 100644
+--- a/ps2xAnalyzer/src/toml_generator.cpp
++++ b/ps2xAnalyzer/src/toml_generator.cpp
+@@ -201,6 +201,20 @@ namespace ps2recomp
+             file << "]\n\n";
+         }
+ 
++        if (!input.selfModifyingSuspects.empty())
++        {
++            file << "# Possible self-modifying code: a store into an executable section followed by a jump.\n";
++            file << "# NOT patched. Most are ordinary data writes when code and data share one section.\n";
++            file << "# After checking one by hand, copy its line into [patches] instructions to replace it.\n";
++            for (const auto &suspect : input.selfModifyingSuspects)
++            {
++                file << "#   { address = \"0x" << std::hex << suspect.storeAddress << "\", value = \"0x0\" },"
++                     << "  # writes 0x" << suspect.targetAddress << ", then jumps to 0x" << suspect.jumpTarget
++                     << std::dec << " in " << suspect.functionName << "\n";
++            }
++            file << "\n";
++        }
++
+         file << "# Performance critical functions (may need manual optimization)\n";
+         file << "[performance]\n";
+         file << "critical = [\n";
+diff --git a/ps2xTest/src/elf_analyzer_tests.cpp b/ps2xTest/src/elf_analyzer_tests.cpp
+index 8cba9b5..eac3089 100644
+--- a/ps2xTest/src/elf_analyzer_tests.cpp
++++ b/ps2xTest/src/elf_analyzer_tests.cpp
+@@ -177,6 +177,46 @@ void register_elf_analyzer_tests()
+             (void)hasLargeComplexMMI;
+             (void)hasSelfModifying; });
+ 
++                       tc.Run("suspected self-modifying stores are reported, never patched", [](TestCase &t)
++                              {
++            // Outbreak (SLPM-65428): lui $s1,0x21 ... sw $s0,-0x4000($s1) at 0x141034; jal 0x11b5f0.
++            // Its ELF has one executable section over code and data, so this ordinary store to
++            // the global 0x20c000 looks like "write to code, then jump". The old auto-nop
++            // removed it and left a transfer buffer NULL, hanging the game.
++            Instruction lui = makeInstruction(0x141028, OPCODE_LUI);
++            lui.rt = 17;
++            lui.immediate = 0x21;
++            Instruction sw = makeInstruction(0x141034, OPCODE_SW);
++            sw.rs = 17;
++            sw.rt = 16;
++            sw.immediate = 0xC000;
++            Instruction jal = makeInstruction(0x141038, OPCODE_JAL);
++            jal.target = 0x11B5F0 >> 2;
++            Instruction delay = makeInstruction(0x14103C, OPCODE_ADDIU);
++
++            Function func{};
++            func.name = "func_00140FC0";
++            func.start = 0x141028;
++            func.end = 0x141040;
++            func.instructions = {lui, sw, jal, delay};
++
++            Section merged{};
++            merged.address = 0x100000;
++            merged.size = 0x13BA00;
++            merged.isCode = true;
++
++            std::vector<SelfModifyingStoreSuspect> suspects;
++            const auto patches = ElfAnalyzer::detectInstructionPatchesForHeuristics({func}, {merged}, &suspects);
++            t.IsTrue(patches.empty(), "the analyzer must not replace a suspected self-modifying store");
++            t.Equals(suspects.size(), static_cast<size_t>(1), "the store must still be reported for review");
++            if (suspects.size() == 1)
++            {
++                t.Equals(suspects[0].storeAddress, 0x141034u, "store address");
++                t.Equals(suspects[0].targetAddress, 0x20C000u, "written address");
++                t.Equals(suspects[0].jumpTarget, 0x11B5F0u, "jump target");
++                t.IsTrue(suspects[0].functionName == "func_00140FC0", "containing function");
++            } });
++
+                        tc.Run("jump-table detection finds canonical sltiu/bne/lw/jr pattern", [](TestCase &t)
+                               {
+             // sltiu -> bne/beq bounds check -> ... -> lui/addiu base -> lw -> jr loadedReg
+-- 
+2.46.2.windows.1
+
