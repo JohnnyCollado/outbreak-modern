@@ -1,0 +1,31 @@
+# Reports
+
+Logs of the problems hit while working on this project, and how each was worked out. They're
+for reviewing the project later and for sharing with other developers: someone picking the work
+up should be able to see what went wrong, why, what was done about it, and what's still open,
+without replaying the sessions.
+
+`docs/` holds plans and designs (what we intend). `results/` holds measurements and test outputs
+(what a tool printed). `reports/` holds the story in between: struggles, causes, fixes, and the
+lessons learned.
+
+## How to write one
+
+- Copy [`TEMPLATE.md`](TEMPLATE.md) to `YYYY-MM-DD-<short-topic>.md`. One report per working
+  session or per piece of work, whichever is smaller.
+- One entry per struggle, in the order they happened. Each entry: what was seen, how it was
+  found, the root cause, the fix, the evidence (commit, patch, test, log), and what to take
+  from it.
+- **Include mistakes.** Wrong claims, wrong estimates, wasted detours: say what was claimed,
+  how it was found to be wrong, and where it was corrected. These are the most useful entries
+  for a reviewer.
+- Mark anything not verified as **Unverified** or **Unknown**, as in the rest of the docs.
+- Reference evidence by commit hash, patch number or file path, not "see above".
+- **No game data**: no code, disassembly listings, assets or file contents from the disc. Addresses,
+  function names, file names, sizes and hashes are fine.
+
+## Index
+
+| Date | Report | Covers |
+|---|---|---|
+| 2026-10-21 | [Native port bring-up](2026-10-21-native-port-bring-up.md) | Milestone plans, choosing PS2Recomp, nine PS2Recomp fixes, first recompile and boot of SLPM-65428 up to the data archives |
