@@ -35,8 +35,11 @@ adds its own test.
   ps2autotests (or a real PS2) would answer it.
 - The VU0 MAC/status flags are still not updated by macro-mode ops.
 - The EE FPU still rounds to nearest; the hardware rounds toward zero (`m0-decision.md`).
-- On a fresh checkout, `ps2EntryRunner` doesn't link: `src/runner/register_functions.cpp` is
-  generated and git-ignored, and only appears after the test suite has run once. Not ours to
-  change without asking upstream how they intend it.
+- `ps2EntryRunner` doesn't link in **our** copy (`PS2Recomp-main/`), because
+  `ps2xRuntime/src/runner/register_functions.cpp` is missing. Upstream tracks that file (a
+  placeholder function table), but its own `.gitignore` lists `src/runner/`, so it was left out
+  when PS2Recomp was added to this repo. This is **not an upstream bug**. An earlier version of
+  this note said it was; that was wrong. The fix belongs in how we vendor it (e.g. a git
+  submodule), not in PS2Recomp.
 - The GS cache tests aren't registered with CTest in the top-level build (only `include(CTest)`
   when the folder is built standalone).
