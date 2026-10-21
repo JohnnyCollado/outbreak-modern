@@ -125,6 +125,9 @@
     X(sceSifLoadElfPart)       \
     X(sceSifLoadModule)        \
     X(sceSifLoadModuleBuffer)  \
+    X(_sceSifLoadModuleBuffer) \
+    X(_sceSifLoadModule)       \
+    X(sceSifSearchModuleByName) \
                                \
     X(SetupThread)             \
     X(EndOfHeap)               \
@@ -307,6 +310,7 @@
     X(sceCdReadClock)                         \
     X(sceCdReadIOPm)                          \
     X(sceCdSearchFile)                        \
+    X(sceCdLayerSearchFile)                   \
     X(sceCdSeek)                              \
     X(sceCdStInit)                            \
     X(sceCdStPause)                           \
@@ -542,6 +546,9 @@
     X(sceSifLoadFileReset)                    \
     X(sceSifLoadIopHeap)                      \
     X(sceSifLoadModuleBuffer)                 \
+    X(_sceSifLoadModuleBuffer)                \
+    X(_sceSifLoadModule)                      \
+    X(sceSifSearchModuleByName)               \
     X(sceSifRebootIop)                        \
     X(sceSifRegisterRpc)                      \
     X(sceSifRemoveCmdHandler)                 \

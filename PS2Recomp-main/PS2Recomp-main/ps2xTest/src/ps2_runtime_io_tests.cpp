@@ -745,6 +745,31 @@ void register_ps2_runtime_io_tests()
                      "sceCdSearchFile should assign a pseudo LSN for the resolved host file");
         });
 
+        tc.Run("sceCdLayerSearchFile finds layer-0 files and nothing on layer 1", [](TestCase &t)
+        {
+            TestContext test;
+            {
+                std::ofstream out(test.paths.cdRoot / "SYSTEM.CNF", std::ios::binary);
+                out << "BOOT2";
+            }
+            constexpr uint32_t fileAddr = GUEST_BUFFER_AREA_START + 0x1B00;
+            constexpr uint32_t pathAddr = GUEST_STRING_AREA_START + 0xB00;
+            writeGuestString(test.rdram.data(), pathAddr, "\\SYSTEM.CNF;1");
+
+            const auto search = [&](uint32_t layer)
+            {
+                clearContext(test.ctx);
+                setRegU32(test.ctx, 4, fileAddr);
+                setRegU32(test.ctx, 5, pathAddr);
+                setRegU32(test.ctx, 6, layer);
+                ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
+                return getRegS32(&test.ctx, 2);
+            };
+            t.Equals(search(0u), 1, "layer 0 should find the file like sceCdSearchFile");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr + 4), 5u, "layer 0 should report the file size");
+            t.Equals(search(1u), 0, "layer 1 should not find the file");
+        });
+
         tc.Run("sceCdRead reads from explicit cdImage path", [](TestCase &t)
         {
             TestContext test;

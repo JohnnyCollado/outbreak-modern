@@ -542,6 +542,19 @@ namespace ps2_stubs
         sceCdRead(rdram, ctx, runtime);
     }
 
+    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // sceCdLayerSearchFile(sceCdlFILE *file, const char *name, int layer): the dual-layer DVD
+        // form of sceCdSearchFile. A folder of extracted files has only one layer, so layer 0 is
+        // searched like sceCdSearchFile and layer 1 never has the file (0, as for "not found").
+        if (getRegU32(ctx, 6) != 0u)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+        sceCdSearchFile(rdram, ctx, runtime);
+    }
+
     void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t fileAddr = getRegU32(ctx, 4);

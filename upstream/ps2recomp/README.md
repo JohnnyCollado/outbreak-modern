@@ -14,12 +14,19 @@ adds its own test.
 | 0004 | VU0 VRSQRT ignored fs. VDIV by zero gave 0. VSQRT clamped negatives to 0. Now uses the same PS2 float helpers as the EE FPU. | the repo's own ps2autotests-checked helpers |
 | 0005 | VU0 LQI/SQI/LQD/SQD/ILWR/ISWR used EE RAM instead of VU0 data memory. SQI/SQD had fs/it swapped. VI0/VF0 could be written. VILWR/VISWR addressed `vi << 2` and ignored the field. A 5-bit VI index could write past `ctx->vi[16]`. | PCSX2 `VUops.cpp` `_vuLQI`, `_vuSQI`, `_vuLQD`, `_vuSQD`, `_vuILWR`, `_vuISWR` |
 | 0006 | `fioOpen` and the rest of the VFS joined PS2 paths with exact case. On Linux/Android, `cdrom0:\IOP\MODULES\DRIVE.DAT;1` missed a disc copy named `iop/modules/drive.dat`, and Outbreak's boot retried forever. Now an exact-case miss falls back to matching each component ignoring case; Windows is unchanged. Found by booting Outbreak. | PS2 paths are case-insensitive (ISO 9660) |
+| 0007 | `sceSifLoadModuleBuffer`/`LoadStartModuleBuffer` read the module from **EE** RAM, but a PS2 game passes an **IOP** address (Outbreak DMAs DRIVE.DAT to IOP 0x120000 first), so every load failed. IOP RAM is now read first, falling back to EE RAM. Buffer loads are recorded like path loads and named after their `.iopmod` name. `_sceSifLoadModule`/`_sceSifLoadModuleBuffer` write the start result to `*$a3`; `sceSifSearchModuleByName` added. | the game's own wrappers (disassembled) and the decomp's `sys.c`/`iop.c` |
+| 0008 | The IOP interpreter had no `thmsgbx` (message boxes). Outbreak's sound driver creates one at start-up, so it never registered its RPC server and the game retried `SdrBind` forever. Ordinals 4-9, 11, 12; FIFO/priority order; error codes as on hardware. | ps2sdk `thmsgbx.h`/`thmsgbx.c`, `kerr.h` (behaviour only, reimplemented) |
+| 0009 | `sceCdLayerSearchFile` (dual-layer DVD search) had no handler, so CRI's DVD file system waited forever. Layer 0 = `sceCdSearchFile`; layer 1 = not found (a folder of files has one layer). | — |
 
 ## How they were tested (2026-10-21, Ubuntu 24.04)
 
-- `ps2x_tests`: **450 / 450 pass** with all six patches, with GCC 13.3 and with Clang 18.1,
+- `ps2x_tests`: **450 / 450 pass** with patches 0001-0006, with GCC 13.3 and with Clang 18.1,
   Release builds (445 before 0002-0005, which add 4 tests; 0006 adds 1). 0006's test fails
   without the fix (449/450, GCC).
+- With 0007-0009: **452 / 452** `ps2x_tests` and the 4 IOP test suites pass (GCC 13.3; Clang
+  not re-run for these three). Each of 0007, 0008, 0009 was built and tested on its own. The
+  0007 IOP-RAM test fails without the fix. The 0007 runtime tests and 0008/0009 tests cover
+  functions that didn't exist before.
 - The 4 new tests were run against the **old** code: exactly those 4 fail and the other 445 pass.
   So each test catches the bug it is for.
 - Patches 0002-0005 were checked one at a time: each commit builds and passes (446, 447, 448,

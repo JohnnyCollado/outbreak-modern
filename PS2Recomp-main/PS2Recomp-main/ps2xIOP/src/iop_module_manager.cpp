@@ -103,6 +103,14 @@ namespace ps2x::iop::detail
         return result;
     }
 
+    int32_t IopModuleManager::findHle(std::string_view name) const
+    {
+        const auto found = m_hleIdsByKey.find(ps2PathLeafKey(name));
+        if (found == m_hleIdsByKey.end() || !m_records.contains(found->second))
+            return -1;
+        return found->second;
+    }
+
     void IopModuleManager::observePhysicalLoad(int32_t moduleId, std::string_view path)
     {
         if (moduleId <= 0)

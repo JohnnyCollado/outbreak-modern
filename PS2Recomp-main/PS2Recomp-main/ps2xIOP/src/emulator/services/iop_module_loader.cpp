@@ -322,8 +322,22 @@ namespace ps2x::iop::detail
 
     bool IopModuleLoader::readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes)
     {
+        return readElf([&](uint32_t address, void *destination, size_t size)
+                       { return host.readGuest(address, destination, size); },
+                       guestAddress, bytes);
+    }
+
+    bool IopModuleLoader::readElfFromIop(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes)
+    {
+        return readElf([&](uint32_t address, void *destination, size_t size)
+                       { return memory.readRam(address, destination, size); },
+                       iopAddress, bytes);
+    }
+
+    bool IopModuleLoader::readElf(const std::function<bool(uint32_t, void *, size_t)> &read, uint32_t guestAddress, std::vector<uint8_t> &bytes)
+    {
         Elf32Ehdr header{};
-        if (!host.readGuest(guestAddress, &header, sizeof(header)) || !validElfHeader(header))
+        if (!read(guestAddress, &header, sizeof(header)) || !validElfHeader(header))
             return false;
 
         uint64_t required = sizeof(header);
@@ -334,7 +348,7 @@ namespace ps2x::iop::detail
             return false; // Should we log an error here? TODO check later
 
         bytes.resize(static_cast<size_t>(required));
-        if (!host.readGuest(guestAddress, bytes.data(), bytes.size()))
+        if (!read(guestAddress, bytes.data(), bytes.size()))
             return false;
 
         if (header.shnum != 0u && header.shentsize >= sizeof(Elf32Shdr))
@@ -364,7 +378,42 @@ namespace ps2x::iop::detail
             return false;
 
         bytes.resize(static_cast<size_t>(required));
-        return host.readGuest(guestAddress, bytes.data(), bytes.size());
+        return read(guestAddress, bytes.data(), bytes.size());
+    }
+
+    std::string IopModuleLoader::moduleName(std::span<const uint8_t> image)
+    {
+        // .iopmod: moduleinfo, entry, gp, text size, data size, bss size (u32 each), version (u16), name.
+        constexpr uint32_t kNameOffset = 26u;
+        if (image.size() < 0x34u || std::memcmp(image.data(), "\x7f" "ELF", 4) != 0)
+            return {};
+        uint32_t phoff = 0u;
+        uint16_t phentsize = 0u;
+        uint16_t phnum = 0u;
+        std::memcpy(&phoff, image.data() + 0x1Cu, sizeof(phoff));
+        std::memcpy(&phentsize, image.data() + 0x2Au, sizeof(phentsize));
+        std::memcpy(&phnum, image.data() + 0x2Cu, sizeof(phnum));
+        for (uint32_t i = 0; i < phnum; ++i)
+        {
+            const uint64_t header = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(i) * phentsize;
+            if (phentsize < 20u || header + 20u > image.size())
+                return {};
+            uint32_t type = 0u;
+            uint32_t offset = 0u;
+            uint32_t filesz = 0u;
+            std::memcpy(&type, image.data() + header, sizeof(type));
+            std::memcpy(&offset, image.data() + header + 4u, sizeof(offset));
+            std::memcpy(&filesz, image.data() + header + 16u, sizeof(filesz));
+            if (type != PT_SCE_IOPMOD || filesz <= kNameOffset || !checkedRange(image.size(), offset, filesz))
+                continue;
+            const char *name = reinterpret_cast<const char *>(image.data() + offset + kNameOffset);
+            const size_t limit = filesz - kNameOffset;
+            size_t length = 0u;
+            while (length < limit && name[length] != '\0')
+                ++length;
+            return std::string(name, length);
+        }
+        return {};
     }
 
     IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)

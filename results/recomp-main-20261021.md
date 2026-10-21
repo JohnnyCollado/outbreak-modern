@@ -95,3 +95,34 @@ wrong.
 
 **This is a design decision, not a bug fix:** how IOP modules are handled (see the summary to you
 in the session, and design Decision 4 "IOP: never emulated").
+
+## 6. Option C: IOP modules (same day)
+
+You chose option C (HLE for Sony's standard modules, real code for the sound/ADX modules).
+Measured first: with IOP memory read correctly, **all 11 DRIVE.DAT modules load and start as
+real code on PS2Recomp's IOP interpreter**; no HLE fallback was needed at load time. So C's HLE
+side is now an optimisation to measure on the Odin, not a blocker.
+
+DRIVE.DAT (directory: count, then (offset, size) pairs), by `.iopmod` name: sio2man, sio2d,
+Dbc_Manager, ds2u_s1, mc2_s1, USB_driver, Sound_Device_Library (libsd),
+SPU2_Synthesizer_Module (modhsyn), Midi_Message_Input_Module (modmsin), CRI_ADX_Driver, and an
+unnamed module importing libsd/modhsyn/modmsin/thmsgbx: the game's sound driver (the EE
+prints "Connected to TamsoftSoundDriver", the IOP side "SoundDriver ... (C)CAPCOM"). The game
+loads them in its own order, not DRIVE.DAT's (the sound driver is IOP module id 10).
+
+Walls found and fixed in PS2Recomp, in order (patches 0007-0009, see `upstream/ps2recomp/`):
+
+1. `sceSifLoadStartModuleBuffer` failed for every module: PS2Recomp read the buffer from EE RAM;
+   the game passes IOP addresses. → 0007.
+2. `sceSifSearchModuleByName` ("dev9") had no handler and `_sceSifLoadModule` didn't return the
+   start result the HDD check tests. → 0007. Now: DEV9.IRX starts with 1 ("unknown dev9
+   hardware"), the game skips the HDD, loads USBD.IRX and USBKB.IRX.
+3. The sound driver's `thmsgbx:4` (CreateMbx) was unhandled, so it never registered RPC SID 0;
+   the EE retried `SdrBind` 18,000 times in 70 s (counted with gdb; the alarm/wake-up path works).
+   → 0008. Now: "Connected to TamsoftSoundDriver: Version 2.0".
+4. `sceCdLayerSearchFile` had no handler. → 0009.
+
+**Where it stops now:** "Setup DVD file system." then CRI's file system searches the disc for
+`\0FLIST.DIR;1` and **`\NETBIO00.DAT;1`**, which aren't in the test folder. The decomp
+(`fsinit.c`) names the game's three data archives: NETBIO00.DAT (rooms), NETBIO01.DAT (sound),
+NETBIO02.DAT (movies). The next run needs them.

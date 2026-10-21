@@ -73,6 +73,7 @@ namespace ps2x::iop::detail
             int id = 0;
             std::string path;
             std::string name;
+            std::string iopmodName; // the name in the IRX's .iopmod header, as SearchModuleByName sees it
             uint32_t base = 0;
             uint32_t size = 0;
             uint32_t entry = 0;
@@ -281,6 +282,12 @@ namespace ps2x::iop::detail
             if (iequals(call.library, "thevent"))
             {
                 return kernel.dispatchEventImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "thmsgbx"))
+            {
+                return kernel.dispatchMessageBoxImport(call.ordinal, cpu)
                            ? ImportDisposition::Handled
                            : ImportDisposition::Missing;
             }
@@ -609,6 +616,7 @@ namespace ps2x::iop::detail
             module.path = std::move(path);
             const size_t slash = module.path.find_last_of("/\\:");
             module.name = slash == std::string::npos ? module.path : module.path.substr(slash + 1u);
+            module.iopmodName = IopModuleLoader::moduleName(image);
             module.base = loaded.base;
             module.size = loaded.size;
             module.entry = loaded.entry;
@@ -654,11 +662,18 @@ namespace ps2x::iop::detail
 
         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
         {
+            // On a PS2 the buffer is in IOP RAM (the game DMAs the module there first). Callers that
+            // pass an EE address still work: with no ELF at that IOP address, read EE memory.
             std::vector<uint8_t> image;
-            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            if (!IopModuleLoader::readElfFromIop(memory, guestAddress, image) &&
+                !IopModuleLoader::readElfFromGuest(host, guestAddress, image))
                 return {true, -1, -1};
+            // "buffer@0x...:<name>": loadImage names the module after the last ':'.
             std::ostringstream tag;
             tag << "buffer@0x" << std::hex << guestAddress;
+            const std::string name = IopModuleLoader::moduleName(image);
+            if (!name.empty())
+                tag << ':' << name;
             return loadImage(tag.str(), image, arguments, argumentSize);
         }
 
@@ -810,6 +825,22 @@ namespace ps2x::iop::detail
     uint64_t IopEmulator::instructions() const noexcept
     {
         return m_impl->totalInstructions;
+    }
+
+    int32_t IopEmulator::findModuleByName(std::string_view name) const
+    {
+        for (const auto &[id, module] : m_impl->modules)
+        {
+            if (!module.iopmodName.empty() && module.iopmodName == name)
+                return id;
+        }
+        return -1;
+    }
+
+    std::string IopEmulator::moduleName(int32_t moduleId) const
+    {
+        const auto found = m_impl->modules.find(moduleId);
+        return found == m_impl->modules.end() ? std::string() : found->second.name;
     }
 
     uint32_t IopEmulator::loadedModuleCount() const noexcept
