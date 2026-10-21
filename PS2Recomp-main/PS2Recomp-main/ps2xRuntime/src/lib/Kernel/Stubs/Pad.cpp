@@ -843,6 +843,35 @@ namespace ps2_stubs
         return snapshot;
     }
 
+    bool padOpenPortForPad2(int port, int slot)
+    {
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(port, slot);
+        if (!portState)
+        {
+            return false;
+        }
+        *portState = PadPortState{};
+        portState->open = true;
+        portState->analogMode = true;
+        portState->pressureEnabled = true;
+        return true;
+    }
+
+    void padClosePortForPad2(int port, int slot)
+    {
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        if (PadPortState *portState = lookupPadPortStateLocked(port, slot))
+        {
+            *portState = PadPortState{};
+        }
+    }
+
+    bool padReadPortForPad2(int port, int slot, PS2Runtime *runtime, uint8_t *outData, uint32_t dataAddr)
+    {
+        return readPadPortData(port, slot, runtime, outData, dataAddr);
+    }
+
     void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry)
     {
         std::lock_guard<std::mutex> lock(g_padOverrideMutex);

@@ -497,6 +497,15 @@
     X(scePadSetVrefParam)                     \
     X(scePadSetWarningLevel)                  \
     X(scePadStateIntToStr)                    \
+    X(scePad2CreateSocket)                    \
+    X(scePad2DeleteSocket)                    \
+    X(scePad2End)                             \
+    X(scePad2GetButtonProfile)                \
+    X(scePad2GetState)                        \
+    X(scePad2Init)                            \
+    X(scePad2Read)                            \
+    X(sceDbcEnd)                              \
+    X(sceDbcInit)                             \
     X(scePrintf)                              \
     X(sceRead)                                \
     X(sceResetttyinit)                        \

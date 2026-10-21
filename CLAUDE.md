@@ -38,7 +38,8 @@ for the full story; this file is the hand-off.
 | Plans | `docs/native-port-design.md`, `docs/milestones/` (M0-M7, `m0-decision.md` = we build on PS2Recomp) |
 | Measurements | `results/recomp-main-20261021.md` (boot progress), `results/q-scan-20261021.md` |
 | Reports | `reports/` |
-| PS2Recomp patches | `upstream/ps2recomp/0001-0009` + README (what, why, how tested) |
+| PS2Recomp patches | `upstream/ps2recomp/0001-0016` + README (what, why, how tested) |
+| Reference emulator | `ps2_emu/` (git-ignored): PCSX2 2.9.134 portable with Johnny's BIOS and ISO; its debugger is the ground truth for kernel/IOP questions (`results/sound-bank-wall-20261021.md`) |
 | Tools | `tools/q_scan.py` (+test), `tools/splat_functions.py` (+test), `tools/recomp_cycle.sh` |
 | Game files Johnny provided | In `main`'s **history only**, commit `e012448` (`git archive e012448 game_files \| tar -x -C <scratch>`): `SLPM_654.28`, `SYSTEM.CNF`, `prog/*.bin` (8 overlays), `iop/modules/` (33 files). If that history gets rewritten, Johnny has to provide them again (Dropbox/Drive). SLPM-65428 v1.04 **with the English patch v2.1**: 4 binaries match the decomp's `english.sha1`, 5 match `build.sha1`. |
 
@@ -49,18 +50,47 @@ for the full story; this file is the hand-off.
   `DRIVE.DAT` IOP modules running as real code on PS2Recomp's IOP interpreter (option C: HLE
   for Sony modules is now an optimisation to measure, not a blocker), HDD check, USB modules,
   **sound driver connected**, CRI DVD file system set up.
-- **Stops at:** the game searches the disc for `\0FLIST.DIR;1` and `\NETBIO00.DAT;1`.
-- **Immediate next step:** Johnny is sending `NETBIO00.DAT` (rooms), `NETBIO01.DAT` (sound),
-  `NETBIO02.DAT` (movies) and `0FLIST.DIR` if it exists, one at a time, as Dropbox or Google
-  Drive links (Dropbox max 2 GB each). Download with curl (`?dl=1` for Dropbox; Drive large
-  files need the confirm step), check the size he gives, put them in the run folder's root,
-  rerun `tools/recomp_cycle.sh`. Then follow the next wall the same way (see "Method").
-- **After that:** overlay support in PS2Recomp (none exists; it's the blocker for menus and
-  gameplay; the decomp's splat output for all 8 overlays is available once re-generated).
-- Still unknown: performance on the Odin (nothing measured), whether Johnny has a Windows PC,
-  this repo's licence, Clang on patches 0007-0009, VU0 ÷0 exact value.
+- Since 2026-10-21 (second session, on Johnny's Windows PC; `reports/2026-10-21-windows-port-bank-wall.md`):
+  the archives and every root file of the disc are local (`game_files/`, git-ignored), and with
+  patches 0010-0016 the game loads its archives, fonts and first sound bank, draws its save-data
+  screens, reads the controller (libpad2) and answers the memory-card prompt (Left, then
+  **Circle**: Japanese confirm layout; game bits Up/Down/Left/Right = 1/2/4/8, Cross 0x10,
+  Circle 0x20).
+- **Stops at:** `[guest-branch:missing-target] JALR target=0x540080`: the game loaded
+  `PROG/DEMO.BIN` (MWo3 overlay, id 2, 0x17BC0 bytes of code at 0x540000) with its own loader
+  (`overlay.c`) and called its entry. PS2Recomp's dense function table covers the main ELF only.
+  The main menu lives in DEMO (`demo/title.c`).
+- **Next step: overlay support** (`docs/milestones/m4-overlays-3d.md`). Facts for the design:
+  8 overlays, headers parsed from the files: SUBMAIN id 1 @0x340000; DEMO 2, GAME 3, NETWK 4
+  @0x540000; NETDNAS 5, NETHTTP 6 @0x6C0000; SINGLE 8, NETAQ 9 @0x820000. The MWo3 header (magic,
+  id, load, sizes, name) is part of the image in RAM, so which overlay is resident can be read
+  from guest memory. The recompiler only reads ELFs (`elf_parser.h`, ELFIO) and names functions
+  `func_<ADDR>_0x<addr>`, so overlays sharing an address need a per-module prefix and their
+  own table (`function_table_emitter.cpp` emits one global dense table). Splat function counts:
+  DEMO 172, GAME 4414, NETWK 2381, SUBMAIN 190, SINGLE 328, NETDNAS 30, NETHTTP 1549, NETAQ 68.
+  Cross-module calls (overlay → main ELF) already go through `PS2Runtime::lookupFunction`.
+- Garbled font glyphs on the save-data screens: a later visual wall, not investigated.
+- Still unknown: performance on the Odin (nothing measured), this repo's licence, Clang on
+  patches 0007-0016, VU0 ÷0 exact value, whether `patch.c` records ever hit overlay code.
 
-## Rebuilding the working state (the scratch container is wiped between sessions)
+## Rebuilding the working state
+
+### On Johnny's Windows PC (what exists since 2026-10-21; nothing is wiped between sessions)
+
+Everything lives in `C:\ob` (Johnny's OK; MSVC hits the 260-character path limit in the
+scratchpad): `src` = working copy of the vendored PS2Recomp (**holds uncommitted temporary
+traces**: IOP RPC/thread/import traces, `[pad2:*]`, frame dump `PS2X_FRAME_DUMP_DIR`, auto-press
+`PS2X_AUTO_PRESS`; the clone `C:\ob\up` and the repo's vendored copy are clean), `up` = clone of
+upstream `eb8688b` + patches (where each patch is committed and `git format-patch`'d from), `t` =
+MSVC tools+tests build (`build-tools.bat`, `tests.bat` → `ps2x_tests`), `r` = runner build
+(`build-runner.bat`), `g` = MSYS2 GCC build for gdb Python probes (`probe*.py`), `work` =
+analyzer/recompiler input and output, `logs`, `frames`, `decomp-src` = decomp C files fetched
+from GitHub. Cycle: `recomp-cycle.sh` (analyzer → recompiler → copy into `src/runner`), then
+`boot-frames-N.ps1` (runner build + 200 s boot with frame dumps; no window access needed: read
+`C:\ob\frames\frame-*.png`). The decomp clone and its splat output are in the session
+scratchpad (`decomp/`, `WORK/`); re-clone if gone.
+
+### In a Linux container (the original recipe; the container is wiped between sessions)
 
 Keep all of this **outside the repo** (the session's scratchpad dir). Steps, in order:
 

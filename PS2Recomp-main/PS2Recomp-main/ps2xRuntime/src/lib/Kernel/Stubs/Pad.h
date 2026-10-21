@@ -78,4 +78,10 @@ namespace ps2_stubs
     PadDebugSnapshot getPadDebugSnapshot();
     void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
     void clearPadOverrideState();
+
+    // libpad2 sockets (Pad2.cpp) sit on top of libpad's ports: opened in
+    // DualShock 2 mode with pressures, read with the same host input.
+    bool padOpenPortForPad2(int port, int slot);
+    void padClosePortForPad2(int port, int slot);
+    bool padReadPortForPad2(int port, int slot, PS2Runtime *runtime, uint8_t *outData, uint32_t dataAddr);
 }

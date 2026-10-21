@@ -2,7 +2,9 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "Stubs/Pad.h"
+#include "ps2_runtime_calls.h"
 
+#include <cstring>
 #include <vector>
 #include <cstdint>
 #include <string>
@@ -528,6 +530,75 @@ void register_pad_input_tests()
             ps2_stubs::scePadReqIntToStr(rdram.data(), &ctx, nullptr);
             const char *reqStr = reinterpret_cast<const char *>(rdram.data() + kPadDataAddr + 64);
             t.IsTrue(std::string(reqStr).find("COMPLETE") != std::string::npos, "req string should include COMPLETE");
+        });
+
+        // libpad2: Outbreak (SLPM-65428) opens one socket per port with
+        // scePad2CreateSocket, waits for scePad2GetState == 1, reads the
+        // button profile once and then scePad2Read every frame; a profile with
+        // bits in 0xFFF00000 makes it treat the pad as a DualShock 2 and read
+        // the 12 pressure bytes after the sticks.
+        tc.Run("libpad2: sockets open, connect, and read DualShock 2 data from the host pad", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            constexpr uint32_t kParamAddr = kPadDataAddr + 0x100u;
+            constexpr uint32_t kProfileAddr = kPadDataAddr + 0x140u;
+
+            t.IsTrue(ps2_runtime_calls::isStubName("scePad2Read") && ps2_runtime_calls::isStubName("sceDbcInit"),
+                     "the recompiler must route scePad2*/sceDbc* to the runtime");
+
+            ps2_stubs::sceDbcInit(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), 1u, "sceDbcInit returns 1");
+            setRegU32(ctx, 4, 0u);
+            ps2_stubs::scePad2Init(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), 1u, "scePad2Init returns 1");
+
+            // scePad2SocketParam { number, port, slot, flag }
+            uint32_t param[4] = {0u, 1u, 0u, 2u};
+            std::memcpy(rdram.data() + kParamAddr, param, sizeof(param));
+            setRegU32(ctx, 4, kParamAddr);
+            setRegU32(ctx, 5, kPadDataAddr + 0x400u);
+            ps2_stubs::scePad2CreateSocket(rdram.data(), &ctx, nullptr);
+            const int32_t socket = static_cast<int32_t>(getRegU32(&ctx, 2));
+            t.IsTrue(socket >= 0, "scePad2CreateSocket returns a socket");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::scePad2GetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), 1u, "scePad2GetState is 1 (connected)");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            setRegU32(ctx, 5, kProfileAddr);
+            ps2_stubs::scePad2GetButtonProfile(rdram.data(), &ctx, nullptr);
+            t.IsTrue(static_cast<int32_t>(getRegU32(&ctx, 2)) >= 0, "scePad2GetButtonProfile succeeds");
+            uint32_t profile = 0u;
+            std::memcpy(&profile, rdram.data() + kProfileAddr, sizeof(profile));
+            t.IsTrue((profile & 0xFFF00000u) != 0u, "the profile reports a DualShock 2");
+
+            const uint16_t buttons = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross & ~kPadBtnLeft);
+            ps2_stubs::setPadOverrideState(buttons, 0x20, 0x30, 0x40, 0x50);
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            setRegU32(ctx, 5, kPadDataAddr);
+            ps2_stubs::scePad2Read(rdram.data(), &ctx, nullptr);
+            t.IsTrue(static_cast<int32_t>(getRegU32(&ctx, 2)) >= 0, "scePad2Read succeeds");
+            const uint8_t *d = rdram.data() + kPadDataAddr;
+            const uint16_t guestButtons = static_cast<uint16_t>((d[0] << 8) | d[1]);
+            t.Equals(guestButtons, static_cast<uint16_t>((buttons & 0xFFu) << 8 | (buttons >> 8)),
+                     "buttons are the libpad bytes in order (SELECT..LEFT, then L2..SQUARE), active-low");
+            t.Equals(d[2], static_cast<uint8_t>(0x40), "d[2] is the right stick x");
+            t.Equals(d[3], static_cast<uint8_t>(0x50), "d[3] is the right stick y");
+            t.Equals(d[4], static_cast<uint8_t>(0x20), "d[4] is the left stick x");
+            t.Equals(d[5], static_cast<uint8_t>(0x30), "d[5] is the left stick y");
+            t.Equals(d[6 + 1], static_cast<uint8_t>(0xFF), "pressure byte 1 (left) is full when LEFT is held");
+            t.Equals(d[6 + 6], static_cast<uint8_t>(0xFF), "pressure byte 6 (cross) is full when CROSS is held");
+            t.Equals(d[6 + 5], static_cast<uint8_t>(0x00), "pressure byte 5 (circle) is zero when released");
+            ps2_stubs::clearPadOverrideState();
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::scePad2DeleteSocket(rdram.data(), &ctx, nullptr);
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::scePad2GetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), 0u, "a deleted socket is disconnected");
+            ps2_stubs::scePad2End(rdram.data(), &ctx, nullptr);
         });
     });
 }
