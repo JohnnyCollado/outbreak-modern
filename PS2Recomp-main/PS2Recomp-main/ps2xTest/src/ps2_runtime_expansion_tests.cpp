@@ -381,6 +381,44 @@ void register_ps2_runtime_expansion_tests()
                      "missing exact final-function target should request runtime stop");
         });
 
+        // Overlays: several separately recompiled images share one load address
+        // (Outbreak puts DEMO, GAME and NETWK at 0x540000). A call there must
+        // reach the code of whichever image the game copied into RAM.
+        tc.Run("guest modules resolve by the image resident in guest RAM", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            runtime.setMissingFunctionPolicy(PS2Runtime::MissingFunctionPolicy::Stop);
+
+            constexpr uint32_t kBase = 0x540000u;
+            static const uint8_t kImageA[8] = {'M', 'W', 'o', '3', 2u, 0u, 0u, 0u};
+            static const uint8_t kImageB[8] = {'M', 'W', 'o', '3', 3u, 0u, 0u, 0u};
+            static PS2Runtime::RecompiledFunction tableA[4] = {};
+            static PS2Runtime::RecompiledFunction tableB[4] = {};
+            tableA[2] = &testResumeOwnerFallbackHandler;
+            tableB[2] = &testResumeNextFunctionHandler;
+            ps2RegisterGuestModule({"test_overlay_a", kBase, kBase + 16u, tableA, kBase, kImageA, sizeof(kImageA)});
+            ps2RegisterGuestModule({"test_overlay_b", kBase, kBase + 16u, tableB, kBase, kImageB, sizeof(kImageB)});
+
+            uint8_t *ram = runtime.memory().getRDRAM();
+            t.IsFalse(runtime.hasFunction(kBase + 8u), "no image in RAM: no function");
+
+            std::memcpy(ram + kBase, kImageA, sizeof(kImageA));
+            t.IsTrue(runtime.hasFunction(kBase + 8u), "image A in RAM: its function exists");
+            R5900Context ctx{};
+            runtime.lookupFunction(kBase + 8u)(ram, &ctx, &runtime);
+            t.Equals(::getRegU32(&ctx, 2), 0x00ABC123u, "image A in RAM: A's code runs");
+            t.IsFalse(runtime.hasFunction(kBase + 4u), "an empty slot of the resident image is no function");
+
+            std::memcpy(ram + kBase, kImageB, sizeof(kImageB));
+            runtime.lookupFunction(kBase + 8u)(ram, &ctx, &runtime);
+            t.Equals(::getRegU32(&ctx, 2), 0x00555555u, "image B copied over A: B's code runs");
+
+            ps2UnregisterGuestModule("test_overlay_a");
+            ps2UnregisterGuestModule("test_overlay_b");
+            t.IsFalse(runtime.hasFunction(kBase + 8u), "unregistered modules are gone");
+        });
+
         tc.Run("dispatchGuestBranch call normalizes unchanged callee PC to fallthrough", [](TestCase &t)
         {
             PS2Runtime runtime;

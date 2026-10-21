@@ -55,6 +55,10 @@ namespace ps2recomp
         void setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner);
         void setEmitInstructionComments(bool emitInstructionComments);
         void setReporter(RecompilerReporter *reporter);
+        void setModuleName(const std::string &moduleName);
+        // "ps2_recompiled_functions.h", or "<module>_recompiled_functions.h" for a module.
+        std::string functionsHeaderName() const;
+        std::string stubsHeaderName() const;
 
         AnalysisResult collectInternalBranchTargets(const Function &function,
                                                   const std::vector<Instruction> &instructions,
@@ -71,6 +75,7 @@ namespace ps2recomp
         bool m_emitInstructionComments = true;
         RecompilerReporter *m_reporter = nullptr;
         std::string m_currentFunctionName;
+        std::string m_moduleName;
 
         std::string translateInstruction(const Instruction &inst);
         std::string translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint);

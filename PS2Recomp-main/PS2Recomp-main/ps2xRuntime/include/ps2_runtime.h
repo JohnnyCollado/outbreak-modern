@@ -552,4 +552,23 @@ extern const uint32_t g_ps2RecompiledFunctionTableEnd;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
 
+// A separately recompiled guest module, such as an overlay the game copies
+// into RAM at run time. Several modules may share an address range; a module's
+// functions are used only while its image is in guest RAM, which is checked by
+// comparing `fingerprint` with the bytes at `fingerprintAddress`.
+// ps2xRecomp generates one per `module` config and registers it at start-up.
+struct PS2GuestModule
+{
+    const char *name;
+    uint32_t base;                          // address of table[0]
+    uint32_t end;                           // one past the last address in the table
+    PS2Runtime::RecompiledFunction *table;  // (end - base) / 4 slots
+    uint32_t fingerprintAddress;
+    const uint8_t *fingerprint;
+    uint32_t fingerprintSize;
+};
+
+void ps2RegisterGuestModule(const PS2GuestModule &module);
+void ps2UnregisterGuestModule(const char *name);
+
 #endif // PS2_RUNTIME_H

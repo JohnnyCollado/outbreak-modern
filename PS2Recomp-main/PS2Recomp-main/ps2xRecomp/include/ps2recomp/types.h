@@ -178,6 +178,10 @@ namespace ps2recomp
         std::string inputPath;
         std::string outputPath;
         std::string ghidraMapPath;
+        // Non-empty: the input is a guest module (e.g. an overlay) loaded at run
+        // time; generated names and files get this prefix and it registers its
+        // own function table with the runtime (PS2GuestModule).
+        std::string moduleName;
         bool singleFileOutput = false;
         bool lowMemoryMode = false;
         uint32_t outputWorkerThreads = 0;

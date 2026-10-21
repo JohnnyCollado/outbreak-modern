@@ -147,10 +147,56 @@ namespace ps2recomp
 
         std::stringstream ss;
         ss << "#include \"ps2_runtime.h\"\n";
-        ss << "#include <ps2_recompiled_functions.h>\n";
+        ss << "#include <" << cg.functionsHeaderName() << ">\n";
         ss << "#include \"ps2_stubs.h\"\n";
-        ss << "#include <ps2_recompiled_stubs.h>\n";
+        ss << "#include <" << cg.stubsHeaderName() << ">\n";
         ss << "#include \"ps2_syscalls.h\"\n\n";
+
+        if (!cg.m_moduleName.empty())
+        {
+            // A module (overlay) gets its own table, registered with the runtime
+            // together with the first bytes of its image: the runtime uses this
+            // table only while those bytes are in guest RAM.
+            const Section *imageStart = nullptr;
+            for (const Section &section : cg.m_sections)
+            {
+                if ((section.isCode || section.isData) && !section.isBSS && section.data && section.size > 0u &&
+                    (!imageStart || section.address < imageStart->address))
+                {
+                    imageStart = &section;
+                }
+            }
+            if (!imageStart)
+            {
+                throw std::runtime_error("Module " + cg.m_moduleName + " has no loaded bytes to fingerprint.");
+            }
+            const uint32_t fingerprintSize = std::min<uint32_t>(imageStart->size, 64u);
+
+            ss << "namespace {\n";
+            ss << "PS2Runtime::RecompiledFunction g_moduleTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n";
+            ss << "const uint8_t g_moduleFingerprint[" << fingerprintSize << "u] = {";
+            for (uint32_t i = 0; i < fingerprintSize; ++i)
+            {
+                ss << (i == 0u ? "" : ", ") << "0x" << std::hex << static_cast<uint32_t>(imageStart->data[i]) << std::dec;
+            }
+            ss << "};\n\n";
+            ss << "struct GeneratedGuestModuleRegistration {\n";
+            ss << "    GeneratedGuestModuleRegistration() {\n";
+            for (const auto &[address, name] : entries)
+            {
+                const uint32_t slot = (address - tableBase) >> 2;
+                ss << "        g_moduleTable[" << std::dec << slot << "] = " << name
+                   << "; // 0x" << std::hex << address << std::dec << "\n";
+            }
+            ss << "        ps2RegisterGuestModule({\"" << cg.m_moduleName << "\", 0x" << std::hex << tableBase
+               << "u, 0x" << tableEnd << "u, g_moduleTable, 0x" << imageStart->address
+               << "u, g_moduleFingerprint, " << std::dec << fingerprintSize << "u});\n";
+            ss << "    }\n";
+            ss << "};\n";
+            ss << "const GeneratedGuestModuleRegistration g_generatedGuestModuleRegistration;\n";
+            ss << "}\n";
+            return ss.str();
+        }
 
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableBase = 0x" << std::hex << tableBase << "u;\n";
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x" << std::hex << tableEnd << "u;\n";

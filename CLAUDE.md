@@ -38,9 +38,9 @@ for the full story; this file is the hand-off.
 | Plans | `docs/native-port-design.md`, `docs/milestones/` (M0-M7, `m0-decision.md` = we build on PS2Recomp) |
 | Measurements | `results/recomp-main-20261021.md` (boot progress), `results/q-scan-20261021.md` |
 | Reports | `reports/` |
-| PS2Recomp patches | `upstream/ps2recomp/0001-0016` + README (what, why, how tested) |
+| PS2Recomp patches | `upstream/ps2recomp/0001-0018` + README (what, why, how tested) |
 | Reference emulator | `ps2_emu/` (git-ignored): PCSX2 2.9.134 portable with Johnny's BIOS and ISO; its debugger is the ground truth for kernel/IOP questions (`results/sound-bank-wall-20261021.md`) |
-| Tools | `tools/q_scan.py` (+test), `tools/splat_functions.py` (+test), `tools/recomp_cycle.sh` |
+| Tools | `tools/q_scan.py` (+test), `tools/splat_functions.py` (+test), `tools/mwo3_to_elf.py` (+test), `tools/recomp_cycle.sh` |
 | Game files Johnny provided | In `main`'s **history only**, commit `e012448` (`git archive e012448 game_files \| tar -x -C <scratch>`): `SLPM_654.28`, `SYSTEM.CNF`, `prog/*.bin` (8 overlays), `iop/modules/` (33 files). If that history gets rewritten, Johnny has to provide them again (Dropbox/Drive). SLPM-65428 v1.04 **with the English patch v2.1**: 4 binaries match the decomp's `english.sha1`, 5 match `build.sha1`. |
 
 ## State of the port (what works, what's next)
@@ -56,22 +56,25 @@ for the full story; this file is the hand-off.
   screens, reads the controller (libpad2) and answers the memory-card prompt (Left, then
   **Circle**: Japanese confirm layout; game bits Up/Down/Left/Right = 1/2/4/8, Cross 0x10,
   Circle 0x20).
-- **Stops at:** `[guest-branch:missing-target] JALR target=0x540080`: the game loaded
-  `PROG/DEMO.BIN` (MWo3 overlay, id 2, 0x17BC0 bytes of code at 0x540000) with its own loader
-  (`overlay.c`) and called its entry. PS2Recomp's dense function table covers the main ELF only.
-  The main menu lives in DEMO (`demo/title.c`).
-- **Next step: overlay support** (`docs/milestones/m4-overlays-3d.md`). Facts for the design:
-  8 overlays, headers parsed from the files: SUBMAIN id 1 @0x340000; DEMO 2, GAME 3, NETWK 4
-  @0x540000; NETDNAS 5, NETHTTP 6 @0x6C0000; SINGLE 8, NETAQ 9 @0x820000. The MWo3 header (magic,
-  id, load, sizes, name) is part of the image in RAM, so which overlay is resident can be read
-  from guest memory. The recompiler only reads ELFs (`elf_parser.h`, ELFIO) and names functions
-  `func_<ADDR>_0x<addr>`, so overlays sharing an address need a per-module prefix and their
-  own table (`function_table_emitter.cpp` emits one global dense table). Splat function counts:
-  DEMO 172, GAME 4414, NETWK 2381, SUBMAIN 190, SINGLE 328, NETDNAS 30, NETHTTP 1549, NETAQ 68.
-  Cross-module calls (overlay → main ELF) already go through `PS2Runtime::lookupFunction`.
-- Garbled font glyphs on the save-data screens: a later visual wall, not investigated.
+- **Overlays work** (patches 0017-0018 + `tools/mwo3_to_elf.py`): each `PROG/*.BIN` is wrapped as
+  an ELF and recompiled with `module = "<name>"`; the runtime picks the module whose MWo3 header
+  is in RAM. Built so far: DEMO, SUBMAIN (both needed for the menus) and NETDNAS (partial, see
+  below). Cycle on Windows: `C:\ob\recomp-cycle.sh` (main ELF) then `C:\ob\ovl-cycle.sh demo
+  submain netdnas` (config template `C:\ob\ovl\demo.toml`), then a `boot-frames-N.ps1`.
+- **Reached (2026-10-21):** ACCESS/CAPCOM screens → title → **main menu** → Scenario Select →
+  character select, with no missing function in 300 s, driven blind by the temporary auto-press
+  (Left, Circle, Start on a cycle; `PS2X_AUTO_PRESS`).
+- **Next wall: rendering.** Every screen draws wrongly (title background missing, glyphs
+  misshapen, ACCESS screen fringed, character-select images corrupted). Causes unknown. Compare
+  against PCSX2 screenshots of the same screens (`ps2_emu/`) and find the GS feature behind each.
+- **Then:** GAME (4,414 functions) and the rest of the overlays as modules for gameplay. NETDNAS
+  needs `splat_functions.py` to read the decomp's bare `nonmatching <name>` + `alabel` markers
+  (the network library was never disassembled; 1,305 starts, no sizes) if offline play ever
+  calls past its first 30 functions. Overlay headers: SUBMAIN id 1 @0x340000; DEMO 2, GAME 3,
+  NETWK 4 @0x540000; NETDNAS 5, NETHTTP 6 @0x6C0000; SINGLE 8, NETAQ 9 @0x820000.
 - Still unknown: performance on the Odin (nothing measured), this repo's licence, Clang on
-  patches 0007-0016, VU0 ÷0 exact value, whether `patch.c` records ever hit overlay code.
+  patches 0007-0018, VU0 ÷0 exact value, whether `patch.c` records ever hit overlay code (the
+  module code is the disc's; a patch to overlay code after load would not be seen).
 
 ## Rebuilding the working state
 

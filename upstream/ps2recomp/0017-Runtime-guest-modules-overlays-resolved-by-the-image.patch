@@ -1,0 +1,200 @@
+From 0c2bce67d3c6f19d90d90ba2aabe930111823f35 Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 17:04:06 -0400
+Subject: [PATCH 17/18] Runtime: guest modules (overlays) resolved by the image
+ resident in RAM
+
+Games load code overlays at run time, and several overlays can share one load
+address (Outbreak: DEMO, GAME and NETWK at 0x540000). The runtime knew only the
+main program's function table, so any call into an overlay was a missing
+function.
+
+A PS2GuestModule is a separately recompiled image: its own dense table plus a
+fingerprint (bytes expected at a guest address, normally the image's first
+bytes). ps2RegisterGuestModule adds one; hasFunction and lookupFunction fall
+back to the registered module covering the address whose fingerprint matches
+guest RAM, so the code used is always that of the image the game copied in.
+The main table keeps priority. Every runtime path that turns a guest address
+into code (dispatch, threads, callbacks, RPC) goes through these two calls.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ps2xRuntime/include/ps2_runtime.h            | 19 +++++++
+ ps2xRuntime/include/runtime/ps2_memory.h     |  1 +
+ ps2xRuntime/src/lib/ps2_runtime.cpp          | 56 +++++++++++++++++++-
+ ps2xTest/src/ps2_runtime_expansion_tests.cpp | 38 +++++++++++++
+ 4 files changed, 113 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 9875f82..3749226 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -552,4 +552,23 @@ extern const uint32_t g_ps2RecompiledFunctionTableEnd;
+ extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
+ extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+ 
++// A separately recompiled guest module, such as an overlay the game copies
++// into RAM at run time. Several modules may share an address range; a module's
++// functions are used only while its image is in guest RAM, which is checked by
++// comparing `fingerprint` with the bytes at `fingerprintAddress`.
++// ps2xRecomp generates one per `module` config and registers it at start-up.
++struct PS2GuestModule
++{
++    const char *name;
++    uint32_t base;                          // address of table[0]
++    uint32_t end;                           // one past the last address in the table
++    PS2Runtime::RecompiledFunction *table;  // (end - base) / 4 slots
++    uint32_t fingerprintAddress;
++    const uint8_t *fingerprint;
++    uint32_t fingerprintSize;
++};
++
++void ps2RegisterGuestModule(const PS2GuestModule &module);
++void ps2UnregisterGuestModule(const char *name);
++
+ #endif // PS2_RUNTIME_H
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index 9580c62..1978f74 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -280,6 +280,7 @@ public:
+ 
+     // Memory access methods
+     uint8_t *getRDRAM() { return m_rdram; }
++    const uint8_t *getRDRAM() const { return m_rdram; }
+     uint8_t *getScratchpad() { return m_scratchpad; }
+     uint8_t *getIOPRAM() { return iop_ram; }
+     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index cf65f0b..0be24c3 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1091,6 +1091,51 @@ namespace
+         slot = offset >> 2;
+         return slot < g_ps2RecompiledFunctionTableSlotCount;
+     }
++
++    std::vector<PS2GuestModule> &guestModuleRegistry()
++    {
++        static std::vector<PS2GuestModule> modules;
++        return modules;
++    }
++
++    // The function of the registered module that covers `address` and whose
++    // image is the one currently in guest RAM.
++    PS2Runtime::RecompiledFunction residentModuleFunction(const uint8_t *rdram, uint32_t address)
++    {
++        if (!rdram || (address & 3u) != 0u)
++        {
++            return nullptr;
++        }
++
++        for (const PS2GuestModule &module : guestModuleRegistry())
++        {
++            if (address < module.base || address >= module.end || module.fingerprintSize == 0u ||
++                module.fingerprintAddress >= PS2_RAM_SIZE ||
++                module.fingerprintSize > PS2_RAM_SIZE - module.fingerprintAddress)
++            {
++                continue;
++            }
++            if (std::memcmp(rdram + module.fingerprintAddress, module.fingerprint, module.fingerprintSize) == 0)
++            {
++                return module.table[(address - module.base) >> 2];
++            }
++        }
++        return nullptr;
++    }
++}
++
++void ps2RegisterGuestModule(const PS2GuestModule &module)
++{
++    guestModuleRegistry().push_back(module);
++}
++
++void ps2UnregisterGuestModule(const char *name)
++{
++    auto &modules = guestModuleRegistry();
++    modules.erase(std::remove_if(modules.begin(), modules.end(),
++                                 [name](const PS2GuestModule &module)
++                                 { return std::strcmp(module.name, name) == 0; }),
++                  modules.end());
+ }
+ 
+ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
+@@ -1117,7 +1162,11 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+ bool PS2Runtime::hasFunction(uint32_t address) const
+ {
+     uint32_t slot = 0u;
+-    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
++    if (generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr)
++    {
++        return true;
++    }
++    return residentModuleFunction(m_memory.getRDRAM(), address) != nullptr;
+ }
+ 
+ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
+@@ -1153,6 +1202,11 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
+         }
+     }
+ 
++    if (RecompiledFunction fn = residentModuleFunction(m_memory.getRDRAM(), address))
++    {
++        return fn;
++    }
++
+     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
+               << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+               << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
+diff --git a/ps2xTest/src/ps2_runtime_expansion_tests.cpp b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+index 4772f3f..56dfe8b 100644
+--- a/ps2xTest/src/ps2_runtime_expansion_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+@@ -381,6 +381,44 @@ void register_ps2_runtime_expansion_tests()
+                      "missing exact final-function target should request runtime stop");
+         });
+ 
++        // Overlays: several separately recompiled images share one load address
++        // (Outbreak puts DEMO, GAME and NETWK at 0x540000). A call there must
++        // reach the code of whichever image the game copied into RAM.
++        tc.Run("guest modules resolve by the image resident in guest RAM", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++            runtime.setMissingFunctionPolicy(PS2Runtime::MissingFunctionPolicy::Stop);
++
++            constexpr uint32_t kBase = 0x540000u;
++            static const uint8_t kImageA[8] = {'M', 'W', 'o', '3', 2u, 0u, 0u, 0u};
++            static const uint8_t kImageB[8] = {'M', 'W', 'o', '3', 3u, 0u, 0u, 0u};
++            static PS2Runtime::RecompiledFunction tableA[4] = {};
++            static PS2Runtime::RecompiledFunction tableB[4] = {};
++            tableA[2] = &testResumeOwnerFallbackHandler;
++            tableB[2] = &testResumeNextFunctionHandler;
++            ps2RegisterGuestModule({"test_overlay_a", kBase, kBase + 16u, tableA, kBase, kImageA, sizeof(kImageA)});
++            ps2RegisterGuestModule({"test_overlay_b", kBase, kBase + 16u, tableB, kBase, kImageB, sizeof(kImageB)});
++
++            uint8_t *ram = runtime.memory().getRDRAM();
++            t.IsFalse(runtime.hasFunction(kBase + 8u), "no image in RAM: no function");
++
++            std::memcpy(ram + kBase, kImageA, sizeof(kImageA));
++            t.IsTrue(runtime.hasFunction(kBase + 8u), "image A in RAM: its function exists");
++            R5900Context ctx{};
++            runtime.lookupFunction(kBase + 8u)(ram, &ctx, &runtime);
++            t.Equals(::getRegU32(&ctx, 2), 0x00ABC123u, "image A in RAM: A's code runs");
++            t.IsFalse(runtime.hasFunction(kBase + 4u), "an empty slot of the resident image is no function");
++
++            std::memcpy(ram + kBase, kImageB, sizeof(kImageB));
++            runtime.lookupFunction(kBase + 8u)(ram, &ctx, &runtime);
++            t.Equals(::getRegU32(&ctx, 2), 0x00555555u, "image B copied over A: B's code runs");
++
++            ps2UnregisterGuestModule("test_overlay_a");
++            ps2UnregisterGuestModule("test_overlay_b");
++            t.IsFalse(runtime.hasFunction(kBase + 8u), "unregistered modules are gone");
++        });
++
+         tc.Run("dispatchGuestBranch call normalizes unchanged callee PC to fallthrough", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+-- 
+2.46.2.windows.1
+

@@ -1,16 +1,18 @@
-# Windows bring-up: from the NETBIO wall to the boot screens
+# Windows bring-up: from the NETBIO wall to the main menu
 
 - **Date:** 2026-10-21 (second session of the day; this one on Johnny's Windows PC)
 - **Who:** Johnny Collado, with Claude (Claude Code desktop app; Opus 5.5, then Fable 5.1 mid-session)
 - **Goal:** Rebuild the working state on Windows now that the game's data archives are local, then
   follow the boot wall by wall, towards the main menu.
-- **Outcome:** Seven more PS2Recomp patches (0010-0016). The game loads its archives, its first
-  sound bank and the disc's root files, draws its boot-time save-data screens, takes controller
-  input (libpad2), answers its memory-card prompt, and then calls into the DEMO overlay at
-  `0x540080`, which PS2Recomp has no code for. **The main menu wasn't reached**: it lives in that
-  overlay (`demo/title.c`), so the next step is overlay support, the piece
-  `docs/milestones/m4-overlays-3d.md` always said was coming (see "Still open").
-- **Versions:** PS2Recomp `eb8688b` + patches 0001-0015; Outbreak-decomp `eb6af38` (no new
+- **Outcome:** **The main menu is reached.** Nine more PS2Recomp patches (0010-0018) and one new
+  tool (`tools/mwo3_to_elf.py`). The game loads its archives, first sound bank and root files,
+  shows its save-data screens, reads the controller (libpad2), answers the memory-card prompt, and
+  runs its overlays recompiled as guest modules: the ACCESS and CAPCOM screens, the title
+  ("PRESS START BUTTON"), the main menu (Single Play / Network Play / Collection / Character Look /
+  Options), Scenario Select and character select, driven by a temporary auto-press. **Rendering
+  is badly wrong** on every screen (missing title background, broken glyphs, corrupted
+  character-select images); that is the next wall.
+- **Versions:** PS2Recomp `eb8688b` + patches 0001-0018; Outbreak-decomp `eb6af38` (no new
   commits); PCSX2 2.9.134 (upstream pre-release) as reference; Windows 11, MSVC 19.44 (Visual
   Studio 2022), CMake 3.30, MSYS2 GCC 16.1 + gdb 17.2 for the debugger builds; Ryzen 7 5700G,
   32 GB. Game: SLPM-65428 v1.04 + English patch v2.1 (sha1-verified), now with every root file of
@@ -123,7 +125,7 @@ takes 5 vsyncs there. Along the way the probes caught two of my own earlier clai
 - **Take-away:** when input "doesn't work", trace the value all the way to the consumer; here
   the stub was right and the button was wrong.
 
-### 8. The overlay wall (open)
+### 8. The overlay wall
 
 - **Seen:** `[guest-branch:missing-target] kind=IndirectCall op=JALR source=0x1b652c
   target=0x540080` in `boot-21.err`; after it the main thread sleeps and only ADX's spinner
@@ -131,7 +133,26 @@ takes 5 vsyncs there. Along the way the probes caught two of my own earlier clai
 - **Cause:** the game loaded `DEMO.BIN` (an `MWo3` overlay, 0x17BC0 bytes of code at 0x540000)
   with its own loader (`overlay.c` `func_001A8870`: memcpy to the load address, `MWo3_Init`)
   and jumped to its entry. PS2Recomp's function table covers the main ELF only
-  (`0x100000-0x1D9ABC`); it has never seen the overlay's code. Design in the hand-off (CLAUDE.md).
+  (`0x100000-0x1D9ABC`); it has never seen the overlay's code.
+- **Fix (design agreed with Johnny):** three pieces. `tools/mwo3_to_elf.py` (ours, with a test)
+  wraps an MWo3 image as an ELF, header included as a `.mwo3` section. Patch 0018: a `module`
+  config makes the recompiler prefix every name and register the overlay's own table with the
+  runtime, fingerprinted by the image's first 64 bytes (the MWo3 header, which names the overlay).
+  Patch 0017: `hasFunction`/`lookupFunction` fall back to the registered module whose fingerprint
+  is in RAM, so DEMO/GAME/NETWK at the same address each get their own code. Nothing in the
+  game's loader is hooked. Before trusting the header as a fingerprint I checked `MWo3_Init`
+  (disassembled): it only clears bss and runs the static-init range, never writes the header.
+- **Evidence:** both tests fail on the old code (runtime 459/460: "image A in RAM: its function
+  exists"; recompiler 460/461: the `module` key was ignored and the global table written) and
+  pass after (461/461). DEMO: 172 functions, 0 errors. Boot 22 ran DEMO and stopped at the next
+  missing target, `0x34A7E0`, in SUBMAIN (loaded at boot, slot 0, `0x340000`); with SUBMAIN
+  (190 functions) as a module too, boot 23 reached the title and boot 24 the main menu, with no
+  missing function in 300 s.
+- **Not covered:** NETDNAS (the DNAS network library, loaded at boot at `0x6C0000`) was never
+  disassembled by the decomp: after `0x6C2A08` its splat output is one data block with 1,305
+  start markers and no sizes, which `splat_functions.py` doesn't read. Only its first 30
+  functions are in the module; offline play hasn't called the rest so far. GAME, NETWK, SINGLE,
+  NETHTTP and NETAQ are not built yet (GAME is needed for gameplay).
 
 ## Mistakes and corrections
 
@@ -146,18 +167,22 @@ takes 5 vsyncs there. Along the way the probes caught two of my own earlier clai
 
 ## Still open
 
-- **Where the boot is now:** past the memory-card prompt (answered NO → "start anyway" by the
-  temporary auto-press: Left, Circle), into the DEMO overlay's entry at `0x540080`, which has no
-  recompiled code (struggle 8). Overlay support is the next piece of work.
-- **Font rendering is garbled** on the save-data screens (readable but wrong glyph shapes/colours
-  in the frame dumps); not investigated, a later visual wall.
+- **Where the boot is now:** main menu → Scenario Select → character select, driven blind by the
+  temporary auto-press (Left, Circle, Start on a fixed cycle). Nobody has played it with a real
+  controller yet.
+- **Rendering is the next wall.** Johnny's verdict: "the graphics look like ass, but it looks
+  like it is running." Seen in the dumps: the title's background art is missing, glyphs are
+  misshapen on the save-data screens, the ACCESS screen has colour fringing, and the
+  character-select portraits/panels are corrupted. Causes **unknown**; PCSX2 screenshots of the
+  same screens are the reference to compare against. (The white bands in the dumps are the
+  temporary dump saving the whole upload texture, not the game.)
 - **PCSX2** is left paused in its debugger with the game at the bank-send breakpoints.
 - The libdbc actuator functions (`func_00189308`/`func_00189388`, vibration) still run as game
   code against an RPC server that doesn't exist; they return and the game goes on. Unverified
   whether anything else in the game needs them.
 - The main thread's initial priority on hardware; Sony's `sceGsSyncV` as a busy-wait vs. a sleep;
   the exact SPU2 streaming rate for ADX's mode (192 KB/s assumed).
-- Patches 0010-0016 are tested on MSVC only (plus the IOP suite); Linux/Clang, the GS cache suite
+- Patches 0010-0018 are tested on MSVC only (plus the IOP suite); Linux/Clang, the GS cache suite
   and Android not re-run. Nothing is pushed; the work is on `claude/windows-boot-adx`.
 - Temporary traces still live in the `C:\ob\src` working tree (RPC/thread/import traces, pad2
   trace/peek, frame dump, auto-press); the committed vendored copy and patches are clean.

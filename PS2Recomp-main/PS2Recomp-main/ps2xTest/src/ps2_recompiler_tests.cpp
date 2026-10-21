@@ -156,6 +156,70 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+// An overlay image as tools/mwo3_to_elf.py wraps one: the MWo3 header as an
+// allocated data section at the load address, code right after it.
+static bool writeMinimalMipsOverlayElf(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00540040u);
+
+    ELFIO::section *header = writer.sections.add(".mwo3");
+    header->set_type(ELFIO::SHT_PROGBITS);
+    header->set_flags(ELFIO::SHF_ALLOC);
+    header->set_addr_align(16);
+    header->set_address(0x00540000u);
+    std::array<char, 0x40> headerBytes{};
+    const char magic[] = {'M', 'W', 'o', '3', 0x02, 0x00, 0x00, 0x00};
+    std::copy(std::begin(magic), std::end(magic), headerBytes.begin());
+    header->set_data(headerBytes.data(), static_cast<ELFIO::Elf_Word>(headerBytes.size()));
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(16);
+    text->set_address(0x00540040u);
+    const std::array<uint32_t, 6> textWords = {
+        0x0C150014u, // jal 0x00540050
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra (0x540050)
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "func_00540040", 0x00540040u, 0x10u,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "func_00540050", 0x00540050u, 0x08u,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *segment = writer.segments.add();
+    segment->set_type(ELFIO::PT_LOAD);
+    segment->set_flags(ELFIO::PF_R | ELFIO::PF_W | ELFIO::PF_X);
+    segment->set_align(16);
+    segment->add_section_index(header->get_index(), header->get_addr_align());
+    segment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithVuMicroprogramSection(const std::filesystem::path &elfPath)
 {
     ELFIO::elfio writer;
@@ -1424,6 +1488,71 @@ void register_ps2_recompiler_tests()
 
             std::error_code removeError;
             std::filesystem::remove(configPath, removeError);
+        });
+
+        // An overlay recompiled as a module: its names must not collide with the
+        // main ELF's or other overlays' at the same address, and it registers its
+        // own table with a fingerprint of its image instead of the global table.
+        tc.Run("module config generates prefixed code and a guest module registration", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-module-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "overlay.elf";
+            const std::filesystem::path configPath = tempRoot / "overlay.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten = writeMinimalMipsOverlayElf(elfPath);
+            bool configWritten = writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+            {
+                std::ofstream config(configPath, std::ios::app);
+                config << "module = \"demo\"\n";
+                configWritten = configWritten && static_cast<bool>(config);
+            }
+            t.IsTrue(elfWritten && configWritten, "module test inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(), "module config should initialize");
+                t.IsTrue(recompiler.recompile(), "module should recompile");
+                recompiler.generateOutput();
+
+                auto readFile = [](const std::filesystem::path &path) {
+                    std::ifstream file(path);
+                    return std::string{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+                };
+
+                t.IsFalse(std::filesystem::exists(outputPath / "register_functions.cpp"),
+                          "a module must not write the main ELF's global function table");
+                t.IsFalse(std::filesystem::exists(outputPath / "ps2_recompiled_functions.h"),
+                          "a module must not write the main ELF's function header");
+                const std::string registration = readFile(outputPath / "demo_register_functions.cpp");
+                t.IsTrue(registration.find("ps2RegisterGuestModule") != std::string::npos,
+                         "the module registers itself with the runtime");
+                t.IsTrue(registration.find("\"demo\"") != std::string::npos, "under its module name");
+                t.IsTrue(registration.find("0x4d, 0x57, 0x6f, 0x33") != std::string::npos,
+                         "with its image's first bytes (the MWo3 header) as the fingerprint");
+                t.IsTrue(registration.find("0x540000u") != std::string::npos,
+                         "fingerprinted at the image's load address");
+                t.IsTrue(registration.find("= demo_func_00540050_0x540050;") != std::string::npos,
+                         "the JAL target is in the module table under its prefixed name");
+                t.IsTrue(registration.find("g_ps2RecompiledFunctionTable") == std::string::npos,
+                         "the module does not touch the global table");
+
+                const std::string header = readFile(outputPath / "demo_recompiled_functions.h");
+                t.IsTrue(header.find("void demo_func_00540050_0x540050(") != std::string::npos,
+                         "the module header declares prefixed names");
+                const std::string code = readFile(outputPath / "demo_func_00540050_0x540050.cpp");
+                t.IsTrue(code.find("#include <demo_recompiled_functions.h>") != std::string::npos,
+                         "module code includes the module's own header");
+                t.IsTrue(code.find("<ps2_recompiled_functions.h>") == std::string::npos,
+                         "module code does not include the main ELF's header");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
         });
 
         tc.Run("configured entry hint synthesizes an omitted standalone function", [](TestCase &t) {

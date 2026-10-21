@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <thread>
 
@@ -40,6 +41,14 @@ namespace ps2recomp
             config.inputPath = toml::find<std::string>(general, "input");
             config.ghidraMapPath = toml::find_or<std::string>(general, "ghidra_output", "");
             config.outputPath = toml::find<std::string>(general, "output");
+            config.moduleName = toml::find_or<std::string>(general, "module", "");
+            if (!config.moduleName.empty() &&
+                (!std::all_of(config.moduleName.begin(), config.moduleName.end(),
+                              [](unsigned char c) { return std::isalnum(c) || c == '_'; }) ||
+                 std::isdigit(static_cast<unsigned char>(config.moduleName[0]))))
+            {
+                throw std::runtime_error("module must be a C identifier: " + config.moduleName);
+            }
             config.singleFileOutput = toml::find_or<bool>(general, "single_file_output", false);
             config.lowMemoryMode = toml::find_or<bool>(general, "low_memory_mode", config.lowMemoryMode);
             const int64_t configuredOutputWorkers = toml::find_or<int64_t>(

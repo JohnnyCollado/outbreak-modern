@@ -1091,6 +1091,51 @@ namespace
         slot = offset >> 2;
         return slot < g_ps2RecompiledFunctionTableSlotCount;
     }
+
+    std::vector<PS2GuestModule> &guestModuleRegistry()
+    {
+        static std::vector<PS2GuestModule> modules;
+        return modules;
+    }
+
+    // The function of the registered module that covers `address` and whose
+    // image is the one currently in guest RAM.
+    PS2Runtime::RecompiledFunction residentModuleFunction(const uint8_t *rdram, uint32_t address)
+    {
+        if (!rdram || (address & 3u) != 0u)
+        {
+            return nullptr;
+        }
+
+        for (const PS2GuestModule &module : guestModuleRegistry())
+        {
+            if (address < module.base || address >= module.end || module.fingerprintSize == 0u ||
+                module.fingerprintAddress >= PS2_RAM_SIZE ||
+                module.fingerprintSize > PS2_RAM_SIZE - module.fingerprintAddress)
+            {
+                continue;
+            }
+            if (std::memcmp(rdram + module.fingerprintAddress, module.fingerprint, module.fingerprintSize) == 0)
+            {
+                return module.table[(address - module.base) >> 2];
+            }
+        }
+        return nullptr;
+    }
+}
+
+void ps2RegisterGuestModule(const PS2GuestModule &module)
+{
+    guestModuleRegistry().push_back(module);
+}
+
+void ps2UnregisterGuestModule(const char *name)
+{
+    auto &modules = guestModuleRegistry();
+    modules.erase(std::remove_if(modules.begin(), modules.end(),
+                                 [name](const PS2GuestModule &module)
+                                 { return std::strcmp(module.name, name) == 0; }),
+                  modules.end());
 }
 
 bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
@@ -1117,7 +1162,11 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 bool PS2Runtime::hasFunction(uint32_t address) const
 {
     uint32_t slot = 0u;
-    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
+    if (generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr)
+    {
+        return true;
+    }
+    return residentModuleFunction(m_memory.getRDRAM(), address) != nullptr;
 }
 
 const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
@@ -1151,6 +1200,11 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         {
             return fn;
         }
+    }
+
+    if (RecompiledFunction fn = residentModuleFunction(m_memory.getRDRAM(), address))
+    {
+        return fn;
     }
 
     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address

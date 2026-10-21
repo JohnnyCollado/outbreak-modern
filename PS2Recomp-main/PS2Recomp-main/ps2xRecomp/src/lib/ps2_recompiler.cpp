@@ -99,13 +99,19 @@ namespace ps2recomp
             return 1;
         }
 
-        void writeCombinedOutputPreamble(std::ostream &output)
+        // A generated file's name: "<base>" for the main program, "<module>_<base>" for a module.
+        std::string moduleFileName(const std::string &moduleName, const std::string &base)
+        {
+            return moduleName.empty() ? base : moduleName + "_" + base;
+        }
+
+        void writeCombinedOutputPreamble(std::ostream &output, const CodeGenerator &codeGenerator)
         {
             output << "#include <stdexcept>\n";
-            output << "#include <ps2_recompiled_functions.h>\n\n";
+            output << "#include <" << codeGenerator.functionsHeaderName() << ">\n\n";
             output << "#include \"ps2_runtime_macros.h\"\n";
             output << "#include \"ps2_runtime.h\"\n";
-            output << "#include <ps2_recompiled_stubs.h>\n";
+            output << "#include <" << codeGenerator.stubsHeaderName() << ">\n";
             output << "#include \"ps2_syscalls.h\"\n";
             output << "#include \"ps2_stubs.h\"\n";
             output << "#ifdef _DEBUG\n";
@@ -1000,6 +1006,7 @@ namespace ps2recomp
             m_decoder = std::make_unique<R5900Decoder>();
             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols, m_sections);
             m_codeGenerator->setReporter(&m_reporter);
+            m_codeGenerator->setModuleName(m_config.moduleName);
             std::unordered_map<uint32_t, std::string> relocationCallNames;
             relocationCallNames.reserve(m_relocations.size());
             for (const auto &reloc : m_relocations)
@@ -1222,7 +1229,9 @@ namespace ps2recomp
                 if (!shouldGenerateCodeForFunction(function))
                     continue;
 
-                m_functionRenames[function.start] = makeName(function);
+                // A module shares the program's C namespace with the main ELF and
+                // other modules that may use the same addresses: prefix its names.
+                m_functionRenames[function.start] = moduleFileName(m_config.moduleName, makeName(function));
             }
 
             if (m_codeGenerator)
@@ -1374,14 +1383,15 @@ namespace ps2recomp
 
             if (m_config.singleFileOutput)
             {
-                fs::path outputPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.cpp";
+                fs::path outputPath = fs::path(m_config.outputPath) /
+                                      moduleFileName(m_config.moduleName, "ps2_recompiled_functions.cpp");
                 std::ofstream combinedOutput(outputPath);
                 if (!combinedOutput)
                 {
                     throw std::runtime_error("Failed to open combined output: " + outputPath.string());
                 }
 
-                writeCombinedOutputPreamble(combinedOutput);
+                writeCombinedOutputPreamble(combinedOutput, *m_codeGenerator);
 
                 if (outputWorkerCount <= 1)
                 {
@@ -1771,7 +1781,8 @@ namespace ps2recomp
             std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(m_functions, m_generatedStubs);
             m_generatedStubs.clear();
 
-            fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
+            fs::path registerPath = fs::path(m_config.outputPath) /
+                                    moduleFileName(m_config.moduleName, "register_functions.cpp");
             if (!writeToFile(registerPath.string(), registerFunctions))
             {
                 throw std::runtime_error("Failed to write function registration file: " + registerPath.string());
@@ -1833,7 +1844,7 @@ namespace ps2recomp
             // ss << "\n} // namespace stubs\n";
             // ss << "} // namespace ps2recomp\n";
 
-            fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_stubs.h";
+            fs::path headerPath = fs::path(m_config.outputPath) / m_codeGenerator->stubsHeaderName();
             writeToFile(headerPath.string(), ss.str());
 
             {
@@ -1856,8 +1867,11 @@ namespace ps2recomp
         {
             std::stringstream ss;
 
-            ss << "#ifndef PS2_RECOMPILED_FUNCTIONS_H\n";
-            ss << "#define PS2_RECOMPILED_FUNCTIONS_H\n\n";
+            std::string guard = moduleFileName(m_config.moduleName, "PS2_RECOMPILED_FUNCTIONS_H");
+            std::transform(guard.begin(), guard.end(), guard.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            ss << "#ifndef " << guard << "\n";
+            ss << "#define " << guard << "\n\n";
 
             ss << "#include <cstdint>\n\n";
             ss << "struct R5900Context;\n";
@@ -1875,9 +1889,9 @@ namespace ps2recomp
                 ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
             }
 
-            ss << "\n#endif // PS2_RECOMPILED_FUNCTIONS_H\n";
+            ss << "\n#endif // " << guard << "\n";
 
-            fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.h";
+            fs::path headerPath = fs::path(m_config.outputPath) / m_codeGenerator->functionsHeaderName();
             writeToFile(headerPath.string(), ss.str());
 
             {
