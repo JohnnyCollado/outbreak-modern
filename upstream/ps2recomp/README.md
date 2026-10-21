@@ -21,6 +21,7 @@ adds its own test.
 | 0011 | `ChangeThreadPriority` returned `KE_OK`; the EE kernel returns the **previous** priority. CRI ADX's lock/unlock saves and restores it, so every unlock put Outbreak's main thread at priority 0 and ADX's server thread never ran. | the game's own ADX lock/unlock (disassembled: the return value is stored and passed back) |
 | 0012 | The **analyzer** replaced every "store into an executable section, then `j`/`jal`" with a NOP in the generated config, as possible self-modifying code. Outbreak's ELF has one executable section over code and data, so all 37 hits were ordinary data writes; 34 took effect and one hung the boot (a NULL transfer buffer). Now they are only printed and listed as commented-out lines in the TOML for review; nothing is replaced. Details: `results/analyzer-nops-20261021.md`. | the analyzer's own README ("flagged but requires manual review") |
 | 0013 | `sceDmaRecvN` was a TODO stub that stops the program. Now sets MADR/QWC and starts a normal-mode transfer into memory, as libdma does; Outbreak uses it to copy the scratchpad to RAM. | the game's own `sceDmaRecvN` (disassembled) |
+| 0014 | The runtime kept its own guest memory (SIF RPC packet and server pools, TLS pool, boot-mode pool, callback stacks) at 0x1F00000-0x2000000 and capped every heap at 0x1F00000. On hardware that RAM is the game's: `SetupHeap(base, -1)` ends the heap at the thread's stack pointer, and ps2sdk's crt0 puts the stack at the top of RAM. Outbreak mallocs 22 MB + 1.1 MB; the second returned NULL and the font read into address 0 never finished. The runtime's memory now lives in the EE kernel's area 0x80000-0x100000 (`PS2_RUNTIME_RESERVED_*`); `SetupHeap(-1)` ends at the stack `SetupThread` recorded; an explicit size is honoured up to the end of RAM. | ps2tek (SetupHeap: "if heap == -1, the end of the heap resides at the thread's stack pointer"), ps2sdk `crt0.c`/`linkfile` (`_heap_size = -1`, `_stack = -1`) |
 
 ## How they were tested (2026-10-21, Ubuntu 24.04)
 
@@ -41,15 +42,17 @@ adds its own test.
   anything until this run.)
 - Android arm64 (NDK r27c, API 29): `ps2_runtime` and `ps2_iop` build with the changes.
 
-## How 0010-0013 were tested (2026-10-21, Windows 11, MSVC 19.44 / Visual Studio 2022)
+## How 0010-0014 were tested (2026-10-21, Windows 11, MSVC 19.44 / Visual Studio 2022)
 
 - First Windows run of the whole set: **452 / 452** `ps2x_tests` with 0001-0009 under MSVC.
 - Each new test was run against the old code first and fails there: 0010 (452/453), 0011
   (453/454), 0012 (454/455, the store was replaced), 0013 (455/456, "Unimplemented PS2 stub
   called: sceDmaRecvN").
 - Each patch was built and tested on its own from a clean `eb8688b` + `git am`: 0010 **453/453**,
-  0011 **454/454**, 0012 **455/455**, 0013 **456/456**.
-- Not run for 0010-0013: GCC/Clang on Linux, the IOP and GS cache suites, Android.
+  0011 **454/454**, 0012 **455/455**, 0013 **456/456**, 0014 **458/458** (its two tests fail on
+  the old code: 456/458; one existing GS test that asserted the old 0x1F00000 pool address was
+  updated to the new range).
+- Not run for 0010-0014: GCC/Clang on Linux, the IOP and GS cache suites, Android.
 
 ## Known gaps, not fixed here
 

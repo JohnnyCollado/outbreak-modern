@@ -584,14 +584,23 @@ namespace ps2_syscalls
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
-        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
+        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM": the heap
+        // then ends at the thread's stack pointer (ps2tek, SetupHeap), i.e. where SetupThread put it.
         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
         uint32_t heapLimit = kDefaultGuestHeapEnd;
 
         if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
         {
             const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
-            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
+            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, PS2_RAM_SIZE));
+        }
+        else if (runtime)
+        {
+            EeScheduler &ee = runtime->eeScheduler();
+            ee.bindMainContextForSyscall(*ctx, rdram);
+            const GuestThread *self = ee.currentThread();
+            const uint32_t stackPointer = (self && self->stack != 0u) ? self->stack : getRegU32(ctx, 29);
+            heapLimit = std::min(stackPointer & ~0xFu, PS2_RAM_SIZE);
         }
 
         if (heapLimit <= heapBase)

@@ -961,6 +961,46 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(ee.semaphore(gSchedulerSemaphoreId)->count, 0, "direct handoff must not increment count");
         });
 
+        tc.Run("SetupHeap(-1) ends the heap at the main thread's stack pointer", [](TestCase &t)
+        {
+            // ps2sdk crt0 as used by Resident Evil Outbreak (SLPM-65428): SetupThread(gp, -1, 0x10000)
+            // then SetupHeap(_end = 0x8B9180, -1). The game then mallocs 0x160003F and 0x11003F;
+            // both fit only if the heap reaches the stack (0x1FF0000), as on hardware (ps2tek).
+            TestEnv env;
+            setRegU32(env.ctx, 4, 0u);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            setRegU32(env.ctx, 6, 0x10000u);
+            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
+            const uint32_t stackPointer = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+
+            setRegU32(env.ctx, 4, 0x008B9180u);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), stackPointer,
+                     "with heap_size -1 the heap ends at the thread's stack pointer");
+
+            const uint32_t big = env.runtime.guestMalloc(0x0160003Fu, 16u);
+            const uint32_t font = env.runtime.guestMalloc(0x0011003Fu, 16u);
+            t.IsTrue(big != 0u, "the game's 22 MB pool allocation should succeed");
+            t.IsTrue(font != 0u, "the following 1.1 MB allocation should succeed too");
+            t.IsTrue(font + 0x0011003Fu <= stackPointer, "allocations must stay below the stack");
+        });
+
+        tc.Run("runtime-private guest memory stays below the ELF load address", [](TestCase &t)
+        {
+            // Games own 0x100000 up to their stack; the kernel area below is the runtime's.
+            TestEnv env;
+            const uint32_t callbackStackTop = env.runtime.reserveAsyncCallbackStack(0x4000u, 16u);
+            t.IsTrue(callbackStackTop != 0u, "a callback stack should be reserved");
+            t.IsTrue(callbackStackTop >= 0x00080000u && callbackStackTop < 0x00100000u,
+                     "callback stacks must lie in 0x80000-0x100000");
+
+            GetThreadTLS(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t tls = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+            t.IsTrue(tls >= 0x00080000u && tls < 0x00100000u, "the TLS pool must lie in 0x80000-0x100000");
+        });
+
         tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
         {
             TestEnv env;

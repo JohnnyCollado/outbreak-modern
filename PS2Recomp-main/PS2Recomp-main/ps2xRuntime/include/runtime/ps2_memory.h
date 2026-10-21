@@ -26,6 +26,12 @@ class GS;
 constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
+// Guest RAM the runtime keeps for itself: the EE kernel's area between its syscall-table mirror
+// (below 0x80000) and the usual ELF load address. Games own RAM from 0x100000 up to their stack,
+// as on hardware. Pools (see Kernel/Syscalls/Helpers/State.h) come first, callback stacks last.
+constexpr uint32_t PS2_RUNTIME_RESERVED_BASE = 0x00080000;
+constexpr uint32_t PS2_RUNTIME_CALLBACK_STACK_FLOOR = 0x000B1000;
+constexpr uint32_t PS2_RUNTIME_RESERVED_END = 0x00100000;
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
 constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
 constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16u * 1024u;  // 16KB
