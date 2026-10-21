@@ -1,5 +1,6 @@
 #!/bin/bash
 # Re-analyze, recompile, rebuild PS2Recomp's runner and boot Outbreak under a virtual display.
+# Windows form is tools/ob.sh.
 #
 #   tools/recomp_cycle.sh [seconds] [tag]        (default 150 s, tag "latest")
 #
