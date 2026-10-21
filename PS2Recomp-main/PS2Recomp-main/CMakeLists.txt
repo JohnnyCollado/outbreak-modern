@@ -77,6 +77,11 @@ if(PS2X_IS_ARM_TARGET)
             add_compile_options(-march=armv8-a+fp+simd)
         endif()
     endif()
+elseif(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    # The runtime and generated code use SSE4.1 intrinsics (_mm_extract_epi32/64, _mm_blendv_ps...).
+    # MSVC accepts them without a flag; GCC and Clang need the target enabled.
+    message(STATUS "x86-64 target with GCC/Clang - enabling SSE4.1")
+    add_compile_options(-msse4.1)
 endif()
 
 if(PS2X_BUILD_RECOMP)
