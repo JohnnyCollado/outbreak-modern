@@ -17,8 +17,9 @@ adds its own test.
 
 ## How they were tested (2026-10-21, Ubuntu 24.04)
 
-- `ps2x_tests`: **450 / 450 pass** with 0006 (449 before it) with GCC 13.3 and with Clang 18.1, Release builds (445 before
-  0002-0005, plus 4 new tests; 0006 adds 1). 0006's test fails without the fix (449/450).
+- `ps2x_tests`: **450 / 450 pass** with all six patches, with GCC 13.3 and with Clang 18.1,
+  Release builds (445 before 0002-0005, which add 4 tests; 0006 adds 1). 0006's test fails
+  without the fix (449/450, GCC).
 - The 4 new tests were run against the **old** code: exactly those 4 fail and the other 445 pass.
   So each test catches the bug it is for.
 - Patches 0002-0005 were checked one at a time: each commit builds and passes (446, 447, 448,

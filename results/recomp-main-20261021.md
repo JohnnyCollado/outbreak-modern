@@ -65,7 +65,7 @@ next run.
   `m0-decision.md`), but the main program now recompiles cleanly and runs until it needs disc
   files.
 
-## 4. Second and third boot (IOP\MODULES added, same day)
+## 5. Second and third boot (IOP\MODULES added, same day)
 
 You added the disc's `IOP\MODULES` folder (33 files: `drive.dat`, `dnas280.img`, `usbd.irx`,
 `usbkb.irx`, network and HDD modules), copied to scratch only.
