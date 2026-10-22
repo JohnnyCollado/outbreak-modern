@@ -341,12 +341,16 @@ def stamp_entries():
                 if not skip_file(rel_dir + fn):
                     add_file(f"{label}/{rel_dir}{fn}", os.path.join(dp, fn))
 
-    def git(*args):
-        r = subprocess.run(["git", "-C", up, *args], capture_output=True)
+    def git(*args, repo=up):
+        r = subprocess.run(["git", "-C", repo, *args], capture_output=True)
         return r.stdout if r.returncode == 0 else b"GIT-ERROR " + r.stderr
 
     out.append(("up:HEAD", git("rev-parse", "HEAD").strip().decode("ascii", "replace")))
     out.append(("up:diff", hashlib.sha256(git("diff", "HEAD")).hexdigest()))
+    pcsx2 = env("OB_PCSX2", root + "/pcsx2")
+    out.append(("pcsx2:HEAD", git("rev-parse", "HEAD", repo=pcsx2).strip().decode("ascii", "replace")))
+    out.append(("pcsx2:diff", hashlib.sha256(git("diff", "HEAD", repo=pcsx2)).hexdigest()))
+    add_tree("repo/native/pcsx2_gs", os.path.join(REPO, "native", "pcsx2_gs"))
     for rel in sorted(x for x in git("ls-files", "--others", "--exclude-standard", "-z").decode("utf-8", "replace").split("\0") if x):
         add_file(f"up:untracked/{rel}", os.path.join(up, rel))
     build_dirs = {".git", ".vs", "build", "out"}

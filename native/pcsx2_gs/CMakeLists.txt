@@ -119,3 +119,16 @@ target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo winmm pathcch dwmapi OneCore)
 
 add_executable(ob_pcsx2_gs_smoke smoke/main.cpp)
 target_link_libraries(ob_pcsx2_gs_smoke PRIVATE ob_pcsx2_gs)
+
+# Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
+# PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
+# and links ob_pcsx2_gs_adapter PRIVATE so PCSX2's PUBLIC defines/options never reach ps2_runtime.
+if(TARGET ps2_runtime)
+    add_library(ob_pcsx2_gs_adapter STATIC adapter/pcsx2_side.cpp)
+    target_include_directories(ob_pcsx2_gs_adapter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
+    target_link_libraries(ob_pcsx2_gs_adapter PUBLIC ob_pcsx2_gs)
+
+    add_library(ps2x_external_gs STATIC adapter/hook.cpp)
+    target_compile_options(ps2x_external_gs PRIVATE /EHsc) # this directory strips /EHsc for PCSX2 (above)
+    target_link_libraries(ps2x_external_gs PRIVATE ps2_runtime ob_pcsx2_gs_adapter)
+endif()

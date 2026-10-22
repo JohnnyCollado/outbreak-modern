@@ -115,17 +115,23 @@ cmd_recompile() {
         cp "output-$o"/*.cpp "$OB_SRC/ps2xRuntime/src/runner/"
         cp "output-$o/${o}_recompiled_functions.h" "output-$o/${o}_recompiled_stubs.h" "$OB_SRC/ps2xRuntime/include/"
     done
-    # Runner (build-runner.bat).
+    # Runner (build-runner.bat), with the PCSX2 external GS (native/pcsx2_gs; deps from ob.sh pcsx2-gs).
     local log="$OB_LOGS/ob-runner-build.log" start rc
+    local px="${OB_PCSX2:-$OB_ROOT/pcsx2}" pxd="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}" egs="$REPO/native/pcsx2_gs"
+    [ -f "$pxd/bin/shaderc_shared.dll" ] || { echo "runner: $pxd/bin/shaderc_shared.dll missing; run ob.sh pcsx2-gs first"; return 1; }
     start=$(date +%s)
     {
-        { [ -f "$OB_R/build.ninja" ] ||
-            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=/O2 /Zi /DNDEBUG" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps"; } &&
+        { { [ -f "$OB_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_R/CMakeCache.txt"; } ||
+            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=/O2 /Zi /DNDEBUG" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd"; } &&
         vc cmake --build "$OB_R" -j $JOBS --target ps2EntryRunner
     } > "$log" 2>&1
     rc=$?
     echo "runner build exit $rc in $(( $(date +%s) - start )) s ($log)"
     [ $rc = 0 ] || { tail -5 "$log"; return 1; }
+    local rd="$OB_R/ps2xRuntime"
+    rm -rf "$rd/resources/shaders" && mkdir -p "$rd/resources" &&
+        cp -r "$px/bin/resources/shaders" "$rd/resources/" &&
+        cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$rd/" || { echo "runner: pcsx2 staging failed"; return 1; }
     [ $bad = 0 ] || { echo "recompile errors > 0"; return 1; }
 }
 
@@ -150,7 +156,9 @@ cmd_boot() {
         export PS2X_INPUT_SCRIPT; PS2X_INPUT_SCRIPT=$(cygpath -w "$(realpath "$script")")
         export PS2X_HIDDEN=1
     fi
-    PS2X_FRAME_DUMP_DIR="$(cygpath -w "$frames")" powershell -NoProfile -Command "
+    # Vulkan SDK off PATH so the staged shaderc_shared.dll beside the runner is the one loaded (as cmd_pcsx2_gs).
+    local np; np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
+    PATH="$np" PS2X_FRAME_DUMP_DIR="$(cygpath -w "$frames")" powershell -NoProfile -Command "
         \$elf = '$(cygpath -w "$OB_RUN/SLPM_654.28")'
         \$p = Start-Process -FilePath '$(cygpath -w "$OB_R/ps2xRuntime/ps2EntryRunner.exe")' -ArgumentList ('\"' + \$elf + '\"') -WorkingDirectory '$logs' -RedirectStandardOutput '$logs\\boot-$tag.log' -RedirectStandardError '$logs\\boot-$tag.err' -PassThru
         \$null = \$p.Handle
