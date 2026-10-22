@@ -1,0 +1,168 @@
+From 00e03cdc1a9c1629c9448ea5d9d5a6e65f490cb6 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 17:50:50 -0400
+Subject: [PATCH] Runtime: PS2X_FRAME_TIME counts the scheduler's idle wait as
+ pacing
+
+When every guest thread is blocked (the game waiting for vsync), EeScheduler::run sleeps in waitForEvent. Patch 0027 only subtracted the processDueDeadlines wait, so busy equalled wall. waitForEvent now adds both its waits (timed and untimed) to m_pacingWaitNs when the log is enabled.
+---
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp | 12 +++
+ ps2xTest/src/ps2_gs_external_tests.cpp     | 95 +++++++++++++++-------
+ 2 files changed, 79 insertions(+), 28 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 773442d..e5c7488 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -2079,10 +2079,17 @@ void EeScheduler::waitForEvent()
+     }
+     const uint64_t timerCycles = m_runtime.memory().cyclesUntilNextEeTimerInterrupt();
+     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
++    // Every guest thread is blocked, so time asleep here is pacing, not cost: logFrameTime subtracts it.
++    const auto idleStart = std::chrono::steady_clock::now();
+     if (m_deadlines.empty() && !hasTimerDeadline)
+     {
+         m_eventCv.wait(lock, [this]()
+                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
++        if (m_frameTimeLogEnabled)
++        {
++            m_pacingWaitNs += static_cast<uint64_t>(
++                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStart).count());
++        }
+         return;
+     }
+ 
+@@ -2115,6 +2122,11 @@ void EeScheduler::waitForEvent()
+     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                                { return !m_events.empty() ||
+                                                         m_stopRequested.load(std::memory_order_acquire); });
++    if (m_frameTimeLogEnabled)
++    {
++        m_pacingWaitNs += static_cast<uint64_t>(
++            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStart).count());
++    }
+     if (!signaled)
+     {
+         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index b2a83da..e2a2a44 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -284,6 +284,47 @@ namespace
+             unsetenv("PS2X_FRAME_TIME");
+ #endif
+     }
++
++    struct FrameTimeRun
++    {
++        uint64_t vsyncTick = 0u;
++        bool logOpened = false;
++        std::vector<std::string> lines; // non-empty lines, header first
++    };
++
++    // Runs frameTimeDrive under PS2X_FRAME_TIME and returns the log's lines.
++    FrameTimeRun runFrameTimeLog()
++    {
++        FrameTimeRun run;
++        const std::filesystem::path path =
++            std::filesystem::temp_directory_path() /
++            ("ps2x-frame-time-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
++        std::error_code ec;
++        std::filesystem::remove(path, ec);
++        const std::string pathStr = path.string();
++        setFrameTimeEnv(pathStr.c_str());
++        {
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            PS2Runtime runtime;
++            runtime.registerFunction(kDrivePc, frameTimeDrive);
++            s_frameTimeVSyncsSeen = 0u;
++            R5900Context mainContext{};
++            mainContext.pc = kDrivePc;
++            runtime.eeScheduler().reset(rdram.data(), mainContext);
++            runtime.eeScheduler().run();
++            run.vsyncTick = runtime.eeScheduler().currentVSyncTick();
++        }
++        setFrameTimeEnv("");
++
++        std::ifstream in(path);
++        run.logOpened = in.is_open();
++        for (std::string line; std::getline(in, line);)
++            if (!line.empty())
++                run.lines.push_back(line);
++        in.close();
++        std::filesystem::remove(path, ec);
++        return run;
++    }
+ }
+ 
+ void register_ps2_gs_external_tests()
+@@ -453,34 +494,10 @@ void register_ps2_gs_external_tests()
+     {
+         tc.Run("PS2X_FRAME_TIME writes one tick,wall_us,busy_us line per VBlankStart", [](TestCase &t)
+         {
+-            const std::filesystem::path path =
+-                std::filesystem::temp_directory_path() /
+-                ("ps2x-frame-time-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
+-            std::error_code ec;
+-            std::filesystem::remove(path, ec);
+-            const std::string pathStr = path.string();
+-            setFrameTimeEnv(pathStr.c_str());
+-            {
+-                std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+-                PS2Runtime runtime;
+-                runtime.registerFunction(kDrivePc, frameTimeDrive);
+-                s_frameTimeVSyncsSeen = 0u;
+-                R5900Context mainContext{};
+-                mainContext.pc = kDrivePc;
+-                runtime.eeScheduler().reset(rdram.data(), mainContext);
+-                runtime.eeScheduler().run();
+-                t.IsTrue(runtime.eeScheduler().currentVSyncTick() >= kFrameTimeVSyncs, "the scheduler ran at least 3 vsyncs");
+-            }
+-            setFrameTimeEnv("");
+-
+-            std::ifstream in(path);
+-            t.IsTrue(in.is_open(), "the frame-time log exists");
+-            std::vector<std::string> lines;
+-            for (std::string line; std::getline(in, line);)
+-                if (!line.empty())
+-                    lines.push_back(line);
+-            in.close();
+-            std::filesystem::remove(path, ec);
++            const FrameTimeRun run = runFrameTimeLog();
++            t.IsTrue(run.vsyncTick >= kFrameTimeVSyncs, "the scheduler ran at least 3 vsyncs");
++            t.IsTrue(run.logOpened, "the frame-time log exists");
++            const std::vector<std::string> &lines = run.lines;
+ 
+             t.IsTrue(!lines.empty() && lines[0] == "tick,wall_us,busy_us", "header line");
+             t.IsTrue(lines.size() >= 1u + kFrameTimeVSyncs, "header + one line per vsync");
+@@ -509,5 +526,27 @@ void register_ps2_gs_external_tests()
+             t.IsTrue(firstIsZero, "the first vsync writes wall=busy=0");
+             t.IsTrue(busyWithinWall, "0 <= busy <= wall on every later line");
+         });
++
++        tc.Run("PS2X_FRAME_TIME counts the scheduler's idle wait as pacing, not busy", [](TestCase &t)
++        {
++            // The guest only waits for vsync, so every guest thread is blocked and the scheduler
++            // sleeps in waitForEvent for nearly the whole frame: busy must be a small part of wall.
++            const FrameTimeRun run = runFrameTimeLog();
++            uint64_t wallSum = 0u, busySum = 0u;
++            for (size_t i = 2; i < run.lines.size(); ++i) // skip the header and the first 0,0 line
++            {
++                uint64_t tick = 0u, wall = 0u, busy = 0u;
++                char c1 = 0, c2 = 0;
++                std::istringstream ss(run.lines[i]);
++                ss >> tick >> c1 >> wall >> c2 >> busy;
++                wallSum += wall;
++                busySum += busy;
++            }
++            t.IsTrue(run.lines.size() >= 1u + kFrameTimeVSyncs, "header + one line per vsync");
++            t.IsTrue(wallSum >= 10000u, "the logged vsyncs span real time (>= 10 ms)");
++            t.IsTrue(busySum * 4u < wallSum,
++                     "an idle guest is busy for under a quarter of the frame (busy " + std::to_string(busySum) +
++                         " us of wall " + std::to_string(wallSum) + " us)");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+
