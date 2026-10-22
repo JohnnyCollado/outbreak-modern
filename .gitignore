@@ -18,3 +18,4 @@ ps2_emu/
 # Project Architect 3.0
 .run/
 __pycache__/
+.claude-state/
