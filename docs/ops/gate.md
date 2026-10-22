@@ -76,3 +76,8 @@ so `watch 0x12000020` silently reads RDRAM 0x20. No env switch traces them. FBW 
 - title/mainmenu/charselect: best frame in the capture window (existing compare logic); UNVERIFIED: backgrounds are
   Sofdec movies (M5), loop length unknown (>= 213 ticks); fallback = coarse background statistic (section 7).
 - Runner line-doubling (applyFieldPresentation) is a runner fault for 1.3: every screen RED until fixed.
+
+## Baseline (T7, 2026-10-22) — `gate/baseline-1.2.md`
+- `C:\ob\up` ab85c05 (patches 0001-0020), frozen tolerance 20233c3: exit 1, 0/3 gated green, wall ~54.5 s, hidden=1.
+- Shares: savedata 0.043597, access 0.248753, capcom 0.082450 RED; title 0.999865, mainmenu 0.998910, charselect 0.891462
+  RED ADVISORY. Two runs, identical shares (ticks shift 2-6). Per-screen visible faults in the baseline file.
