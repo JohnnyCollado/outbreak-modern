@@ -1,7 +1,9 @@
 # Gate tolerance — DRAFT (T5, 2026-10-22; not frozen, freeze is T6 with the developer)
 
-Status: draft. d=8, p=0.0001, full frame, all six screens (developer 2026-10-22). Static screens proven; animated
-screens UNVERIFIED (section 7). Q2 decided (runner fault, 1.3). Open: section 7 premise (backgrounds are movies).
+Status: draft (freeze in T6). d=8, p=0.0001, full frame. GATED (pass/fail, exit code): savedata, access, capcom,
+proven (section 5). ADVISORY (printed, not in the exit code; `advisory` in gate/tolerance.json): title, mainmenu,
+charselect, UNVERIFIED: backgrounds are Sofdec movies (M5); re-check belongs to the movie generation (section 8).
+Line-doubling: runner fault, phase 1.3 (Q2).
 Metric (gate.py `metric`): delta = max(|dR|,|dG|,|dB|) per pixel, alpha ignored; share = count(delta > d)/(512*448).
 Measured with scratch `.run/1.2/t5_tol.py`, `t5_field.py` (gate.py `metric`, `missing_layer`, `shifted_glyph`);
 logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
@@ -118,3 +120,14 @@ no tool change). Region split (section 6) dropped; its numbers are the evidence 
   (`t5_map.py`). Lower bound for any movie loop: 3.55 s = 213 ticks. Windows left unchanged (title 64, mainmenu 32,
   charselect 6) pending the developer's answer.
 - Line-doubling (Q2): runner fault, phase 1.3; today's build expected RED on every screen until then.
+
+## 8. Decision 2026-10-22 (developer, option A): movie screens advisory in generation 1
+- Gated: savedata, access, capcom: d=8, p=0.0001; noise 0 (both sides) < p < smallest damage 0.000209.
+- Advisory: title, mainmenu, charselect: same d/p, best frame in window, printed every run, excluded from the exit
+  code; UI fixes on them judged by side-by-side review (1.4/1.5). Re-check (window covers the movie loop, a correct
+  build's best frame <= p; else background-only fallback, section 6 numbers) belongs to the generation that adds
+  Sofdec playback, not 1.4.
+- Windows stay title 64, mainmenu 32, charselect 6 (T3): they cover what our frames can show today (title pulse,
+  mainmenu single-phase span to alternation, charselect two field periods inside its 49-tick stable span); the movie
+  loop is unknown (>= 213 ticks) and cannot be sized until movies render; title idle limit 960 ticks and mainmenu
+  1800 bound any future window (R1.2-008).
