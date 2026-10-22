@@ -32,6 +32,7 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
   `$OB_SPLAT` asm dirs of the 3 overlays; repo `tools/mwo3_to_elf.py`, `tools/splat_functions.py`; text of
   `cmd_recompile` in `tools/ob.sh`.
 - `gate.py synth DIR`: synthetic refs/manifest, frames-identical|erased|shifted, boot-*.log (tests only, `.run/1.2/`).
+- Wall time (T2, 2026-10-22): stale stamp 346 s (recompile 297 s, runner build 273 s); fresh stamp 47.8 s (boot + gate).
 
 ## Display-mode probe (T1, 2026-10-22)
 GS privileged registers (PMODE, SMODE2, DISPFB1/2, DISPLAY1/2) are not readable without a patch: the script's
