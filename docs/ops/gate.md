@@ -37,7 +37,8 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
   `ps2xRuntime/src/runner/`, `*_recompiled_*.h`, build/out dirs); `$OB_T` ps2_analyzer.exe, ps2_recomp.exe;
   `$OB_WORK` SLPM_654.28, main-functions.csv; `$OB_OVL/demo.toml`; `$OB_RUN/PROG/{DEMO,SUBMAIN,NETDNAS}.BIN`;
   `$OB_SPLAT` asm dirs of the 3 overlays; repo `tools/mwo3_to_elf.py`, `tools/splat_functions.py`; text of
-  `cmd_recompile` in `tools/ob.sh`.
+  `cmd_recompile` in `tools/ob.sh`; `C:\ob\pcsx2` (`OB_PCSX2`) HEAD + `diff HEAD`; tree `native/pcsx2_gs/` (T8).
+- `PS2X_GS=pcsx2-sw|pcsx2-vk` passes through to the boot (default cpu; docs/ops/gs.md).
 - `gate.py synth DIR`: synthetic refs/manifest, frames-identical|erased|shifted|advisory (title erased, rest
   identical), boot-*.log, `tol-advisory.json` {d:8,p:0.001,advisory:["title"]}, `tol-none.json` {d:8,p:0.001}
   (tests only, `.run/1.2/`).

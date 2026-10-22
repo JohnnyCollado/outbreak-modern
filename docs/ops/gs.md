@@ -82,7 +82,46 @@ backend interface, privileged registers, readback, present and vblank).
 - Smoke basemem sets SMODE1 CMOD=2 (NTSC): `GSState::GetVideoMode` reads it, else Unknown. Smoke sets
   `DisableShaderCache=true` so every run compiles through shaderc.
 
+## Runner integration (T8)
+
+- Selector: `PS2X_GS=cpu|pcsx2-sw|pcsx2-vk`, read once at startup (`ps2_runtime.cpp:752-775`); unset = cpu; unknown =
+  `[gs] unknown PS2X_GS=...`, error exit. The gate passes it through: `PS2X_GS=pcsx2-sw bash tools/ob.sh gate`.
+- Seam = PS2Recomp patches 0021-0023 (`upstream/ps2recomp/`): `PS2ExternalGS` (`runtime/gs/gs_external.h`):
+  `gifPacket(path, data, size)` from the GIF arbiter sink, `privWrite(offset, value)`, `vsync(tick, regs)`,
+  `readLocalToHost`, `reset`, `snapshot`; null = unchanged CPU behaviour. CMake `PS2X_EXTERNAL_GS_DIR` links
+  `native/pcsx2_gs`; refuses `PS2X_ENABLE_DEBUG_UI=ON` with it (one imgui). 0022: native GIF DMA chains tee their
+  PATH3 bytes; packed external frames latch into the 640-stride host frame. 0023: public `GS::writeRegister` (HLE
+  libgraph stubs: sceGsPutDrawEnv, sceGsSwapDBuff, clear packets) tees a 32 B PACKED A+D PATH3 packet.
+  The CPU GS still runs underneath (CSR/SIGNAL/FINISH, FIELD stay ours); PCSX2 only draws.
+- Two targets: `hook.cpp` (built with PS2Recomp headers) implements `PS2ExternalGS` over a plain-types bridge
+  `ob_gs_bridge.h`; `pcsx2_side.cpp` (built with PCSX2 headers) calls the GS API. Header sets never meet.
+- Per-path carry (`ob_gs_gif`): only whole GIFtag units go to `GSgifTransfer` (the arbiter hands DMA slices that
+  split tag from data; `GSState::Transfer` overreads on a call ending right after a PACKED tag). The tail carries to
+  the next packet of that path only if its open unit is IMAGE; any other cut unit is dropped, as the CPU GS drops it
+  (one malformed packet would otherwise swallow the path's later packets).
+- Synthetic-tag strip: the VIF1 interpreter resubmits the rest of a PATH2 IMAGE behind a synthesized IMAGE tag
+  (`ps2_vif1_interpreter.cpp:307-323`); PCSX2 still has the original IMAGE open, so the adapter drops that 16 B tag
+  (PATH2, carry holds open IMAGE, tag = FLG 2, NLOOP = qwc-1, other bits 0). Without it: black frames.
+- Vsync: privileged regs mirror into the 8 KB basemem, then `GSvsync(field = CSR bit 13)`.
+- Snapshot (frame dump/capture): 1:1 crop of the displayed rect read from `g_gs_renderer->m_mem` (circuit 1 if
+  PMODE EN1 else 2; DISPFB FBP/FBW/PSM, DBX/DBY; size (DW+1)/(MAGH+1) x (DH+1)) after `Flush` +
+  `InvalidateLocalMem` (SW sync). `GSSaveSnapshotToMemory` returns the whole 640x960 texture, not the display rect.
+- Pitfall: never `GSReadLocalMemoryUnsync` for diagnostics or snapshots: it mutates PCSX2's transfer state
+  (`GSState.cpp:3304-3333`) and broke the run. Readback (`readLocalToHost`) uses `GSInitAndReadFIFO`.
+- Staging: `cmd_recompile` configures with `-DPS2X_EXTERNAL_GS_DIR=native/pcsx2_gs -DOB_PCSX2 -DOB_PCSX2_DEPS` and
+  copies `shaderc_shared.dll`, `zstd.dll` and shaders beside `ps2EntryRunner.exe`; boots run with the Vulkan SDK off
+  PATH. Needs `ob.sh pcsx2-gs` once (deps). `gate.py stamp` hashes `C:\ob\pcsx2` HEAD + diff and `native/pcsx2_gs/`.
+
 ## Later phases
+
+- Debt before Android (partner decision): the synthetic-tag strip couples the adapter to
+  `ps2_vif1_interpreter.cpp:307-323`. Clean fix: a PS2Recomp patch flagging those packets in the arbiter (tee without
+  the tag).
+- Lead for 1.4: an untagged 135,280 B PATH2 DIRECT of unknown origin (q0 `952f7627748d5850`, after a 96 B A+D +
+  IMAGE tag and its 1024 B data) at the title -> main menu transition; possible VIF1 parser desync. The CPU GS also
+  reads it as garbage; may explain faults shared by both GSes.
+- 1.4: access logo colours stippled (navy/black shown as dithered grey-purple; suspect `Dithering` or a 16-bit
+  path); savedata glyphs thin/broken strokes.
 
 - 4K texture pack: `GSTextureReplacements` (+ `GSTextureReplacementLoaders.cpp`, `common/Image.cpp`) is stubbed now
   and must be un-stubbed, which brings libpng/libjpeg/libwebp (and zlib) back into `pcsx2-deps.bat`.

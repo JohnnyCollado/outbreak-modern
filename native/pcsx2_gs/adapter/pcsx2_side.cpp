@@ -7,6 +7,7 @@
 
 #include "Config.h"
 #include "GS/GS.h"
+#include "GS/Renderers/Common/GSRenderer.h"
 
 #include "ob_pcsx2_gs.h"
 #include "ob_gs_bridge.h"
@@ -23,7 +24,6 @@ namespace
 	ObGsRenderer s_renderer = ObGsRenderer::SW;
 	bool s_tried = false, s_open = false, s_logged_snap = false;
 	alignas(64) u8 s_basemem[0x2000] = {};
-	std::vector<u32> s_px;
 	std::vector<u8> s_rgba;
 
 	GSRendererType ToType(ObGsRenderer r) { return r == ObGsRenderer::VK ? GSRendererType::VK : GSRendererType::SW; }
@@ -250,26 +250,48 @@ const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height)
 	std::lock_guard<std::mutex> lk(s_mu);
 	if (!EnsureOpen())
 		return nullptr;
-	u32 w = 0, h = 0;
-	s_px.clear();
-	if (!GSSaveSnapshotToMemory(0, 0, false, true, &w, &h, &s_px) || w == 0 || h == 0 || s_px.size() < (size_t)w * h)
-		return nullptr;
 	u32 dw = 0, dh = 0;
 	DisplayRect(dw, dh);
+	// 1:1 crop of the displayed rect from PCSX2's local memory, as our CPU presentation reads it
+	// (gs_cpu_backend.cpp PresentFromLocalMemory: circuit 1 if enabled else 2, FBP/FBW/PSM, origin DBX/DBY).
+	// Was a nearest-neighbour scale of GSSaveSnapshotToMemory's 640x960 texture: shifted/clipped the image.
+	// Not GSReadLocalMemoryUnsync: it mutates PCSX2's transfer state (GSState.cpp:3304-3333).
+	const u64 pmode = Get64(0x00);
+	const bool c1 = (pmode & 1) != 0;
+	const u64 fb = Get64(c1 ? 0x70 : 0x90);
+	const u32 fbp = (u32)(fb & 0x1FF), fbw = (u32)((fb >> 9) & 0x3F), psm = (u32)((fb >> 15) & 0x1F);
+	const u32 dbx = (u32)((fb >> 32) & 0x7FF), dby = (u32)((fb >> 43) & 0x7FF);
+	if (!g_gs_renderer || fbw == 0)
+		return nullptr;
+	GSState& gs = *g_gs_renderer;
+	gs.Flush(GSState::GSFlushReason::DOWNLOADFIFO);
+	GIFRegBITBLTBUF bb = {};
+	bb.SBP = fbp * 32;
+	bb.SBW = fbw;
+	bb.SPSM = psm;
+	gs.InvalidateLocalMem(bb, GSVector4i((int)dbx, (int)dby, (int)(dbx + dw), (int)(dby + dh)));
 	if (!s_logged_snap)
 	{
 		s_logged_snap = true;
-		std::fprintf(stderr, "[pcsx2-gs] first snapshot %ux%u, display rect %ux%u\n", w, h, dw, dh);
+		std::fprintf(stderr, "[pcsx2-gs] first snapshot crop %ux%u fbp %u fbw %u psm %u at %u,%u\n", dw, dh, fbp, fbw, psm, dbx, dby);
 		std::fflush(stderr);
 	}
-	// Nearest-neighbour scale of the snapshot (the whole current texture) to the display rect.
 	s_rgba.resize((size_t)dw * dh * 4);
+	const GSLocalMemory& mem = gs.m_mem;
 	for (u32 y = 0; y < dh; y++)
 	{
-		const u32* src = s_px.data() + (size_t)((u64)y * h / dh) * w;
 		for (u32 x = 0; x < dw; x++)
 		{
-			const u32 p = src[(u64)x * w / dw] | 0xFF000000u;
+			const int px = (int)((dbx + x) & 0x7FF), py = (int)((dby + y) & 0x7FF);
+			u32 p;
+			if (psm == PSMCT16 || psm == PSMCT16S)
+			{
+				const u32 v = psm == PSMCT16 ? mem.ReadPixel16(px, py, fbp * 32, fbw) : mem.ReadPixel16S(px, py, fbp * 32, fbw);
+				p = ((v & 0x1F) << 3) | (((v >> 5) & 0x1F) << 11) | (((v >> 10) & 0x1F) << 19);
+			}
+			else
+				p = mem.ReadPixel32(px, py, fbp * 32, fbw);
+			p |= 0xFF000000u;
 			std::memcpy(&s_rgba[((size_t)y * dw + x) * 4], &p, 4);
 		}
 	}
