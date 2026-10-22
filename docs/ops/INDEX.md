@@ -14,5 +14,5 @@ gotchas.md | Harness and build gotchas | 33
 pins.md | Pins | 14
 tools.md | Project tools (tools/) | 22
 workspace.md | Workspace: C:\ob, game data, generated paths | 42
-gate.md | The gate (phase 1.2) | 18
-reference-capture.md | Reference capture (PCSX2 2.9.134, SLPM-65428) | 59
+gate.md | The gate (phase 1.2) | 87
+reference-capture.md | Reference capture (PCSX2 2.9.134, SLPM-65428) | 62
