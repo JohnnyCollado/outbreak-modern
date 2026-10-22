@@ -92,3 +92,4 @@ Approved: 2026-10-22   Planner: pa-planner   Plan-hash: d7d3ca1e2fe5b26b2faac51d
 - 2026-10-22 router: T2 next -> done
 - 2026-10-22 router: T3 next -> done
 - 2026-10-22 router: T4 next -> done
+- 2026-10-22 developer: T5 question answered 2026-10-22: (Q1) title, mainmenu, charselect split into strict UI regions (d, p as static screens) + a coarse background check (statistic + tolerance from PCSX2 a-vs-b), no plain mask; regions + metric added in T5 (tool change in tools/gate/gate.py via coder); (Q2) runner line-doubling = runner fault, moved to phase 1.3 scope (GENERATION_PLAN.md); refs not retaken with Bob.
