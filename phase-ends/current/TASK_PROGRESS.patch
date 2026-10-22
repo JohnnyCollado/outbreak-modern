@@ -1,0 +1,108 @@
+diff --git a/gate/boot.script b/gate/boot.script
+new file mode 100644
+index 0000000..f3ae7ed
+--- /dev/null
++++ b/gate/boot.script
+@@ -0,0 +1,50 @@
++# gate/boot.script — hidden scripted boot to character select (patch 0020, PS2X_INPUT_SCRIPT).
++# Run: bash tools/ob.sh boot --script gate/boot.script --tag <T>; dumps <screen>-<k>.png in C:\ob\frames-<T>.
++# Guest-state predicates only (no game data). Addresses: SLPM_654.28 en; sources R1.1-007, R1.1-008,
++# phase-ends/current/tasks/T4.md (boot-task slot from splat asm; values confirmed by the t4disc watch boot).
++#   0x002F85D8 u16 = boot task (task pool D_002F85D0 slot 0): byte0 step, byte1 sub (boottask.c:80-170)
++#   *0x0023BE34    = TitleWork*: +0 state, +1 sub, +2 step, +3 unk (title.c:9-49)
++#   *0x003065FC    = SelectWork*: +4 state, 9 = character select (title.c:1150-1160, :1464)
++# Settle waits (wait vsync) put each capture inside the screen's fully faded-in span.
++timeout 420
++
++log save-data screen (memory-card prompt): boot task step 1 sub 4
++wait mem 0x002F85D8 2 == 0x0401
++wait vsync 120
++capture savedata 3
++press left 8
++wait vsync 30
++press circle 8
++
++log ACCESS logo: boot task step 1 sub 9 (128 vsyncs)
++wait mem 0x002F85D8 2 == 0x0901
++wait vsync 100
++capture access 3
++
++log CAPCOM logo: title state 0 sub 0 step 1
++wait mem *0x0023BE34+0 4 == 0x00010000
++wait vsync 120
++capture capcom 3
++
++log title PRESS START: title state 0 sub 2 step 3
++wait mem *0x0023BE34+0 4 == 0x00030200
++wait vsync 120
++capture title 3
++press start 8
++
++log main menu input wait: title state 1 sub 5 step 5
++wait mem *0x0023BE34+0 4 == 0x00050501
++wait vsync 60
++capture mainmenu 3
++press circle 8
++
++log Scenario Select: title state 2 sub 2 step 2
++wait mem *0x0023BE34+0 4 == 0x00020202
++wait vsync 60
++press circle 8
++
++log character select: select state 9
++wait mem *0x003065FC+4 1 == 9
++wait vsync 90
++capture charselect 3
++quit
+diff --git a/tools/ob.sh b/tools/ob.sh
+index 8142735..74432c2 100644
+--- a/tools/ob.sh
++++ b/tools/ob.sh
+@@ -7,6 +7,8 @@
+ #   tools/ob.sh test                         ps2x_tests, IOP tests, gs_cache tests: "<suite>: <pass>/<total>"
+ #   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
+ #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
++#   tools/ob.sh boot --script F [--tag T]    hidden scripted boot (PS2X_INPUT_SCRIPT, patch 0020); ends by
++#                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
+ #
+ # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
+ # OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat.
+@@ -125,19 +127,35 @@ cmd_recompile() {
+ }
+ 
+ cmd_boot() {
+-    local secs=200 tag=latest
++    local secs=200 tag=latest script=
+     while [ $# -gt 0 ]; do
+         case $1 in
+             --secs) secs=$2; shift 2 ;;
+             --tag) tag=$2; shift 2 ;;
++            --script) script=$2; shift 2 ;;
+             *) echo "boot: unknown arg $1"; return 2 ;;
+         esac
+     done
+     local logs; logs=$(cygpath -w "$OB_LOGS")
+-    PS2X_AUTO_PRESS=1 PS2X_FRAME_DUMP_DIR="$OB_ROOT/frames" powershell -NoProfile -Command "
++    local frames="$OB_ROOT/frames"
++    if [ -n "$script" ]; then
++        # Scripted boot: hidden window, script owns the pad, dumps only in capture steps to frames-<tag>.
++        # The script's own timeout ends the run (exit 3); --secs (default 900 here) is only a safety kill.
++        [ -f "$script" ] || { echo "boot: no script $script"; return 2; }
++        [ "$secs" = 200 ] && secs=900
++        frames="$OB_ROOT/frames-$tag"; rm -rf "$frames"; mkdir -p "$frames"
++        export PS2X_INPUT_SCRIPT; PS2X_INPUT_SCRIPT=$(cygpath -w "$(realpath "$script")")
++        export PS2X_HIDDEN=1
++    fi
++    PS2X_FRAME_DUMP_DIR="$(cygpath -w "$frames")" powershell -NoProfile -Command "
+         \$elf = '$(cygpath -w "$OB_RUN/SLPM_654.28")'
+         \$p = Start-Process -FilePath '$(cygpath -w "$OB_R/ps2xRuntime/ps2EntryRunner.exe")' -ArgumentList ('\"' + \$elf + '\"') -WorkingDirectory '$logs' -RedirectStandardOutput '$logs\\boot-$tag.log' -RedirectStandardError '$logs\\boot-$tag.err' -PassThru
+-        if (-not \$p.WaitForExit(${secs}000)) { Stop-Process -Id \$p.Id -Force; 'stopped after $secs s' } else { 'exited by itself' }"
++        \$null = \$p.Handle
++        if (-not \$p.WaitForExit(${secs}000)) { Stop-Process -Id \$p.Id -Force; 'stopped after $secs s'; exit 124 }
++        'exited by itself, code ' + \$p.ExitCode; exit \$p.ExitCode"
++    local rc=$?
++    echo "boot $tag: exit $rc; log $OB_LOGS/boot-$tag.log; frames $frames"
++    return $rc
+ }
+ 
+ case ${1:-} in
