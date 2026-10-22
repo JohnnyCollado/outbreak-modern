@@ -84,6 +84,11 @@ so `watch 0x12000020` silently reads RDRAM 0x20. No env switch traces them. FBW 
   probe120.script, t5_tol.py/.log, t5_field.py/.log, t5_blocks.py/.log, t5_sfd2.py/.log, t6-selftest.log,
   t7-gate1.log, t7-gate2.log. Scratch not cited was dropped.
 
+## Current baseline (phase 1.3, 2026-10-22) — `gate/baseline-1.3.md`
+- `C:\ob\up` 00e03cd (patches 0001-0029). pcsx2-vk: savedata 0.003353, access 0.000000 GREEN, capcom 0.001251
+  (1/3 gated green); cpu: 0.042668, 0.050319, 0.018507 (0/3). Frame time: pcsx2-vk busy median ~4.85 ms, cpu ~10.2 ms.
+- Compare new runs against this file; the 1.2 baseline below is history.
+
 ## Baseline (T7, 2026-10-22) — `gate/baseline-1.2.md`
 - `C:\ob\up` ab85c05 (patches 0001-0020), frozen tolerance 20233c3: exit 1, 0/3 gated green, wall ~54.5 s, hidden=1.
 - Shares: savedata 0.043597, access 0.248753, capcom 0.082450 RED; title 0.999865, mainmenu 0.998910, charselect 0.891462
