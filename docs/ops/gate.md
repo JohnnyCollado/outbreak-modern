@@ -14,21 +14,22 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
 - Screens (boot order): savedata, access, capcom, title, mainmenu, charselect; runner side `C:\ob\frames-<T>\<screen>-<k>.png`.
 
 ## gate.py and ob.sh gate
-- `bash tools/ob.sh gate [--d N --p F] [--tolerance PATH]` (both passed to selftest and compare): stamp vs `C:\ob\r\gate.stamp`; differ or runner exe missing -> recompile, then
+- `bash tools/ob.sh gate [--selftest [--d N --p F]] [--tolerance PATH]` (`--tolerance` to both; `--d/--p` selftest only,
+  full gate with them -> exit 2, T6): stamp vs `C:\ob\r\gate.stamp`; differ or runner exe missing -> recompile, then
   write the pre-recompile stamp (`gate: recompiled in <s> s` / `gate: not recompiled`); boot `gate/boot.script --tag gate`;
   `gate.py selftest`; `gate.py compare` on `C:\ob\frames-gate` + `C:\ob\logs\boot-gate.log`. `--selftest`: selftest only.
 - Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, unknown screen in `advisory`, ref sha256/size !=
   manifest, captures per screen != manifest `window`, frame without tick), 3 boot failed, 4 recompile failed,
   5 selftest red.
 - Tolerance file (`--tolerance PATH`, default `gate/tolerance.json`): `{d, p, metric, evidence, frozen, advisory?}`;
-  `advisory: [screen, ...]` optional (absent = []), names must be in the 6 screens. `--d/--p` override d/p only;
-  advisory comes from the file only.
-- `gate.py compare --frames D --log F [--refs C:/ob/ref] [--manifest gate/ref_manifest.json] [--tolerance P]
-  [--d N --p F]`. RGB only, delta = max channel |diff|; best frame = lowest share, max, k.
+  `advisory: [screen, ...]` optional (absent = []), names must be in the 6 screens. `--d/--p` override d/p in selftest only
+  (compare refuses them, exit 2: the frozen file is the gate, rule P9); advisory comes from the file only.
+- `gate.py compare --frames D --log F [--refs C:/ob/ref] [--manifest gate/ref_manifest.json] [--tolerance P]`.
+  RGB only, delta = max channel |diff|; best frame = lowest share, max, k.
   Per screen: `<screen> best k=<k> tick=<t> max=<int> share=<float> p=<float> GREEN|RED[ ADVISORY]`; last line
   `gate: <g>/<n> gated green, <m> advisory, exit <code>, wall <s> s` (n = 6 - m; refusals:
   `gate: <reason>, exit 2, wall <s> s`). Exit 0 iff every non-advisory screen GREEN; advisory screens are printed only.
-- `gate.py selftest [--tolerance P]`: per screen ref b vs a GREEN; ref a with "missing layer" (top area x
+- `gate.py selftest [--tolerance P] [--d N --p F]`: refs a/b sha256/size vs manifest first (exit 2); per screen ref b vs a GREEN; ref a with "missing layer" (top area x
   colour-distance component's bbox filled with its ring median) and "shifted glyph" (max FIND_EDGES-energy 24x24
   window +2 px x) RED. Advisory screens' cases print with suffix ` advisory` and are not counted (real refs:
   title/mainmenu/charselect b-vs-a are RED by design). Temp `.run/1.2/selftest-<pid>/`, deleted.

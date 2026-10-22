@@ -161,16 +161,21 @@ cmd_boot() {
 
 # Gate (docs/ops/gate.md): exit 0 green, 1 red, 2 refusal, 3 boot failed, 4 recompile failed, 5 selftest red.
 cmd_gate() {
-    local start selftest=0 tol=() s t rc
+    local start selftest=0 tol=() dp=() s t rc
     start=$(date +%s)
     while [ $# -gt 0 ]; do
         case $1 in
             --selftest) selftest=1; shift ;;
-            --d|--p|--tolerance) tol+=("$1" "$2"); shift 2 ;;
+            --d|--p) dp+=("$1" "$2"); shift 2 ;;
+            --tolerance) tol+=("$1" "$2"); shift 2 ;;
             *) echo "gate: unknown arg $1"; return 2 ;;
         esac
     done
     local G="$REPO/tools/gate/gate.py"
+    # T6: d/p overrides are selftest-only; the full gate scores with the tolerance file (rule P9).
+    if [ $selftest = 0 ] && [ ${#dp[@]} -gt 0 ]; then
+        echo "gate: --d/--p need --selftest (the gate reads the tolerance file), exit 2, wall 0 s"; return 2
+    fi
     if [ $selftest = 0 ]; then
         s=$("$PY" -I "$G" stamp) || { echo "gate: stamp failed, exit 2, wall $(( $(date +%s) - start )) s"; return 2; }
         if [ "$s" != "$(cat "$OB_R/gate.stamp" 2>/dev/null)" ] || [ ! -f "$OB_R/ps2xRuntime/ps2EntryRunner.exe" ]; then
@@ -184,7 +189,7 @@ cmd_gate() {
         cmd_boot --script "$REPO/gate/boot.script" --tag gate ||
             { echo "gate: boot failed, exit 3, wall $(( $(date +%s) - start )) s"; return 3; }
     fi
-    "$PY" -I "$G" selftest --start "$start" "${tol[@]}"; rc=$?
+    "$PY" -I "$G" selftest --start "$start" "${tol[@]}" "${dp[@]}"; rc=$?
     [ $selftest = 0 ] && [ $rc = 0 ] || return $rc
     "$PY" -I "$G" compare --frames "$OB_ROOT/frames-gate" --log "$OB_LOGS/boot-gate.log" --start "$start" "${tol[@]}"
 }

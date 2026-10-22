@@ -1,13 +1,13 @@
 """Boot-screen gate (phase 1.2): runner captures vs PCSX2 references. Pillow only.
 
 Usage (any cwd; defaults resolve against the repo root):
-  python tools/gate/gate.py compare --frames D --log F [--refs D] [--manifest P] [--tolerance P] [--d N] [--p F] [--start EPOCH]
+  python tools/gate/gate.py compare --frames D --log F [--refs D] [--manifest P] [--tolerance P] [--start EPOCH]
       Per screen: every frame <frames>/<screen>-<k>.png vs <refs>/<screen>-a.png, RGB only;
       delta = max(|dR|,|dG|,|dB|), share = count(delta > d) / (w*h); best frame = lowest share,
       then lowest max, then lowest k; tick from the boot log. GREEN = share <= p.
       Advisory screens print with " ADVISORY" and do not count: exit 0 iff every gated screen GREEN.
   python tools/gate/gate.py selftest [--refs D] [--manifest P] [--tolerance P] [--d N] [--p F] [--start EPOCH]
-      Per screen: ref b vs ref a must be GREEN; two damaged copies of ref a ("missing layer",
+      Refs a/b checked against the manifest (sha256, size) first. Per screen: ref b vs ref a must be GREEN; two damaged copies of ref a ("missing layer",
       "shifted glyph") must be RED. Damaged copies live in .run/1.2/selftest-<pid>/, deleted after.
       Advisory screens' cases print with " advisory" and are not counted.
   python tools/gate/gate.py stamp
@@ -17,7 +17,8 @@ Usage (any cwd; defaults resolve against the repo root):
       boot logs, tol-advisory.json {d:8,p:0.001,advisory:["title"]}, tol-none.json {d:8,p:0.001}.
 Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, unknown advisory screen, sha/size/count/tick
 mismatch), 5 selftest red.
-d/p: --d/--p if given, else --tolerance file (default gate/tolerance.json) {d, p, advisory?, ...}.
+d/p: --tolerance file (default gate/tolerance.json) {d, p, advisory?, ...}; --d/--p override it in selftest
+only (T6: compare refuses them, the frozen file is the gate, rule P9).
 advisory: [screen, ...] from the tolerance file only (absent = []).
 """
 import argparse
@@ -138,6 +139,8 @@ def read_ticks(log):
 def cmd_compare(a):
     try:
         man = check_refs(a, ["a"])
+        if a.d is not None or a.p is not None:
+            raise Refusal(f"compare: --d/--p are selftest-only; d/p come from {a.tolerance}")
         d, p, adv = tolerance(a)
     except Refusal as e:
         return finish(2, a.start, str(e))
@@ -269,17 +272,25 @@ def shifted_glyph(im):
 
 def cmd_selftest(a):
     try:
-        check_refs(a, ["a", "b"])
+        man = check_refs(a, ["a", "b"])
         d, p, adv = tolerance(a)
     except Refusal as e:
         return finish(2, a.start, str(e))
+    bad, refs = [], {}
+    for s in SCREENS:
+        for t in ("a", "b"):
+            refs[(s, t)], probs = verify_ref(man, a.refs, s, t)
+            bad += probs
+    if bad:
+        for b in bad:
+            print(f"refused: {b}")
+        return finish(2, a.start, f"refused ({len(bad)} problem(s))")
     tmp = os.path.join(TEMP_ROOT, f"selftest-{os.getpid()}")
     os.makedirs(tmp, exist_ok=True)
     ok_n, total = 0, 0
     try:
         for s in SCREENS:
-            ra = load_rgb(os.path.join(a.refs, f"{s}-a.png"))
-            rb = load_rgb(os.path.join(a.refs, f"{s}-b.png"))
+            ra, rb = refs[(s, "a")], refs[(s, "b")]
             cases = [("b-vs-a", rb, "", True)]
             for name, fn in (("missing layer", missing_layer), ("shifted glyph", shifted_glyph)):
                 dmg, desc = fn(ra)
