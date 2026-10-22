@@ -38,3 +38,25 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
 GS privileged registers (PMODE, SMODE2, DISPFB1/2, DISPLAY1/2) are not readable without a patch: the script's
 read lambda (`C:\ob\up\ps2xRuntime\src\lib\Kernel\EeScheduler.cpp:1897-1906`) reads RDRAM only (`addr & 0x01FFFFFF`),
 so `watch 0x12000020` silently reads RDRAM 0x20. No env switch traces them. FBW and SMODE2 (field/frame) unknown.
+
+## Our-side noise floor and capture windows (T3, 2026-10-22)
+- Tool: scratch `.run/1.2/t3_noise.py` (gate.py `metric`, `read_ticks`); boots hidden, same build, `gate/boot.script` n=3.
+- Run vs run (tags t3a, t3b), paired by tick (13 of 18 ticks in both; 5 shifted +-1 tick): 11 pairs max=0 share=0.
+  charselect (2 pairs): max=26, share 0.000070/0.000052 at d=0..8, 0.000026/0.000035 at d=16, 0 at d=32; all of it in
+  a 6x4 box (147,72)-(153,76) holding garbage texels that change frame to frame (runner self-noise, uninit texture).
+- Probe (tag t3p, `.run/1.2/probe120.script` = boot.script with `capture <screen> 120`, timeout 900; exit 0, wall 62 s):
+  - field alternation (whole frame or text drawn 1 line apart on alternate fields): savedata A,B,B every 4 ticks
+    (max 183, share>8 0.016); mainmenu same, but only after a single-phase span of up to 60 ticks at 15 fps (max 243,
+    share 0.029); charselect A,B,B (max 253, share 0.15). access/capcom latch every 2 ticks: one field phase only
+    (access phase change at the window edge: max 254, share 0.16).
+  - title: only PRESS START box (169,320)-(345,340) changes: field flicker + pulse, mean luma 1..67, period ~85 ticks
+    (troughs t=1789, 1874). Window sampling floor (probe frame j>=N vs best of frames 0..N-1): N=64 max 12, share>8
+    worst 0.0026, share>16 0; same max at N=32/48.
+  - access static 117 ticks from window start, then fade; capcom static 77 ticks, then fade; charselect: after ~49
+    ticks of window (~140 after state 9) portrait vanishes and a white box shows (one-time state change, kept out).
+- Windows set in `gate/boot.script`: savedata 6, access 6, capcom 6, title 64, mainmenu 32, charselect 6 (was 3 each).
+  6 = 2 alternation periods inside each stable span; title 64 = one full pulse; mainmenu 32 reaches the alternation.
+- Verify (tag t3w, n as above): exit 0, `window hidden=1`, 120 frames, wall 50 s (420 s script timeout unchanged);
+  every screen inside its stable span; savedata, mainmenu, charselect hold both field phases; title luma 1..68.
+- For T5: our static access/capcom frames show one field phase only; a PCSX2 shot of the other phase differs by a
+  1-line shift. Title text clipped at x=345 ("BUTTO") and black title/menu backgrounds: compare with the refs.

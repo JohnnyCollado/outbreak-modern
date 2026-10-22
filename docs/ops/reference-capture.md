@@ -53,7 +53,10 @@ Shoot each when it is fully faded in and still, before any input on that screen.
 - (content warning: no input, it advances by itself; not shot)
 - access: ACCESS logo, fully visible. Short (about 2 s): pause promptly.
 - capcom: CAPCOM logo, fully visible.
-- title: title screen with PRESS START visible (if it blinks, pause on a frame where it shows). Then Start.
+- title: title screen with PRESS START visible. It pulses (fades out and back, ~1.4 s); any frame where the text
+  shows is fine: the runner captures one full pulse (64 frames). Then Start.
 - mainmenu: main menu, default cursor, no input yet. Then Circle (single play), Circle on the entry screen,
   Circle on Scenario Select (default scenario).
-- charselect: character select as it first appears, default character, no input.
+- charselect: character select as it first appears (within ~2 s), default character, portrait shown, no input.
+  The runner captures it ~1.5 s after it appears; on the runner the portrait disappears ~2.3 s in (unverified on PCSX2:
+  note it if PCSX2 does the same).
