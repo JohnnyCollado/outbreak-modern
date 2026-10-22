@@ -1,6 +1,7 @@
 # Gate tolerance — DRAFT (T5, 2026-10-22; not frozen, freeze is T6 with the developer)
 
-Status: draft. d proposed; p proposed for static screens only. Two open questions block the freeze (end of file).
+Status: draft. d proposed; p proposed for static screens only. Q2 decided (runner fault, 1.3); Q1 region split
+measured and fails its premise (section 6): the freeze stays blocked on Q1.
 Metric (gate.py `metric`): delta = max(|dR|,|dG|,|dB|) per pixel, alpha ignored; share = count(delta > d)/(512*448).
 Measured with scratch `.run/1.2/t5_tol.py`, `t5_field.py` (gate.py `metric`, `missing_layer`, `shifted_glyph`);
 logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
@@ -64,7 +65,31 @@ logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
   identical, our window must cover that count; (B) mask the animated background (hides the missing title
   background, 1.4 scope); (C) mask it from the strict metric and check it with a coarse statistic (metric change,
   GENERATION_PLAN binding). Recommended: A, then C if A's a/b are not identical.
-- Q2 field presentation: refs show the full 448-line frame, the runner bob-doubles one field. Options: (A) runner
+- Q2 DECIDED 2026-10-22 (developer): runner fault, field presentation in 1.3 scope; refs kept; d/p not widened.
+  Today's build is expected RED on every screen for this reason alone (bob-doubled lines, ~0.012-0.05 share est.).
+  Original question: refs show the full 448-line frame, the runner bob-doubles one field. Options: (A) runner
   fault: keep refs, add field presentation to fix scope (1.3, it touches ACCESS/CAPCOM first); (B) legitimate:
   recapture refs with deinterlace Bob (4/5) so both sides show one field. Recommended: A (the frame buffer holds 448
   distinct lines; the CRT shows both fields; doubling loses half the image).
+
+## 6. Q1 follow-up: UI-region split (developer's choice 2026-10-22), measured; premise fails
+Plan: strict d/p on UI rectangles where PCSX2 a == b; background (complement) by a coarse statistic
+= max over channels of |mean diff| and |std diff| (ImageStat, masked). Scratch `.run/1.2/t5_blocks.py`,
+`t5_regions.py`; logs `t5_blocks.log`, `t5_regions.log`.
+- 16x16 block map (a vs b, any delta > 8): mainmenu: every block row differs except y 16-31 (flat bar) and
+  scattered blocks; title: PRESS START box and most of the frame differ; charselect: only the large portrait
+  area is mostly clean.
+- Candidate UI rects, a vs b, pixels over d=8 (p = 0.0001 = 23 px): title press (169,320)-(345,340) 1511 px,
+  max 26 (text pulses, T3); title corner (0,0)-(160,48) 141. mainmenu logo (50,112)-(460,232) 34628, max 46;
+  menu (185,250)-(325,375) 10239, max 99; copyright (120,400)-(400,416) 146, max 15. charselect header
+  (88,20)-(425,56) 5662; strip (0,100)-(512,240) 32542; info (30,272)-(300,392) 16560; portrait
+  (288,128)-(400,272) 918; portrait low (336,272)-(512,432) 1936; prompts (40,408)-(512,432) 1403.
+  No region is within noise: smallest 141 px > p (23 px) by 6x. Cause: UI is translucent over / interleaved with
+  the animated layer (mainmenu scanline band crosses the logo and menu).
+- Coarse background statistic, a vs b vs a with black background: title 1.10 vs 38.00; mainmenu 5.01 vs 50.22;
+  charselect 10.26 vs 34.93. Separates a missing background (margin >= 3x).
+- Coarse statistic cannot catch a missing UI layer: whole-frame stat with one UI rect filled by its median vs
+  a-vs-b noise: mainmenu menu 0.87 (noise 3.31), copyright 2.28; charselect header 2.36, prompts 2.60, portrait
+  4.56 (noise 5.54); title press 4.88 (noise 0.96, the one detectable case).
+- Conclusion: the split gives a working background check but no strict UI region on any of the three screens; a
+  missing or misdrawn UI layer stays undetected. Not briefed to a coder. Options in the T5 summary.
