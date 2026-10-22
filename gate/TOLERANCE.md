@@ -1,0 +1,70 @@
+# Gate tolerance — DRAFT (T5, 2026-10-22; not frozen, freeze is T6 with the developer)
+
+Status: draft. d proposed; p proposed for static screens only. Two open questions block the freeze (end of file).
+Metric (gate.py `metric`): delta = max(|dR|,|dG|,|dB|) per pixel, alpha ignored; share = count(delta > d)/(512*448).
+Measured with scratch `.run/1.2/t5_tol.py`, `t5_field.py` (gate.py `metric`, `missing_layer`, `shifted_glyph`);
+logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
+
+## 1. Noise floor, PCSX2 (ref a vs ref b, C:\ob\ref, manifest gate/ref_manifest.json)
+- savedata, access, capcom: max 0, share 0 at every d (byte-identical).
+- title: max 90; share d8 0.1425, d16 0.0534, d32 0.0115. Whole frame (bbox full), even/odd rows equal.
+- mainmenu: max 114; share d8 0.4366, d16 0.2465, d32 0.0922. Whole frame.
+- charselect: max 226; share d8 0.4253, d16 0.2548, d32 0.0952. bbox (0,16)-(512,432).
+- Cause (contact sheet a|b|diff, viewed locally, not kept): animated backgrounds. Title fog/water layer, mainmenu
+  scrolling eye texture + scanline band, charselect moving background ("GATE" layer differs). UI text identical.
+  Not rendering noise: two moments of an animation.
+
+## 2. Noise floor, ours (T3, docs/ops/gate.md "Our-side noise floor")
+- run vs run by tick: 11/13 pairs max 0; charselect max 26, share 7.0e-5 at d<=8 (16 px), 3.5e-5 at d16, 0 at d32;
+  6x4 box (147,72)-(153,76), uninitialised texels (runner fault, counted as noise until fixed).
+- title window sampling floor (n=64): max 12, share>8 0.0026, share>16 0.
+- field-phase alternation: savedata/mainmenu/charselect alternate two images 1 line apart (share 0.016/0.029/0.15);
+  access/capcom one phase only.
+
+## 3. Legitimate differences (not rendering faults)
+- 16->8 expansion. Runner: bit replication `(c<<3)|(c>>2)` (C:\ob\up\ps2xRuntime\src\lib\gs\gs_cpu_backend.cpp:1831-1833,
+  read 2026-10-22). PCSX2 2.9.134: zero fill `c<<3` in Expand16To32 (texture) and ReadFrame16 (display readback)
+  (GSLocalMemory.h, R1.2-007). Delta = c>>2, max 7 (c=31), uniform, value-dependent, every pixel of a 16-bit source.
+- Dithering. PCSX2 SW ignores `dithering_ps2` (GSConfig.Dithering not read by GSRendererSW); dithers only when
+  env.DTHE && 16-bit frame target, at draw time (GSDrawScanline `sel.fpsm == 2 && sel.dthe`) (R1.2-007, R1.2-004).
+  Runner: none (DTHE stored only, gs_frontend.cpp:1421-1425). Frame target is 32-bit: R1.2-005 (640x448 PSMCT32 init)
+  and the refs: share of channel values with low 3 bits != 0 is access 0.90, title 0.69, mainmenu 0.78, charselect
+  0.76, capcom 0.12, savedata 0.024; a 16-bit readback (zero fill) gives exactly 0. So no dither and no display
+  expansion on these screens: bound 0. (If a 16-bit target appeared: dither +-1 LSB = 8, plus expansion 7 -> 15.)
+- Alpha blend `((A-B)*C)>>7` truncation vs rounding: 1 per blend step (R1.2-004), uniform on blended areas.
+- pcrtc_antiblur=true: changes only sub-4-px circuit/display offsets when both circuits read the same source
+  (GSState CalculateFramebufferOffset/DisplayOffset, R1.2-007). Refs a==b on static screens; any effect is a shift,
+  not a colour delta: not a d term. Unquantified; see Q2 (geometry).
+- Field/CRTC merge. PCSX2 deinterlace_mode 1 (Off): refs hold 448 distinct lines (line pairs equal: 0/224 title,
+  mainmenu; 0 on all screens except access 48/224, flat rows). Runner: `applyFieldPresentation`
+  (gs_cpu_backend.cpp:397-410) copies one field's line over its pair (bob): our frames have every even pair equal
+  (access 224/224, charselect 187/187, all screens). Delta at every horizontal edge = adjacent-line difference, up to
+  255; share estimated (not measured) as the 1-line-shift share / 2: savedata ~0.016, access ~0.05, capcom ~0.012 (ref a vs a shifted 1 line:
+  0.0318 / 0.1026 / 0.0248 at d8). Not bounded by any d < 255 and above every damage share: see Q2.
+
+## 4. Damage shares (selftest generators on ref a, d=8)
+- savedata: missing layer 0.000209 (6x13 box, 48 px), shifted glyph 0.001212.
+- access: missing 0.007276, shifted 0.001931. capcom: missing 0.145700, shifted 0.000593.
+- title: missing 0.003435, shifted 0.001495. mainmenu: missing 0.004464, shifted 0.000767.
+- charselect: missing 0.314135, shifted 0.001365.
+- Damage shares move little between d=8 and d=16 (e.g. savedata shifted 0.001212 both): the choice of d inside
+  [8,16] does not change what the selftest detects.
+
+## 5. Proposal
+- d = 8: expansion 7 + one blend rounding step 1. Dither excluded by the 32-bit-target evidence (section 3).
+- p = 0.0001 (~23 px), static screens (savedata, access, capcom): PCSX2 noise 0, our noise 0 (charselect garbage
+  7.0e-5 = 16 px would also fit) < p < smallest damage 0.000209 (savedata missing layer); margin x2 on the damage side.
+  Edge/rounding effects across emulators beyond d: none measured (cannot be, without scoring the build; T7).
+- Holds on: savedata, access, capcom, provided Q2 is answered "runner fault".
+- No single p works on: title, mainmenu, charselect (Q1), and on no screen if field duplication is legitimate (Q2).
+
+## Open questions (for T6 / the developer; no p is widened to fit)
+- Q1 animated backgrounds: PCSX2 a vs b 0.14-0.44 at d8 vs smallest damage 0.000767-0.001495 (title, mainmenu, charselect). Options: (A) frame-
+  locked references: PCSX2 frame advance to a fixed vsync count after the screen's predicate, a/b must be
+  identical, our window must cover that count; (B) mask the animated background (hides the missing title
+  background, 1.4 scope); (C) mask it from the strict metric and check it with a coarse statistic (metric change,
+  GENERATION_PLAN binding). Recommended: A, then C if A's a/b are not identical.
+- Q2 field presentation: refs show the full 448-line frame, the runner bob-doubles one field. Options: (A) runner
+  fault: keep refs, add field presentation to fix scope (1.3, it touches ACCESS/CAPCOM first); (B) legitimate:
+  recapture refs with deinterlace Bob (4/5) so both sides show one field. Recommended: A (the frame buffer holds 448
+  distinct lines; the CRT shows both fields; doubling loses half the image).
