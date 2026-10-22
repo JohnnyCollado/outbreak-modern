@@ -10,9 +10,11 @@
 #   tools/ob.sh boot --script F [--tag T]    hidden scripted boot (PS2X_INPUT_SCRIPT, patch 0020); ends by
 #                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
 #   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
+#   tools/ob.sh pcsx2-gs                     PCSX2 GS static lib (native/pcsx2_gs): clone/deps if missing, build, smoke
 #
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
-# OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat.
+# OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat;
+# OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build.
 # Writes nothing inside the repo; logs go to $OB_LOGS. cmake/ctest/MSVC steps run via tools/ob/vc.bat
 # (its path must contain no spaces: cmd /c quoting).
 set -u
@@ -194,11 +196,46 @@ cmd_gate() {
     "$PY" -I "$G" compare --frames "$OB_ROOT/frames-gate" --log "$OB_LOGS/boot-gate.log" --start "$start" "${tol[@]}"
 }
 
+# pcsx2-gs: PCSX2 v2.9.134 tree (clone + upstream/pcsx2/*.patch if missing), zstd/shaderc deps
+# (tools/ob/pcsx2-deps.bat if missing), configure + build native/pcsx2_gs, stage shaders + DLLs beside
+# the smoke exe, run it with the Vulkan SDK off PATH so the staged shaderc_shared.dll is the one loaded.
+cmd_pcsx2_gs() {
+    local src="${OB_PCSX2:-$OB_ROOT/pcsx2}" deps="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}"
+    local b="${OB_PCSX2_GS_BUILD:-$OB_ROOT/pcsx2-gs-build}" log="$OB_LOGS/ob-pcsx2-gs.log"
+    local want=a81f1aa39fc56ef60dbc913637c74c49c1792033 rc
+    if [ ! -d "$src/.git" ]; then
+        git clone --depth 1 --branch v2.9.134 https://github.com/PCSX2/pcsx2.git "$src" || return 1
+        [ "$(git -C "$src" rev-parse HEAD)" = $want ] || { echo "pcsx2-gs: clone HEAD is not $want"; return 1; }
+        local p=("$REPO"/upstream/pcsx2/*.patch)
+        if [ -e "${p[0]}" ]; then git -C "$src" am "${p[@]}" || return 1; fi
+    fi
+    git -C "$src" merge-base --is-ancestor $want HEAD || { echo "pcsx2-gs: $src is not based on $want"; return 1; }
+    if [ ! -f "$deps/bin/shaderc_shared.dll" ]; then
+        mkdir -p "$deps" "$deps-build"
+        MSYS_NO_PATHCONV=1 cmd /c "$(cygpath -w "$VC")" "$(cygpath -w "$REPO/tools/ob/pcsx2-deps.bat")" \
+            "$(cygpath -w "$src")" "$(cygpath -w "$deps")" "$(cygpath -w "$deps-build")" > "$OB_LOGS/ob-pcsx2-deps.log" 2>&1 ||
+            { tail -5 "$OB_LOGS/ob-pcsx2-deps.log"; echo "pcsx2-gs: deps failed ($OB_LOGS/ob-pcsx2-deps.log)"; return 1; }
+    fi
+    mkdir -p "$b"
+    { vc cmake -S "$REPO/native/pcsx2_gs" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DOB_PCSX2="$src" -DOB_PCSX2_DEPS="$deps" &&
+      vc cmake --build "$b" -j $JOBS; } > "$log" 2>&1
+    rc=$?
+    [ $rc = 0 ] || { tail -5 "$log"; echo "pcsx2-gs: build exit $rc ($log)"; return $rc; }
+    rm -rf "$b/resources/shaders" && mkdir -p "$b/resources" &&
+        cp -r "$src/bin/resources/shaders" "$b/resources/" &&
+        cp "$deps/bin/shaderc_shared.dll" "$deps/bin/zstd.dll" "$b/" || { echo "pcsx2-gs: staging failed"; return 1; }
+    local np; np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
+    ( cd "$b" && PATH="$np" ./ob_pcsx2_gs_smoke.exe ); rc=$?
+    echo "pcsx2-gs: smoke exit $rc"; return $rc
+}
+
 case ${1:-} in
     tools) cmd_tools ;;
     test) cmd_test ;;
     recompile) cmd_recompile ;;
     boot) shift; cmd_boot "$@" ;;
     gate) shift; cmd_gate "$@" ;;
-    *) sed -n '6,12p' "$0"; exit 2 ;;
+    pcsx2-gs) cmd_pcsx2_gs ;;
+    *) sed -n '6,13p' "$0"; exit 2 ;;
 esac
