@@ -5,3 +5,4 @@ T2 | question | Windows build and boot scripts into the repo | - | tasks/T2.md |
 T3 | done | clean C:\ob\src; frame dump as patch 0019 | - | tasks/T3.md | logs/T3.md | R0-001,R0-003
 T4 | done | scripted input and hidden window, patch 0020 | - | tasks/T4.md | logs/T4.md | R1.1-006,R1.1-007,R1.1-008
 T5 | done | complete the card | - | tasks/T5.md | logs/T5.md | R0-003
+T6 | done | phase cleanup | - | tasks/T6.md | logs/T6.md | -
