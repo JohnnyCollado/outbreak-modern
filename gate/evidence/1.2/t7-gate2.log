@@ -1,0 +1,29 @@
+gate: not recompiled (stamp unchanged)
+exited by itself, code 0
+boot gate: exit 0; log C:/ob/logs/boot-gate.log; frames C:/ob/frames-gate
+savedata b-vs-a: max=0 share=0.000000 p=0.000100 GREEN ok
+savedata missing layer: max=240 share=0.000209 p=0.000100 RED ok bbox=(272, 358, 277, 370) fill=(0, 0, 0)
+savedata shifted glyph: max=240 share=0.001212 p=0.000100 RED ok window=(72,344) energy=38002
+access b-vs-a: max=0 share=0.000000 p=0.000100 GREEN ok
+access missing layer: max=255 share=0.007276 p=0.000100 RED ok bbox=(302, 228, 340, 294) fill=(254, 255, 255)
+access shifted glyph: max=255 share=0.001931 p=0.000100 RED ok window=(172,344) energy=72980
+capcom b-vs-a: max=0 share=0.000000 p=0.000100 GREEN ok
+capcom missing layer: max=240 share=0.145700 p=0.000100 RED ok bbox=(40, 171, 471, 266) fill=(0, 0, 0)
+capcom shifted glyph: max=213 share=0.000593 p=0.000100 RED ok window=(188,236) energy=21355
+title b-vs-a: max=90 share=0.142526 p=0.000100 RED FAIL advisory
+title missing layer: max=36 share=0.003435 p=0.000100 RED ok bbox=(90, 141, 484, 143) fill=(16, 32, 46) advisory
+title shifted glyph: max=212 share=0.001495 p=0.000100 RED ok window=(180,320) energy=41404 advisory
+mainmenu b-vs-a: max=114 share=0.436646 p=0.000100 RED FAIL advisory
+mainmenu missing layer: max=29 share=0.004464 p=0.000100 RED ok bbox=(0, 445, 512, 447) fill=(14, 30, 39) advisory
+mainmenu shifted glyph: max=254 share=0.000767 p=0.000100 RED ok window=(344,400) energy=42820 advisory
+charselect b-vs-a: max=226 share=0.425297 p=0.000100 RED FAIL advisory
+charselect missing layer: max=234 share=0.314135 p=0.000100 RED ok bbox=(0, 260, 512, 448) fill=(20, 27, 32) advisory
+charselect shifted glyph: max=240 share=0.001365 p=0.000100 RED ok window=(228,292) energy=45822 advisory
+gate: selftest 9/9 ok, exit 0, wall 54.1 s
+savedata best k=0 tick=175 max=240 share=0.043597 p=0.000100 RED
+access best k=0 tick=868 max=255 share=0.248753 p=0.000100 RED
+capcom best k=0 tick=1169 max=224 share=0.082450 p=0.000100 RED
+title best k=9 tick=1592 max=240 share=0.999865 p=0.000100 RED ADVISORY
+mainmenu best k=0 tick=1906 max=255 share=0.998910 p=0.000100 RED ADVISORY
+charselect best k=0 tick=2773 max=255 share=0.891462 p=0.000100 RED ADVISORY
+gate: 0/3 gated green, 3 advisory, exit 1, wall 54.7 s

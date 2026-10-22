@@ -76,6 +76,10 @@ so `watch 0x12000020` silently reads RDRAM 0x20. No env switch traces them. FBW 
 - title/mainmenu/charselect: best frame in the capture window (existing compare logic); UNVERIFIED: backgrounds are
   Sofdec movies (M5), loop length unknown (>= 213 ticks); fallback = coarse background statistic (section 7).
 - Runner line-doubling (applyFieldPresentation) is a runner fault for 1.3: every screen RED until fixed.
+- Evidence kept: the `.run/1.2/...` scripts and logs cited in TOLERANCE.md, this file and the 1.2 summaries are copied
+  to `gate/evidence/1.2/` (same file names; `.run/1.2/` was deleted at the phase close): t3_noise.py, t3-probe.log,
+  probe120.script, t5_tol.py/.log, t5_field.py/.log, t5_blocks.py/.log, t5_sfd2.py/.log, t6-selftest.log,
+  t7-gate1.log, t7-gate2.log. Scratch not cited was dropped.
 
 ## Baseline (T7, 2026-10-22) — `gate/baseline-1.2.md`
 - `C:\ob\up` ab85c05 (patches 0001-0020), frozen tolerance 20233c3: exit 1, 0/3 gated green, wall ~54.5 s, hidden=1.
