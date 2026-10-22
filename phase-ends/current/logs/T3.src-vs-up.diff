@@ -1,0 +1,256 @@
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xIOP/src/emulator/core/iop_kernel.cpp src/ps2xIOP/src/emulator/core/iop_kernel.cpp
+--- up/ps2xIOP/src/emulator/core/iop_kernel.cpp	2026-10-21 13:51:17.107209200 -0400
++++ src/ps2xIOP/src/emulator/core/iop_kernel.cpp	2026-10-21 13:36:17.660933500 -0400
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include "iop_kernel.h"
+ 
+ #include "iop_memory.h"
+@@ -63,6 +64,7 @@
+                 return true;
+             }
+             const int id = thread.id;
++            std::fprintf(stderr, "[IOP:thread] create id=%d entry=0x%x prio=%u stack=0x%x\n", id, thread.entry, thread.priority, thread.stackSize); // TEMP TRACE
+             m_threads.emplace(id, std::move(thread));
+             setV0(id);
+             return true;
+@@ -577,6 +579,10 @@
+                 receiver->state = IopThreadState::Ready;
+                 receiver->waitId = 0;
+                 receiver->waitResultAddress = 0;
++                std::fprintf(stderr, "[IOP:thread] SendMbx(%u) woke id=%d prio=%u; current=%d; table:", cpu.gpr[4], receiver->id, receiver->priority, m_currentThread ? m_currentThread->id : -1); // TEMP TRACE
++                for (const auto &[tid, t] : m_threads)
++                    std::fprintf(stderr, " [%d e=0x%x p=%u s=%d]", tid, t.entry, t.priority, static_cast<int>(t.state));
++                std::fprintf(stderr, "\n");
+             }
+             setV0(kOk);
+             return true;
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xIOP/src/emulator/iop_emulator.cpp src/ps2xIOP/src/emulator/iop_emulator.cpp
+--- up/ps2xIOP/src/emulator/iop_emulator.cpp	2026-10-21 13:51:17.220938800 -0400
++++ src/ps2xIOP/src/emulator/iop_emulator.cpp	2026-10-21 13:45:28.284588200 -0400
+@@ -23,6 +23,7 @@
+ #include <optional>
+ #include <span>
+ #include <sstream>
++#include <cstdlib>
+ #include <utility>
+ 
+ namespace ps2x::iop::detail
+@@ -241,6 +242,17 @@
+         ImportDisposition dispatchImport(const IopImportCall &call, CpuState &cpu)
+         {
+             const uint32_t a0 = cpu.gpr[4];
++            // TEMP TRACE (not for commit): PS2X_IOP_TRACE_IMPORTS=1 logs every import call.
++            static const bool s_traceImports = std::getenv("PS2X_IOP_TRACE_IMPORTS") != nullptr;
++            const uint32_t traceRa = cpu.gpr[31];
++            if (s_traceImports && ((traceRa >= 0x3d400u && traceRa < 0x41600u) || iequals(call.library, "libsd") || iequals(call.library, "sifcmd")))
++            {
++                std::ostringstream t;
++                t << "[IOP:import] " << call.library << ':' << call.ordinal << " pc=0x" << std::hex << cpu.pc
++                  << " a0=0x" << cpu.gpr[4] << " a1=0x" << cpu.gpr[5] << " a2=0x" << cpu.gpr[6] << " a3=0x" << cpu.gpr[7]
++                  << " ra=0x" << cpu.gpr[31];
++                log(LogLevel::Warning, t.str());
++            }
+             auto setV0 = [&](uint32_t value)
+             {
+                 cpu.gpr[2] = value;
+@@ -385,6 +397,7 @@
+             if (checkInterrupt(cpu))
+                 return true;
+ 
++
+             if (const auto import = imports.decode(cpu.pc))
+             {
+                 const ImportDisposition disposition = dispatchImport(*import, cpu);
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xIOP/src/emulator/services/iop_rpc.cpp src/ps2xIOP/src/emulator/services/iop_rpc.cpp
+--- up/ps2xIOP/src/emulator/services/iop_rpc.cpp	2026-10-21 13:50:24.748494700 -0400
++++ src/ps2xIOP/src/emulator/services/iop_rpc.cpp	2026-10-21 13:43:27.804005500 -0400
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include "iop_rpc.h"
+ 
+ #include "../core/iop_cpu.h"
+@@ -308,6 +309,9 @@
+             return result;
+ 
+         RpcServer &server = serverIt->second;
++        std::fprintf(stderr, "[IOP:rpc] call sid=0x%x fno=%u send=0x%x/%u recv=0x%x/%u -> fn=0x%x buf=0x%x\n",
++                     request.sid, request.function, request.send.address, request.send.size,
++                     request.receive.address, request.receive.size, server.function, server.buffer); // TEMP TRACE
+         if (request.send.size != 0u && server.buffer != 0u)
+         {
+             const uint32_t copySize = std::min<uint32_t>(request.send.size, IopMemory::RamSize - std::min(server.buffer, IopMemory::RamSize));
+@@ -325,6 +329,7 @@
+                                                                request.send.size,
+                                                                0u,
+                                                                server.gp);
++        std::fprintf(stderr, "[IOP:rpc] done sid=0x%x fno=%u ret=0x%x\n", request.sid, request.function, returnPointer); // TEMP TRACE
+         if (returnPointer == 0u)
+             returnPointer = server.buffer;
+         if (request.receive.address != 0u && request.receive.size != 0u && returnPointer != 0u)
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xRuntime/src/lib/Kernel/Stubs/Pad2.cpp src/ps2xRuntime/src/lib/Kernel/Stubs/Pad2.cpp
+--- up/ps2xRuntime/src/lib/Kernel/Stubs/Pad2.cpp	2026-10-21 15:51:37.791247900 -0400
++++ src/ps2xRuntime/src/lib/Kernel/Stubs/Pad2.cpp	2026-10-21 16:04:40.586741200 -0400
+@@ -127,6 +127,7 @@
+             socket.open = true;
+             socket.port = port;
+             socket.slot = slot;
++            std::printf("[pad2:socket] %u port=%d slot=%d\n", static_cast<unsigned>(i), port, slot); // TEMP TRACE
+             setReturnS32(ctx, static_cast<int32_t>(i));
+             return;
+         }
+@@ -187,6 +188,20 @@
+         ps2TraceGuestRangeWrite(rdram, dataAddr, static_cast<uint32_t>(kPad2DataSize), "scePad2Read", ctx);
+         std::memset(data, 0, kPad2DataSize);
+         std::memcpy(data, padData + 2, static_cast<size_t>(kPad2DualShock2DataLength));
++        { // TEMP TRACE (not for commit)
++            static uint32_t s_reads = 0u;
++            if ((s_reads++ % 300u) == 0u || data[0] != 0xFFu || data[1] != 0xFFu)
++                if (s_reads < 4000u) std::printf("[pad2:read] n=%u port=%d d0=%02x d1=%02x\n", s_reads, socket.port, data[0], data[1]);
++            static uint32_t s_peekLeft = 0u;
++            if (data[1] != 0xFFu) s_peekLeft = 12u;
++            if (s_peekLeft > 0u && s_reads < 4000u)
++            {
++                --s_peekLeft;
++                auto peek = [&](uint32_t addr) { uint32_t v = 0u; std::memcpy(&v, rdram + addr, 4u); return v; };
++                std::printf("[pad2:peek] n=%u raw=%08x inputCur=%08x inputPressed=%08x held=%08x pressedWord=%08x\n",
++                            s_reads, peek(0x292D40u), peek(0x2922C0u + 8u), peek(0x2922C0u + 0x10u), peek(0x3064D8u), peek(0x3063E0u));
++            }
++        }
+         setReturnS32(ctx, kPad2DualShock2DataLength);
+     }
+ 
+Only in src/ps2xRuntime/src/lib/Kernel: TempProfiler.cpp
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp src/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+--- up/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp	2026-10-21 10:36:24.033330000 -0400
++++ src/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp	2026-10-21 17:32:08.118204200 -0400
+@@ -14,9 +14,26 @@
+ #include <fstream>
+ #include <iostream>
+ #include <stdexcept>
++#include <cstdlib>
++#include <map>
++#include <mutex>
++#include <string>
+ 
+ using namespace GSInternal;
+ 
++// TEMP GS SUMMARY (not for commit): PS2X_GS_SUMMARY=1 counts distinct draw configurations;
++// ps2TempGsSummaryDump prints and clears them (called with each frame dump).
++std::mutex g_tempGsSummaryMutex;
++std::map<std::string, uint32_t> g_tempGsSummary;
++void ps2TempGsSummaryDump(uint32_t frame, bool print)
++{
++    std::lock_guard<std::mutex> lock(g_tempGsSummaryMutex);
++    if (print)
++        for (const auto &[key, count] : g_tempGsSummary)
++            std::printf("[gs:sum] frame=%u n=%u %s\n", frame, count, key.c_str());
++    g_tempGsSummary.clear();
++}
++
+ namespace
+ {
+     float fabsQ(float q)
+@@ -712,6 +729,23 @@
+ {
+     const GSDrawState &state = batch.state;
+     const auto &ctx = state.context;
++    { // TEMP GS SUMMARY
++        static const bool s_summary = std::getenv("PS2X_GS_SUMMARY") != nullptr;
++        if (s_summary)
++        {
++            char key[320];
++            std::snprintf(key, sizeof(key),
++                          "type=%u tme=%u abe=%u fst=%u fbp=%u fbw=%u fpsm=%x fbmsk=%x | tbp=%u tbw=%u psm=%x tw=%u th=%u tcc=%u tfx=%u cbp=%u cpsm=%x csm=%u csa=%u | alpha=%llx test=%llx texa=%u/%u/%u pabe=%u lin=%u",
++                          static_cast<unsigned>(state.prim.type), state.prim.tme, state.prim.abe, state.prim.fst,
++                          ctx.frame.fbp, ctx.frame.fbw, ctx.frame.psm, ctx.frame.fbmsk,
++                          ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, ctx.tex0.tw, ctx.tex0.th, ctx.tex0.tcc, ctx.tex0.tfx,
++                          ctx.tex0.cbp, ctx.tex0.cpsm, ctx.tex0.csm, ctx.tex0.csa,
++                          static_cast<unsigned long long>(ctx.alpha), static_cast<unsigned long long>(ctx.test),
++                          state.texa.ta0, state.texa.aem, state.texa.ta1, state.pabe, state.linearFilter);
++            std::lock_guard<std::mutex> lock(g_tempGsSummaryMutex);
++            ++g_tempGsSummary[key];
++        }
++    }
+     PS2_IF_AGRESSIVE_LOGS({
+         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
+         if (primitiveIndex < 64u)
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xRuntime/src/lib/ps2_pad.cpp src/ps2xRuntime/src/lib/ps2_pad.cpp
+--- up/ps2xRuntime/src/lib/ps2_pad.cpp	2026-10-21 10:36:24.040327300 -0400
++++ src/ps2xRuntime/src/lib/ps2_pad.cpp	2026-10-21 17:17:19.593452900 -0400
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "runtime/ps2_pad.h"
+ #include "ps2_host_backend.h"
+ #include <cstring>
+@@ -119,6 +120,19 @@
+             clearBit(PAD_SELECT);
+     }
+ 
++    // TEMP AUTO-PRESS (not for commit): PS2X_AUTO_PRESS=1 taps Left, then Circle (the
++    // game's confirm button), 8 polls each, every 480 polls.
++    {
++        static const bool s_autoPress = std::getenv("PS2X_AUTO_PRESS") != nullptr;
++        static uint32_t s_autoPolls = 0u;
++        const uint32_t phase = s_autoPolls++ % 480u;
++        if (s_autoPress && phase < 8u)
++            clearBit(PAD_LEFT);
++        if (s_autoPress && phase >= 240u && phase < 248u)
++            clearBit(PAD_CIRCLE);
++        if (s_autoPress && phase >= 360u && phase < 368u)
++            clearBit(PAD_START);
++    }
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+     return true;
+diff -ru --strip-trailing-cr -x .git -x out -x build -x runner -x '*_recompiled_*' up/ps2xRuntime/src/lib/ps2_runtime.cpp src/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- up/ps2xRuntime/src/lib/ps2_runtime.cpp	2026-10-21 17:24:24.206306500 -0400
++++ src/ps2xRuntime/src/lib/ps2_runtime.cpp	2026-10-21 17:38:59.123511900 -0400
+@@ -20,6 +20,8 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
++#include <cstdio>
++#include <cstdlib>
+ #include <limits>
+ #include <chrono>
+ #include <atomic>
+@@ -472,6 +474,29 @@
+         }
+     }
+ 
++    // TEMP FRAME DUMP (not for commit): PS2X_FRAME_DUMP_DIR=<dir> saves every 120th presented frame.
++    void ps2TempGsSummaryDump(uint32_t frame, bool print);
++    {
++        static const char *s_dumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
++        static uint32_t s_dumpCounter = 0u;
++        if (s_dumpDir != nullptr && (s_dumpCounter++ % 120u) == 0u)
++        {
++            Image frame{};
++            frame.data = s_uploadBuffer.data();
++            frame.width = FB_WIDTH;
++            frame.height = FB_HEIGHT;
++            frame.mipmaps = 1;
++            frame.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
++            char path[512];
++            std::snprintf(path, sizeof(path), "%s/frame-%05u.png", s_dumpDir, s_dumpCounter - 1u);
++            ExportImage(frame, path);
++            ps2TempGsSummaryDump(s_dumpCounter - 1u, true);
++        }
++        else if (s_dumpDir != nullptr && (s_dumpCounter % 120u) == 0u)
++        {
++            ps2TempGsSummaryDump(s_dumpCounter, false); // start the next dumped frame's summary clean
++        }
++    }
+     UpdateTexture(tex, s_uploadBuffer.data());
+     outWidth = width;
+     outHeight = height;
+@@ -480,6 +505,8 @@
+ 
+ PS2Runtime::PS2Runtime()
+ {
++    void ps2TempProfilerStart(); // TEMP PROFILER (not for commit)
++    ps2TempProfilerStart();
+     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
+     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
+ 

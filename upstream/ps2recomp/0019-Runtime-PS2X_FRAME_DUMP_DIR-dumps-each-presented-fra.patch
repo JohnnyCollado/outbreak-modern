@@ -1,0 +1,231 @@
+From 3ee659bcf9517f872e3f5c01937814178e26d641 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 20:11:47 -0400
+Subject: [PATCH] Runtime: PS2X_FRAME_DUMP_DIR dumps each presented frame as
+ PNG
+
+---
+ ps2xRuntime/CMakeLists.txt                   |  1 +
+ ps2xRuntime/include/runtime/ps2_frame_dump.h | 10 ++++
+ ps2xRuntime/src/lib/ps2_frame_dump.cpp       | 39 +++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          |  8 +++
+ ps2xTest/CMakeLists.txt                      |  5 ++
+ ps2xTest/src/main.cpp                        |  2 +
+ ps2xTest/src/ps2_frame_dump_tests.cpp        | 61 ++++++++++++++++++++
+ 7 files changed, 126 insertions(+)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_frame_dump.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_frame_dump.cpp
+ create mode 100644 ps2xTest/src/ps2_frame_dump_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 589d768..8e6c2f6 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -380,6 +380,7 @@ add_library(ps2_runtime STATIC
+     src/lib/gs/ps2_gif_arbiter.cpp
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
++    src/lib/ps2_frame_dump.cpp
+     src/lib/gs/ps2_gs_memory.cpp
+     src/lib/gs/gs_frontend.cpp
+     src/lib/gs/gs_cpu_backend.cpp
+diff --git a/ps2xRuntime/include/runtime/ps2_frame_dump.h b/ps2xRuntime/include/runtime/ps2_frame_dump.h
+new file mode 100644
+index 0000000..7676cf7
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_frame_dump.h
+@@ -0,0 +1,10 @@
++#ifndef PS2_FRAME_DUMP_H
++#define PS2_FRAME_DUMP_H
++
++#include <cstdint>
++
++// Writes one presented RGBA8 frame as <dir>/frame-<vsyncTick, 8 digits>.png at its native size.
++// Returns false on a null or empty dir, null pixels, a zero size, or a failed write.
++bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height);
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_frame_dump.cpp b/ps2xRuntime/src/lib/ps2_frame_dump.cpp
+new file mode 100644
+index 0000000..5297fac
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_frame_dump.cpp
+@@ -0,0 +1,39 @@
++#include "runtime/ps2_frame_dump.h"
++#include "ps2_host_backend.h"
++
++#include <cstdio>
++#include <filesystem>
++#include <string>
++#include <system_error>
++
++bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height)
++{
++    if (dir == nullptr || dir[0] == '\0' || rgba == nullptr || width == 0u || height == 0u)
++    {
++        return false;
++    }
++
++    static std::string s_createdDir;
++    if (s_createdDir != dir)
++    {
++        std::error_code ec;
++        std::filesystem::create_directories(dir, ec);
++        if (ec)
++        {
++            return false;
++        }
++        s_createdDir = dir;
++    }
++
++    char name[32];
++    std::snprintf(name, sizeof(name), "frame-%08llu.png", static_cast<unsigned long long>(vsyncTick));
++    const std::string path = (std::filesystem::path(dir) / name).string();
++
++    Image image{};
++    image.data = const_cast<uint8_t *>(rgba);
++    image.width = static_cast<int>(width);
++    image.height = static_cast<int>(height);
++    image.mipmaps = 1;
++    image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
++    return ExportImage(image, path.c_str());
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 0be24c3..f6063d9 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -6,6 +6,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ee_scheduler.h"
++#include "runtime/ps2_frame_dump.h"
+ #include "ThreadNaming.h"
+ #include "Kernel/Stubs/Audio.h"
+ #include "Kernel/Stubs/GS.h"
+@@ -20,6 +21,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
++#include <cstdlib>
+ #include <limits>
+ #include <chrono>
+ #include <atomic>
+@@ -451,6 +453,12 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     s_lastWidth = width;
+     s_lastHeight = height;
+ 
++    static const char *s_frameDumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
++    if (s_frameDumpDir != nullptr)
++    {
++        ps2DumpPresentedFrame(s_frameDumpDir, currentTick, s_scratch.data(), width, height);
++    }
++
+     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
+     if (!s_scratch.empty() && width != 0u && height != 0u)
+     {
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 3eaa8b3..f47a8e9 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -38,6 +38,11 @@ add_library(ps2_test_lib STATIC
+     src/ps2_recompiler_tests.cpp
+     src/ps2_runtime_expansion_tests.cpp
+     src/ps2_float_semantics_tests.cpp
++    src/ps2_frame_dump_tests.cpp
++)
++
++target_compile_definitions(ps2_test_lib PRIVATE
++    PS2X_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 7b78891..33d4993 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -19,6 +19,7 @@ void register_ps2_sif_dma_tests();
+ void register_ps2_recompiler_tests();
+ void register_ps2_runtime_expansion_tests();
+ void register_ps2_float_semantics_tests();
++void register_ps2_frame_dump_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -42,6 +43,7 @@ int main()
+     register_ps2_recompiler_tests();
+     register_ps2_runtime_expansion_tests();
+     register_ps2_float_semantics_tests();
++    register_ps2_frame_dump_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_frame_dump_tests.cpp b/ps2xTest/src/ps2_frame_dump_tests.cpp
+new file mode 100644
+index 0000000..48c4273
+--- /dev/null
++++ b/ps2xTest/src/ps2_frame_dump_tests.cpp
+@@ -0,0 +1,61 @@
++#include "MiniTest.h"
++#include "runtime/ps2_frame_dump.h"
++#include "ps2_host_backend.h"
++
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <filesystem>
++#include <string>
++
++namespace
++{
++    std::filesystem::path frameDumpTestDir()
++    {
++        return std::filesystem::path(PS2X_TEST_BINARY_DIR) / "frame_dump_test";
++    }
++}
++
++void register_ps2_frame_dump_tests()
++{
++    MiniTest::Case("FrameDump", [](TestCase &tc)
++                   {
++        tc.Run("writes frame-<tick>.png with the presented pixels", [](TestCase &t)
++               {
++            const std::filesystem::path dir = frameDumpTestDir();
++            std::error_code ec;
++            std::filesystem::remove_all(dir, ec);
++
++            const std::array<uint8_t, 3u * 2u * 4u> pixels = {
++                255u, 0u, 0u, 255u, 0u, 255u, 0u, 255u, 0u, 0u, 255u, 255u,
++                10u, 20u, 30u, 255u, 40u, 50u, 60u, 128u, 70u, 80u, 90u, 0u};
++            const std::string dirText = dir.string();
++            t.IsTrue(ps2DumpPresentedFrame(dirText.c_str(), 42u, pixels.data(), 3u, 2u), "dump succeeds");
++
++            const std::filesystem::path file = dir / "frame-00000042.png";
++            t.IsTrue(std::filesystem::exists(file), "frame-00000042.png exists");
++
++            Image image = LoadImage(file.string().c_str());
++            t.IsTrue(image.data != nullptr, "png loads");
++            t.Equals(image.width, 3, "width");
++            t.Equals(image.height, 2, "height");
++            if (image.data != nullptr)
++            {
++                ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
++                t.IsTrue(std::memcmp(image.data, pixels.data(), pixels.size()) == 0, "pixels equal");
++            }
++            UnloadImage(image); });
++
++        tc.Run("null dir returns false and writes nothing", [](TestCase &t)
++               {
++            const std::filesystem::path dir = frameDumpTestDir() / "null_dir";
++            std::error_code ec;
++            std::filesystem::remove_all(dir, ec);
++
++            const std::array<uint8_t, 4u> pixel = {1u, 2u, 3u, 4u};
++            t.IsFalse(ps2DumpPresentedFrame(nullptr, 7u, pixel.data(), 1u, 1u), "null dir fails");
++            t.IsFalse(ps2DumpPresentedFrame("", 7u, pixel.data(), 1u, 1u), "empty dir fails");
++            t.IsFalse(std::filesystem::exists("frame-00000007.png"), "nothing written to the working dir");
++            t.IsFalse(std::filesystem::exists(dir), "nothing written to the test dir"); });
++    });
++}
+-- 
+2.46.2.windows.1
+
