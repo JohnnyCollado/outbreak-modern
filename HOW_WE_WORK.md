@@ -57,7 +57,7 @@ PY = C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe
 
 ## Build / run / test <!-- roles: claude expert coder planner review auditor curator -->
 - Build: `bash tools/run.sh ob-tools -- bash tools/ob.sh tools` (MSVC analyzer, recompiler, ps2x_tests -> C:\ob\t); `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` (main ELF + overlays demo/submain/netdnas, then ps2EntryRunner -> C:\ob\r). Long: background shell.
-- Run: `bash tools/ob.sh boot [--secs N] [--tag T]` (auto-press, frame dump to C:\ob\frames, log C:\ob\logs\boot-<tag>.log, killed after N s, default 200). Opens a VISIBLE window: needs a specific developer proceed until a hidden flag exists.
+- Run: `bash tools/ob.sh boot --script gate/boot.script --tag T` (patch 0020: hidden window, script drives the pad, dumps `<screen>-<k>.png` only in capture steps to C:\ob\frames-<T>, log C:\ob\logs\boot-<T>.log; ends by itself: exit 0 quit, 2 script error, 3 timeout, 4 game ended before quit). Grammar: `upstream/ps2recomp/0020-*.patch` header / `phase-ends/current/tasks/T4.md`. Plain `boot [--secs N]` (no script: host pad, every frame dumped) opens a VISIBLE window: needs a specific developer proceed.
 - Test / the gate: `bash tools/run.sh ob-test -- bash tools/ob.sh test` — green means ps2x_tests 461/461, IOP ctest 4/4, gs_cache ctest 45/45 (one line per suite, exit 0).
 - Modes: paths from env vars, defaults under C:\ob: OB_ROOT, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT (C:\ob\splat\SLPM_654.28), OB_RUN (repo game_files, read only), OB_VCVARS. MSVC steps run through tools/ob/vc.bat.
 Long gates go through `tools/run.sh` with a raised timeout, never a poll loop.

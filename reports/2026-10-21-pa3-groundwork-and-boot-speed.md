@@ -56,9 +56,10 @@ roughly halved the time to every screen. PS2Recomp itself was not the problem.
   "proceed" each time.
 - **Found by:** reading `ps2_runtime.cpp:768` (only `FLAG_WINDOW_RESIZABLE` is set).
 - **Cause:** upstream has no hidden mode.
-- **Fix:** in progress, T4 / patch 0020 (`PS2X_HIDDEN=1`, or any input script). Until then each
-  boot was asked for individually.
-- **Evidence:** pending (T4).
+- **Fix:** T4 / patch 0020: `PS2X_HIDDEN=1`, or any input script, sets raylib's hidden flag before
+  the window opens and disables Esc; `bash tools/ob.sh boot --script gate/boot.script` uses it.
+- **Evidence:** every T4 boot log (t4disc, t4dbg, t4a, t4b) prints `[run] window hidden=1 flags=0x84`;
+  C:\ob\up ab85c05, repo 39faeb7.
 
 ### 4. The profiler froze every boot it ran in
 
@@ -108,6 +109,36 @@ roughly halved the time to every screen. PS2Recomp itself was not the problem.
 - **Take-away:** a debugging hack that proves useful becomes a numbered patch with a test the same
   day, or it rots.
 
+### 7. Finding each boot screen in the game's memory
+
+- **Seen:** the scripted boot has to wait for each screen by reading guest memory, but the decomp
+  gave only part of the map: the title state sits behind a pointer, the logo task has no fixed
+  name, and the character-select "step 9" was not on the title structure.
+- **Found by:** three code lookups (R1.1-006..008), the splat assembly (the logo task is task-pool
+  slot 0), then a hidden "discovery" boot: the old blind press cycle plus `watch` steps that log
+  each value change with its vsync tick, matched against frames captured along the way.
+- **Cause:** the decomp is partial; structure fields are reached through heap pointers.
+- **Fix:** gate/boot.script waits on six confirmed predicates (boot task step/sub, title state word,
+  select state byte). The screen order differs from the plan: the save-data prompt comes first,
+  before the content warning, ACCESS and CAPCOM. The first gate run timed out (exit 3, naming
+  the character-select wait): Scenario Select (select state 8) needs a Circle the script lacked;
+  a second watch boot (t4dbg) showed it, and the script gained that step.
+- **Evidence:** C:\ob\logs\boot-t4disc.log, boot-t4dbg.log, boot-t4a0.log (timeout), boot-t4a.log
+  and boot-t4b.log (exit 0).
+- **Take-away:** a `watch` step that logs value changes per vsync turns "which address means which
+  screen" from guessing into one boot.
+
+### 8. How repeatable is a scripted boot?
+
+- **Seen:** the gate (phase 1.2) needs to know how much two runs of the same build differ.
+- **Found by:** two runs, t4a and t4b, of gate/boot.script from the same rebuilt runner, then a byte
+  comparison of every dump.
+- **Result:** every capture started at the same vsync tick in both runs; 17 of 18 frames are
+  byte-identical. The one that differs (title, third frame) was latched at tick 1578 in one run
+  and 1579 in the other, because the host window loop skipped a different tick. The script steps
+  on guest vsyncs, which is why the rest match.
+- **Take-away:** compare frames by tick, not by capture index, or capture fewer frames per screen.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
@@ -117,12 +148,15 @@ roughly halved the time to every screen. PS2Recomp itself was not the problem.
 | The profiled boot's window was "slow" | it was frozen by the profiler (struggle 4) | the log stopped at +3 s | struggle 4 |
 | Research report R1.1-006: `C:\ob\decomp-src` is missing | it exists, as loose `.c` files without git | the T4 agent looked | T4 log |
 | Profiler as future patch "0020" (T3 agent) | 0020 is reserved for T4's scripted input | Claude's check against the plan | T3 summary: number left open |
+| A scripted run whose game ends before `quit` exits 0 (T4 coder's first version) | a gate would read a run that never reached its captures as green | Claude rejected that deviation | T4.c2: exit 4 with `[script] game ended before quit at step <i> ...`, plus a test |
+| Patch 0020 re-exported by `git commit --amend` in C:\ob\up (T4 coder) | the house rules say never amend | Claude's review of the coder report | noted as a deviation; C:\ob\up is a local, never-pushed patch source, so no further action |
+| Plan: the save-data screens come after the title | they come first, before the content warning and the logos | the T4 discovery boot | struggle 7; plan wording unchanged |
+| R1.1-008: character select is "step 9" of the title structure | it is state 9 of a separate select structure (pointer at 0x003065FC) | the first T4 gate run did not fire; a watch boot found it | struggle 7 |
 
 ## Still open
 
 - **Rendering is wrong on every screen.** That's the rest of generation 1: the gate (phase 1.2), then
   fixes screen by screen (1.3-1.5).
-- **No hidden window yet:** T4 / patch 0020.
 - **After the Difficulty screen** the picture goes black and the game thread waits ~92% of the
   time: the start of loading a scenario (milestone M4). Not investigated.
 - **The first ~1,200 vsyncs** run slower than real time. Cause **Unknown**; the profiler can measure
