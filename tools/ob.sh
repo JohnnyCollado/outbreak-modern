@@ -25,7 +25,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 : "${OB_RUN:=$REPO/game_files}"
 : "${OB_VCVARS:=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 export OB_VCVARS
-PY=$(sed -n 's/.*"python": *"\([^"]*\)".*/\1/p' "$REPO/.claude/pa.json")
+PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
 VC="$REPO/tools/ob/vc.bat"
 JOBS=14
 mkdir -p "$OB_LOGS"
@@ -122,10 +122,15 @@ cmd_recompile() {
     local log="$OB_LOGS/ob-runner-build.log" start rc
     local px="${OB_PCSX2:-$OB_ROOT/pcsx2}" pxd="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}" egs="$REPO/native/pcsx2_gs"
     [ -f "$pxd/bin/shaderc_shared.dll" ] || { echo "runner: $pxd/bin/shaderc_shared.dll missing; run ob.sh pcsx2-gs first"; return 1; }
+    # Debug info: none by default (linking ~5,800 objects with /Zi took 5+ min); OB_DEBUG=1 for full PDBs.
+    local cxxf="/O2 /DNDEBUG" ldf="/INCREMENTAL:NO"
+    [ "${OB_DEBUG:-0}" = 1 ] && cxxf="/O2 /Zi /DNDEBUG" ldf="/DEBUG:FULL /INCREMENTAL:NO"
     start=$(date +%s)
     {
-        { { [ -f "$OB_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_R/CMakeCache.txt"; } ||
-            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=/O2 /Zi /DNDEBUG" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd"; } &&
+        { { [ -f "$OB_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_R/CMakeCache.txt" &&
+              grep -qxF "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=$cxxf" "$OB_R/CMakeCache.txt" &&
+              grep -qxF "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=$ldf" "$OB_R/CMakeCache.txt"; } ||
+            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$cxxf" "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=$ldf" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd"; } &&
         vc cmake --build "$OB_R" -j $JOBS --target ps2EntryRunner
     } > "$log" 2>&1
     rc=$?

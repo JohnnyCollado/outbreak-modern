@@ -1,14 +1,17 @@
-# outbreak-modern — Project Architect 3.0
-Recompilation of Resident Evil Outbreak with Modern Controls
+# outbreak-modern
 
-Roles: Claude (the partner) · expert · coder · retriever. Rules: the `project-architect` skill.
-Standing facts and tools: `HOW_WE_WORK.md`. Live plan: `phase-ends/current/PHASE_PLAN.md`
-(changed only via `tools/plan_edit.py`). Constitution: `PROJECT_CONTEXT.md` (never edited).
-Roadmap: `GENERATION_PLAN.md`. Full rule texts: `rules/INDEX.md`. Techniques: `cookbook/INDEX.md` (grep it).
+Native recompilation of Resident Evil Outbreak File #1 (SLPM-65428) with modern controls: Windows first,
+then Linux and Android.
 
-Every agent, always: never push; no AI trailers; never `/compact`, `/model`, `/effort`;
-never Read `phase-ends/*/logs/`, `research/`, PhaseEnds or `tool-results/*.txt` whole: grep/tail or dispatch
-a retriever; commands that may print >40 lines run via `tools/run.sh`; commit via `tools/commit_task.sh`;
-a one-time fetch is a fetch, not a tool.
+- What each part of the repo is for, and every source used so far: `docs/ARCHITECTURE.md`
+- Build, run, test, environment and decisions in force: `docs/ops/build.md` (index: `docs/ops/INDEX.md`)
+- Graphics (PCSX2's GS in-process): `docs/ops/gs.md`
+- Past phase plans, research notes (R-ids) and task summaries: `docs/history/`
 
-Fail-safes: never push · the milestone gate is the arbiter
+Working rules:
+- Every PS2Recomp change is a numbered patch in `upstream/ps2recomp/` (made as a commit in `C:\ob\up`), with a
+  test that fails without it.
+- The gate decides correctness (`docs/ops/gate.md`); its tolerance is frozen.
+- Log every issue and its fix in the phase's struggle report in `reports/` as it happens.
+- Game data never enters git. Never push.
+- Long commands go through `tools/run.sh`; long builds and gates run in the background.

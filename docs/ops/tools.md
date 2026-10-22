@@ -1,6 +1,6 @@
 # Project tools (tools/)
 
-Source: R0-003 (8), phase 1.1 T2/T4. Harness tools (card.py, plan_edit.py, run.sh, ...) are in the card's table.
+Source: R0-003 (8), phase 1.1 T2/T4 (`docs/history/`). The everyday commands are in `build.md`.
 
 ## Live
 - `bash tools/ob.sh tools|test|recompile|boot` — the Windows driver (card Build/Run/Test); MSVC steps via `tools/ob/vc.bat`.
@@ -13,7 +13,7 @@ Source: R0-003 (8), phase 1.1 T2/T4. Harness tools (card.py, plan_edit.py, run.s
 - `PY tools/q_scan.py` — read-only VU0 Q-register check. Test: tools/test_q_scan.py.
 - `bash tools/recomp_cycle.sh` — Linux/xvfb form of the recompile + boot cycle (not run on Windows).
 - `gate/boot.script` — scripted hidden boot to character select, six captures (grammar: patch 0020 header,
-  phase-ends/1.1 T4 summary).
+  docs/history/phase-1.1/tasks/T4.md).
 
 ## Legacy: ARMSX2 / PINE mod era (not part of the port) — moved to `legacy/` on 2026-10-22
 - `legacy/` keeps the old layout (`legacy/tools`, `legacy/mod`, `legacy/patches`, `legacy/results`, its README), so

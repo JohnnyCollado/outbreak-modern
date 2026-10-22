@@ -1,6 +1,6 @@
 # The gate (phase 1.2)
 
-Source: phase-ends/current/PHASE_PLAN.md Context/Interfaces; GENERATION_PLAN.md `## The gate`.
+Source: phase 1.2 plan and research (`docs/history/phase-1.2/`).
 Compares the runner's six scripted captures against PCSX2 reference screenshots, per screen: max per-channel delta
 and share of pixels with delta > d; green = share <= p. d and p are frozen in `gate/tolerance.json` (rule P9).
 

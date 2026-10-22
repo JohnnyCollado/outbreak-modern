@@ -1,7 +1,7 @@
 # gate/boot.script — hidden scripted boot to character select (patch 0020, PS2X_INPUT_SCRIPT).
 # Run: bash tools/ob.sh boot --script gate/boot.script --tag <T>; dumps <screen>-<k>.png in C:\ob\frames-<T>.
 # Guest-state predicates only (no game data). Addresses: SLPM_654.28 en; sources R1.1-007, R1.1-008,
-# phase-ends/current/tasks/T4.md (boot-task slot from splat asm; values confirmed by the t4disc watch boot).
+# docs/history/phase-1.2/tasks/T4.md (boot-task slot from splat asm; values confirmed by the t4disc watch boot).
 #   0x002F85D8 u16 = boot task (task pool D_002F85D0 slot 0): byte0 step, byte1 sub (boottask.c:80-170)
 #   *0x0023BE34    = TitleWork*: +0 state, +1 sub, +2 step, +3 unk (title.c:9-49)
 #   *0x003065FC    = SelectWork*: +4 state, 8 = Scenario Select, 9 = character select (title.c:1150-1160, :1455-1480)

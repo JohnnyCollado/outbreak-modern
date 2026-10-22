@@ -29,3 +29,11 @@
 - IOP memory breakpoints on hardware registers (0x1F80xxxx) never fire; IOP Modules/Stack tabs are empty.
 - Logging every hit of a hot loop slows emulation massively: disable such breakpoints before timing anything.
 - Its EE Threads tab is the authority for kernel-behaviour questions (real BIOS, real IOP modules).
+
+## SDK on PATH shadows a DLL the build forgot to stage
+- A test exe that loads a DLL at run time (PCSX2's GS loads `shaderc_shared.dll`) can pass even when the DLL was
+  never staged beside it, because the Vulkan SDK's `Bin` folder is on PATH and ships the same-named DLL. The test
+  then proves nothing about the shipped layout and may load a different version.
+- Run with the SDK stripped from PATH (`tools/ob.sh` does this for the smoke test and boots). Prove it once with a
+  negative control: remove the staged DLL, expect "Failed to compile utility pipelines" and exit 1; restore it.
+- Shipped runners stage the DLL beside the exe; never rely on PATH. (Found in phase 1.3 T7.)
