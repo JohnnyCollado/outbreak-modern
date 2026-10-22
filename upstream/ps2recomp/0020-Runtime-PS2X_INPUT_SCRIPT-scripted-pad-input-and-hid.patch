@@ -1,4 +1,4 @@
-From ee2299270e7b6393e8e783e73905fe8db32bfe5c Mon Sep 17 00:00:00 2001
+From ab85c0514d51c8e9d4a316a38b5665ade1aacf7d Mon Sep 17 00:00:00 2001
 From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 21:09:19 -0400
 Subject: [PATCH] Runtime: PS2X_INPUT_SCRIPT scripted pad input and hidden
@@ -7,16 +7,16 @@ Subject: [PATCH] Runtime: PS2X_INPUT_SCRIPT scripted pad input and hidden
 ---
  ps2xRuntime/CMakeLists.txt                    |   1 +
  ps2xRuntime/include/runtime/ps2_frame_dump.h  |   4 +
- .../include/runtime/ps2_input_script.h        | 123 +++++
+ .../include/runtime/ps2_input_script.h        | 127 +++++
  ps2xRuntime/src/lib/Kernel/EeScheduler.cpp    |  17 +
  ps2xRuntime/src/lib/ps2_frame_dump.cpp        |  16 +-
- ps2xRuntime/src/lib/ps2_input_script.cpp      | 444 ++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_input_script.cpp      | 464 ++++++++++++++++++
  ps2xRuntime/src/lib/ps2_pad.cpp               |  10 +
- ps2xRuntime/src/lib/ps2_runtime.cpp           |  71 ++-
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  84 +++-
  ps2xTest/CMakeLists.txt                       |   1 +
  ps2xTest/src/main.cpp                         |   2 +
- ps2xTest/src/ps2_input_script_tests.cpp       | 206 ++++++++
- 11 files changed, 888 insertions(+), 7 deletions(-)
+ ps2xTest/src/ps2_input_script_tests.cpp       | 221 +++++++++
+ 11 files changed, 940 insertions(+), 7 deletions(-)
  create mode 100644 ps2xRuntime/include/runtime/ps2_input_script.h
  create mode 100644 ps2xRuntime/src/lib/ps2_input_script.cpp
  create mode 100644 ps2xTest/src/ps2_input_script_tests.cpp
@@ -48,10 +48,10 @@ index 7676cf7..639c17a 100644
  #endif
 diff --git a/ps2xRuntime/include/runtime/ps2_input_script.h b/ps2xRuntime/include/runtime/ps2_input_script.h
 new file mode 100644
-index 0000000..db0d2ea
+index 0000000..a836873
 --- /dev/null
 +++ b/ps2xRuntime/include/runtime/ps2_input_script.h
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,127 @@
 +#ifndef PS2_INPUT_SCRIPT_H
 +#define PS2_INPUT_SCRIPT_H
 +
@@ -137,6 +137,10 @@ index 0000000..db0d2ea
 +    // "[script] TIMEOUT step <i> line <L>: <text>".
 +    void start(double nowSeconds);
 +    bool timedOut(double nowSeconds, std::string &message) const;
++
++    // Main thread, after the run loop ends: 0 once quit was reached; otherwise 4 with message
++    // "[script] game ended before quit at step <i> line <L>: <text>".
++    int loopEndExitCode(std::string &message) const;
 +
 +private:
 +    struct Watch
@@ -255,10 +259,10 @@ index 5297fac..daba872 100644
 +}
 diff --git a/ps2xRuntime/src/lib/ps2_input_script.cpp b/ps2xRuntime/src/lib/ps2_input_script.cpp
 new file mode 100644
-index 0000000..aba78e6
+index 0000000..1100f85
 --- /dev/null
 +++ b/ps2xRuntime/src/lib/ps2_input_script.cpp
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,464 @@
 +#include "runtime/ps2_input_script.h"
 +
 +#include <cctype>
@@ -689,6 +693,26 @@ index 0000000..aba78e6
 +    return true;
 +}
 +
++int Ps2InputScript::loopEndExitCode(std::string &message) const
++{
++    message.clear();
++    if (quitRequested())
++        return 0;
++    std::lock_guard<std::mutex> lock(m_mutex);
++    std::ostringstream out;
++    if (m_index < m_steps.size())
++    {
++        const Step &step = m_steps[m_index];
++        out << "[script] game ended before quit at step " << m_index << " line " << step.line << ": " << step.text;
++    }
++    else
++    {
++        out << "[script] game ended before quit at step " << m_index << " line 0: end of script without quit";
++    }
++    message = out.str();
++    return 4;
++}
++
 +namespace
 +{
 +    std::atomic<Ps2InputScript *> g_activeScript{nullptr};
@@ -730,7 +754,7 @@ index 8590f14..8653dfb 100644
      constexpr int kGamepad = 0;
      const bool useGamepad = IsGamepadAvailable(kGamepad);
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index f6063d9..4c0be7b 100644
+index f6063d9..bd5520b 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -7,6 +7,7 @@
@@ -840,6 +864,26 @@ index f6063d9..4c0be7b 100644
          if (WindowShouldClose())
          {
              RUNTIME_LOG("[run] window close requested, breaking out of loop");
+@@ -2519,6 +2586,19 @@ void PS2Runtime::run()
+         }
+     }
+ 
++    if (const Ps2InputScript *script = ps2ActiveInputScript())
++    {
++        std::string endMessage;
++        const int code = script->loopEndExitCode(endMessage);
++        if (code != 0)
++        {
++            std::cout.flush();
++            std::cerr << endMessage << std::endl;
++            std::cerr.flush();
++            std::_Exit(code);
++        }
++    }
++
+     requestStop();
+     if (gameThread.joinable())
+     {
 diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
 index f47a8e9..39734d4 100644
 --- a/ps2xTest/CMakeLists.txt
@@ -874,10 +918,10 @@ index 33d4993..8108c5e 100644
      std::cerr.flush();
 diff --git a/ps2xTest/src/ps2_input_script_tests.cpp b/ps2xTest/src/ps2_input_script_tests.cpp
 new file mode 100644
-index 0000000..646c77c
+index 0000000..7b49b1b
 --- /dev/null
 +++ b/ps2xTest/src/ps2_input_script_tests.cpp
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,221 @@
 +#include "MiniTest.h"
 +#include "runtime/ps2_input_script.h"
 +
@@ -1082,6 +1126,21 @@ index 0000000..646c77c
 +            t.IsFalse(script.timedOut(129.5, message), "within timeout");
 +            t.IsTrue(script.timedOut(130.0, message), "timed out");
 +            t.Equals(message, std::string("[script] TIMEOUT step 0 line 2: wait vsync 1000"), "timeout message"); });
++
++        tc.Run("loop end before quit exits 4, after quit 0", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "wait vsync 2\nquit\n"), "parse");
++            FakeMemory mem;
++            std::ostringstream log;
++            std::string message;
++            script.onVSync(1, mem.reader(), log);
++            t.Equals(script.loopEndExitCode(message), 4, "game ended before quit");
++            t.Equals(message, std::string("[script] game ended before quit at step 0 line 1: wait vsync 2"), "end message");
++            script.onVSync(3, mem.reader(), log);
++            t.IsTrue(script.quitRequested(), "quit reached");
++            t.Equals(script.loopEndExitCode(message), 0, "quit exits 0");
++            t.IsTrue(message.empty(), "no message after quit"); });
 +    });
 +}
 -- 
