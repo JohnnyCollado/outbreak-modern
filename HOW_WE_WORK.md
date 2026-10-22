@@ -77,7 +77,7 @@ Long gates go through `tools/run.sh` with a raised timeout, never a poll loop.
 - Python: C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe (3.14.5)
 - Pins (`docs/ops/pins.md`): MSVC 19.44/VS2022, CMake 3.30, MSYS2 GCC 16.1, PS2Recomp eb8688b+0001-0020, SLPM-65428 v1.04+EN 2.1
 - Harness gotchas (`docs/ops/gotchas.md`): (std::max)/NOMINMAX; no alloc between Suspend/ResumeThread; ps2x_tests cwd
-  C:\ob\src\ps2xTest; vc.bat path no spaces; C:\ob for path length; vendored PS2Recomp-main stale: never build;
+  C:\ob\src\ps2xTest; vc.bat path no spaces; C:\ob for path length;
   native frame 512x448; PCSX2 debugger quirks.
 
 ## Decisions <!-- roles: claude expert coder planner review auditor curator -->

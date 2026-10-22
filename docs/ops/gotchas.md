@@ -10,8 +10,6 @@
 - PowerShell `Start-Process -PassThru`: touch `$p.Handle` before `WaitForExit`, or `ExitCode` is null (T4).
 
 ## Repo / PS2Recomp
-- Vendored `PS2Recomp-main/PS2Recomp-main` is stale and its nested `.gitignore` hides out/, src/runner/ and the
-  generated headers: check `git status` before committing there; never build from it (docs/ops/workspace.md).
 - Upstream `PS2X_ENABLE_AGRESSIVE_LOGS` defaults ON: always configure the runner OFF (ob.sh does).
 
 ## Boots and frames

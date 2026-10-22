@@ -36,7 +36,6 @@ Game SLPM-65428 v1.04 + English patch v2.1. Main history (bb0c282, e012448) hold
 - PS2Recomp changes: edit and commit in C:\ob\up (one patch per change, with a ps2x_tests test), sync C:\ob\src,
   then format-patch into `upstream/ps2recomp/` with a README row.
 
-## Vendored PS2Recomp-main/PS2Recomp-main (repo)
-Stale: a copy at about eb8688b + 0001-0018 (2026-10-21 `diff -rq` vs C:\ob\up: lacks 0019 frame dump and 0020 input
-script; 7 files differ by CR only, 6 really). Its nested `.gitignore` hides out/, src/runner/ and the generated headers;
-ps2EntryRunner does not link there (register_functions.cpp missing). Never build from it; C:\ob\up is the truth.
+## Vendored PS2Recomp-main (removed 2026-10-22)
+The repo held a stale vendored copy (about eb8688b + 0001-0018) until the developer had it deleted on 2026-10-22; git
+history keeps it. C:\ob\up plus `upstream/ps2recomp/` are the truth.
