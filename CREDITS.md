@@ -1,7 +1,7 @@
 # Credits
 
 - **HeySnippy** -- the original *Resident Evil Outbreak Modern Camera* mod for PCSX2 on Windows,
-  which this project brings to ARMSX2 on Android (its settings for reference: `ro_settings.json`).
+  which this project brings to ARMSX2 on Android (its settings for reference: `legacy/ro_settings.json`).
 - **GalaxyNostalgia and contributors** --
   [Outbreak-decomp](https://github.com/GalaxyNostalgia/Outbreak-decomp) (CC0): the addresses,
   structures and functions every part of this mod is built on.

@@ -46,7 +46,7 @@ Sources read for these plans (2026-10-20):
   "checked against the hardware results in ps2autotests". It has an Android runner (`android/`)
   and builds for ARM with sse2neon. Confirmed (source). Whether it runs on the Odin 3, and how
   fast, is **unknown**. Its README: "Performance is very bad for VU and GS".
-- Your game is **SLPM-65428**, the Japanese File #1 (`patches/SLPM-65428_32088394.pnach`). REO's
+- Your game is **SLPM-65428**, the Japanese File #1 (`legacy/patches/SLPM-65428_32088394.pnach`). REO's
   configuration and overrides are made for the US ELF. They name US addresses and won't apply as
   they are. How much of REO carries over is **unknown**.
 

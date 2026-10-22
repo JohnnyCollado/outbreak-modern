@@ -1,9 +1,8 @@
 # Changes for PS2Recomp
 
-Fixes made while building on [PS2Recomp](https://github.com/ran-j/PS2Recomp) (GPL-3.0). They are
-already applied to the copy in `PS2Recomp-main/PS2Recomp-main/`. The patches here are the same
-changes split one per fix, so each can go upstream as its own pull request, **only with your
-OK**. Apply them in order with `git am` on PS2Recomp `eb8688b`. Each patch builds on its own and
+Fixes made while building on [PS2Recomp](https://github.com/ran-j/PS2Recomp) (GPL-3.0), one per
+fix, so each can go upstream as its own pull request, **only with your OK**. They live as commits
+in `C:\ob\up` (the repo's old vendored copy was removed on 2026-10-22). Apply them in order with `git am` on PS2Recomp `eb8688b`. Each patch builds on its own and
 adds its own test.
 
 | Patch | What | Reference for the right behaviour |
@@ -85,11 +84,5 @@ adds its own test.
   ps2autotests (or a real PS2) would answer it.
 - The VU0 MAC/status flags are still not updated by macro-mode ops.
 - The EE FPU still rounds to nearest; the hardware rounds toward zero (`m0-decision.md`).
-- `ps2EntryRunner` doesn't link in **our** copy (`PS2Recomp-main/`), because
-  `ps2xRuntime/src/runner/register_functions.cpp` is missing. Upstream tracks that file (a
-  placeholder function table), but its own `.gitignore` lists `src/runner/`, so it was left out
-  when PS2Recomp was added to this repo. This is **not an upstream bug**. An earlier version of
-  this note said it was; that was wrong. The fix belongs in how we vendor it (e.g. a git
-  submodule), not in PS2Recomp.
 - The GS cache tests aren't registered with CTest in the top-level build (only `include(CTest)`
   when the folder is built standalone).

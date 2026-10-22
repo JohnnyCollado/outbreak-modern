@@ -13,7 +13,7 @@ The beta opens here. Interpolated rendering, resolution scale and widescreen als
   decide** (the design says "File #1 scenario", singular).
 - It runs at full speed (30 Hz logic, no dropped ticks) on the Odin and on a reference PC.
   "Full speed" needs a measurement method: frame-time logs over a fixed route.
-- The Modern Camera mod is built in and passes the checks `mod/test_mod.py` makes today.
+- The Modern Camera mod is built in and passes the checks `legacy/mod/test_mod.py` makes today.
 - Beta builds reach testers **in a way that doesn't distribute game code** (below).
 
 ## Depends on M4, M5
@@ -23,8 +23,8 @@ The beta opens here. Interpolated rendering, resolution scale and widescreen als
 1. **Play-through testing.** Scripted input (as REO does) for repeatable routes, plus manual play.
    Keep a list of every difference from PCSX2.
 2. **Modern Camera.** The mod is written as reads and writes of game addresses (`MEM(type, addr)`
-   in `mod/`). With guest memory at `base + addr` it should compile unchanged (design Decision 2;
-   **unverified**). Today it hooks the game by patching MIPS code (`mod/stub.S`, `sites.json`). In
+   in `legacy/mod/`). With guest memory at `base + addr` it should compile unchanged (design Decision 2;
+   **unverified**). Today it hooks the game by patching MIPS code (`legacy/mod/stub.S`, `sites.json`). In
    a recompiled build those hooks become calls in the generated code, or overrides of whole
    functions. That needs a mechanism in the recompiler (M0/M2).
 3. **Presentation options** (Decision 6): interpolation between 30 Hz ticks, internal resolution,
@@ -51,7 +51,7 @@ The beta opens here. Interpolated rendering, resolution scale and widescreen als
 - Testers with the right hardware. Who and how many is **unknown**.
 - HeySnippy's position on a native Modern Camera. The feasibility report found the original
   camera logic "closed source", so a native port needs "the author's permission or collaboration,
-  or a clean-room rewrite". `mod/` is described as our own code. Whether that clears it is a
+  or a clean-room rewrite". `legacy/mod/` is described as our own code. Whether that clears it is a
   question for you, not a fact I can check.
 
 ## Limitations

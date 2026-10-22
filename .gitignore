@@ -1,7 +1,7 @@
 # machine-local state written by the tools (originals to restore), not results
-results/*-state.json
+legacy/results/*-state.json
 __pycache__/
-mod/build/
+legacy/mod/build/
 
 # user's disc dump: never stored in the repo (docs/native-port-design.md)
 game_files/

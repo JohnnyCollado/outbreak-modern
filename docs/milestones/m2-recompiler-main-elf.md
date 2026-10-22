@@ -29,7 +29,7 @@ With our own recompiler, all of it is new.
    plus a run-time "unknown target" trap that logs the address and stops.
 2. **Translate R5900 to C**: 128-bit GPRs, MMI, `lq`/`sq`, branch delay slots, branch-likely,
    the FPU with its quirks (the `sqrt.s` operand field from the feasibility report), VU0 macro
-   mode (COP2). `mod/build.py` already holds some EE rules learned from the camera patch.
+   mode (COP2). `legacy/mod/build.py` already holds some EE rules learned from the camera patch.
 3. **Data region.** The ELF's 0x1d9b00-0x23ba00 holds VU microcode, an EE kernel-mode block and
    .data/.rodata/.sdata, not split yet (decomp LAYOUT.md, ROADMAP Phase 1). The recompiler must
    not translate microcode or data as EE code. The kernel-mode block (`mfc0`/`mtc0`, 0x8007xxxx)

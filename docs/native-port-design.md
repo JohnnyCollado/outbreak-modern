@@ -46,7 +46,7 @@ This is the approach of N64Recomp-style projects; for the PS2 it means also hand
 128-bit registers, MMI instructions, VU0 macro mode and the FPU's quirks in the generated code.
 
 Trade-off: generated C is unreadable and big, and bugs in the recompiler look like game bugs. The
-emulator tests we already have (unicorn + the EE instruction rules learned in `mod/build.py`) are a
+emulator tests we already have (unicorn + the EE instruction rules learned in `legacy/mod/build.py`) are a
 start for testing it instruction by instruction.
 
 ## Decision 2: guest memory -- every game pointer is a 32-bit PS2 address
@@ -65,7 +65,7 @@ Consequence for decompiled C: it has to follow the same model (guest addresses, 
 pointers) to be mixed with recompiled code. That is a rule to agree with the decomp project, or a
 mechanical rewrite on our side (their `PS2_RAM()` macro is already this idea for fixed buffers).
 
-Bonus: the Modern Camera mod (`mod/`) is already written as reads and writes of game addresses
+Bonus: the Modern Camera mod (`legacy/mod/`) is already written as reads and writes of game addresses
 (`MEM(type, addr)`); in the native build it compiles unchanged with `MEM` pointing into guest RAM.
 
 ## Decision 3: one platform layer for both

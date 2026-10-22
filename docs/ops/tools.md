@@ -15,10 +15,10 @@ Source: R0-003 (8), phase 1.1 T2/T4. Harness tools (card.py, plan_edit.py, run.s
 - `gate/boot.script` — scripted hidden boot to character select, six captures (grammar: patch 0020 header,
   phase-ends/1.1 T4 summary).
 
-## Unclear
-- `tools/mips.py` (+ test_mips.py) — "small hooks this project installs"; probably mod-era.
-
-## Legacy: ARMSX2 / PINE mod era (not part of the port)
-- `tools/f1_*.py`, `test_buttons.py`, `test_collide.py`, `test_freeaim.py` — File #1 free-aim mod development tools.
-- `tools/phase2_check.py`, `push_patch.py` (adb push to the Odin), `pine_diag.py` — touch the device or a running
-  emulator: each run needs a specific developer "proceed".
+## Legacy: ARMSX2 / PINE mod era (not part of the port) — moved to `legacy/` on 2026-10-22
+- `legacy/` keeps the old layout (`legacy/tools`, `legacy/mod`, `legacy/patches`, `legacy/results`, its README), so
+  the scripts still find each other. Nothing in the native build, the gate or the live plan uses it.
+- `legacy/tools/f1_*.py`, `test_buttons.py`, `test_collide.py`, `test_freeaim.py` — File #1 free-aim mod tools;
+  `mips.py` (+ `test_mips.py`) — hook assembler they import.
+- `legacy/tools/phase2_check.py`, `push_patch.py` (adb push to the Odin), `pine_diag.py` — touch the device or a
+  running emulator: each run needs a specific developer "proceed".
