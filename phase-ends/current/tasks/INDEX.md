@@ -5,3 +5,4 @@ T2 | done | gate tool: compare core, self-test harness, `ob.sh gate` with stalen
 T3 | done | our-side noise floor and capture window | - | tasks/T3.md | logs/T3.md | R1.2-001,R1.2-002
 T4 | done | developer captures the PCSX2 references | - | tasks/T4.md | logs/T4.md | R1.2-003,R1.2-006
 T5 | done | tolerance analysis: noise floors both sides and legitimate GS differences -> proposed d and p | - | tasks/T5.md | logs/T5.md | R1.2-004,R1.2-007,R1.2-008
+T6 | review | verifier self-tests on real references, then freeze the tolerance | - | tasks/T6.md | logs/T6.md | R1.2-004
