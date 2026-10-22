@@ -64,7 +64,7 @@ Approved: 2026-10-21   Planner: pa-planner   Plan-hash: 6c107828c503dee24755037a
   Covered by R0-001 (pad seam, vsync tick) and R0-002 (auto-press sequence, memory-card answer). No report covers the decomp's scene/state variables: the expert commissions a retriever-code on C:\ob\decomp-src (REPORT: yes) and cites it.
 - T5 | done | title: complete the card | deps: T4 | coder: none | files: HOW_WE_WORK.md, docs/ops/INDEX.md, docs/ops/*.md | reads: R0-003, T2, T3, T4 | est-ctx: 70k | verify: grep -n TODO HOW_WE_WORK.md | done-when: HOW_WE_WORK.md has no TODO placeholder: Tools table lists the live project tools (ob.sh, splat_functions.py, mwo3_to_elf.py, q_scan.py, recomp_cycle.sh as the Linux form) and one line for the ARMSX2-mod tools (f1_*, phase2_check, push_patch, pine_diag: device actions need a "proceed"); Paths name the oracles (PCSX2 2.9.134 in ps2_emu/; reference screenshots from 1.2), data (C:\ob layout), generated and hand-edited paths; Build/Run/Test and the gate line (until 1.2: `bash tools/ob.sh test`; green = all three suites pass); Pins; harness gotchas (C:\ob path limit, nested .gitignore, vendored PS2Recomp-main status, PCSX2 debugger quirks from the memory note); standing decisions (M0 = PS2Recomp option B; game data never in git; the developer's answers to this plan's two decisions); detail beyond the card's cap in docs/ops/ with docs/ops/INDEX.md; `PY tools/card.py slice expert` prints and the card is within card.max_chars (7000)
   Covered by R0-003. The vendored PS2Recomp-main/ status gets one gotcha line from a diff against C:\ob\up (equal, or stale and not to be built from).
-- T6 | title: phase cleanup | coder: none | deps: T1, T2, T3, T4, T5 | done-when: what the project still needs from .run/1.1/ is in its proper place in the repo
+- T6 | done | title: phase cleanup | coder: none | deps: T1, T2, T3, T4, T5 | done-when: what the project still needs from .run/1.1/ is in its proper place in the repo
   No research needed.
 
 ## Risks
@@ -85,3 +85,4 @@ Approved: 2026-10-21   Planner: pa-planner   Plan-hash: 6c107828c503dee24755037a
 - 2026-10-21 router: T3 next -> done
 - 2026-10-21 router: T4 next -> done
 - 2026-10-21 router: T5 next -> done
+- 2026-10-21 router: T6 next -> done
