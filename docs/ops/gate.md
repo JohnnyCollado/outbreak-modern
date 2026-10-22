@@ -14,24 +14,32 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
 - Screens (boot order): savedata, access, capcom, title, mainmenu, charselect; runner side `C:\ob\frames-<T>\<screen>-<k>.png`.
 
 ## gate.py and ob.sh gate
-- `bash tools/ob.sh gate [--d N --p F]`: stamp vs `C:\ob\r\gate.stamp`; differ or runner exe missing -> recompile, then
+- `bash tools/ob.sh gate [--d N --p F] [--tolerance PATH]` (both passed to selftest and compare): stamp vs `C:\ob\r\gate.stamp`; differ or runner exe missing -> recompile, then
   write the pre-recompile stamp (`gate: recompiled in <s> s` / `gate: not recompiled`); boot `gate/boot.script --tag gate`;
   `gate.py selftest`; `gate.py compare` on `C:\ob\frames-gate` + `C:\ob\logs\boot-gate.log`. `--selftest`: selftest only.
-- Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, ref sha256/size != manifest, captures per screen !=
-  manifest `window`, frame without tick), 3 boot failed, 4 recompile failed, 5 selftest red.
-- `gate.py compare --frames D --log F [--refs C:/ob/ref] [--manifest gate/ref_manifest.json] [--d N --p F]`; d/p default
-  from `gate/tolerance.json`. RGB only, delta = max channel |diff|; best frame = lowest share, max, k.
-  Per screen: `<screen> best k=<k> tick=<t> max=<int> share=<float> p=<float> GREEN|RED`; last line
-  `gate: <n>/6 green, exit <code>, wall <s> s` (refusals: `gate: <reason>, exit 2, wall <s> s`).
-- `gate.py selftest`: per screen ref b vs a GREEN; ref a with "missing layer" (top area x colour-distance component's
-  bbox filled with its ring median) and "shifted glyph" (max FIND_EDGES-energy 24x24 window +2 px x) RED. Temp
-  `.run/1.2/selftest-<pid>/`, deleted.
+- Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, unknown screen in `advisory`, ref sha256/size !=
+  manifest, captures per screen != manifest `window`, frame without tick), 3 boot failed, 4 recompile failed,
+  5 selftest red.
+- Tolerance file (`--tolerance PATH`, default `gate/tolerance.json`): `{d, p, metric, evidence, frozen, advisory?}`;
+  `advisory: [screen, ...]` optional (absent = []), names must be in the 6 screens. `--d/--p` override d/p only;
+  advisory comes from the file only.
+- `gate.py compare --frames D --log F [--refs C:/ob/ref] [--manifest gate/ref_manifest.json] [--tolerance P]
+  [--d N --p F]`. RGB only, delta = max channel |diff|; best frame = lowest share, max, k.
+  Per screen: `<screen> best k=<k> tick=<t> max=<int> share=<float> p=<float> GREEN|RED[ ADVISORY]`; last line
+  `gate: <g>/<n> gated green, <m> advisory, exit <code>, wall <s> s` (n = 6 - m; refusals:
+  `gate: <reason>, exit 2, wall <s> s`). Exit 0 iff every non-advisory screen GREEN; advisory screens are printed only.
+- `gate.py selftest [--tolerance P]`: per screen ref b vs a GREEN; ref a with "missing layer" (top area x
+  colour-distance component's bbox filled with its ring median) and "shifted glyph" (max FIND_EDGES-energy 24x24
+  window +2 px x) RED. Advisory screens' cases print with suffix ` advisory` and are not counted (real refs:
+  title/mainmenu/charselect b-vs-a are RED by design). Temp `.run/1.2/selftest-<pid>/`, deleted.
 - `gate.py stamp`: sha256 over `C:/ob/up` HEAD + `diff HEAD` + untracked files; `C:/ob/src` files (not
   `ps2xRuntime/src/runner/`, `*_recompiled_*.h`, build/out dirs); `$OB_T` ps2_analyzer.exe, ps2_recomp.exe;
   `$OB_WORK` SLPM_654.28, main-functions.csv; `$OB_OVL/demo.toml`; `$OB_RUN/PROG/{DEMO,SUBMAIN,NETDNAS}.BIN`;
   `$OB_SPLAT` asm dirs of the 3 overlays; repo `tools/mwo3_to_elf.py`, `tools/splat_functions.py`; text of
   `cmd_recompile` in `tools/ob.sh`.
-- `gate.py synth DIR`: synthetic refs/manifest, frames-identical|erased|shifted, boot-*.log (tests only, `.run/1.2/`).
+- `gate.py synth DIR`: synthetic refs/manifest, frames-identical|erased|shifted|advisory (title erased, rest
+  identical), boot-*.log, `tol-advisory.json` {d:8,p:0.001,advisory:["title"]}, `tol-none.json` {d:8,p:0.001}
+  (tests only, `.run/1.2/`).
 - Wall time (T2, 2026-10-22): stale stamp 346 s (recompile 297 s, runner build 273 s); fresh stamp 47.8 s (boot + gate).
 
 ## Display-mode probe (T1, 2026-10-22)

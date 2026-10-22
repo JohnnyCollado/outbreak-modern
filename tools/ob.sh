@@ -166,7 +166,7 @@ cmd_gate() {
     while [ $# -gt 0 ]; do
         case $1 in
             --selftest) selftest=1; shift ;;
-            --d|--p) tol+=("$1" "$2"); shift 2 ;;
+            --d|--p|--tolerance) tol+=("$1" "$2"); shift 2 ;;
             *) echo "gate: unknown arg $1"; return 2 ;;
         esac
     done

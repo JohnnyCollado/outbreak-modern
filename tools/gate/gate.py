@@ -1,19 +1,24 @@
 """Boot-screen gate (phase 1.2): runner captures vs PCSX2 references. Pillow only.
 
 Usage (any cwd; defaults resolve against the repo root):
-  python tools/gate/gate.py compare --frames D --log F [--refs D] [--manifest P] [--d N] [--p F] [--start EPOCH]
+  python tools/gate/gate.py compare --frames D --log F [--refs D] [--manifest P] [--tolerance P] [--d N] [--p F] [--start EPOCH]
       Per screen: every frame <frames>/<screen>-<k>.png vs <refs>/<screen>-a.png, RGB only;
       delta = max(|dR|,|dG|,|dB|), share = count(delta > d) / (w*h); best frame = lowest share,
       then lowest max, then lowest k; tick from the boot log. GREEN = share <= p.
-  python tools/gate/gate.py selftest [--refs D] [--manifest P] [--d N] [--p F] [--start EPOCH]
+      Advisory screens print with " ADVISORY" and do not count: exit 0 iff every gated screen GREEN.
+  python tools/gate/gate.py selftest [--refs D] [--manifest P] [--tolerance P] [--d N] [--p F] [--start EPOCH]
       Per screen: ref b vs ref a must be GREEN; two damaged copies of ref a ("missing layer",
       "shifted glyph") must be RED. Damaged copies live in .run/1.2/selftest-<pid>/, deleted after.
+      Advisory screens' cases print with " advisory" and are not counted.
   python tools/gate/gate.py stamp
       sha256 over the recompile inputs (see stamp_entries).
   python tools/gate/gate.py synth DIR
-      Synthetic refs a/b + manifest and frame sets identical/erased/shifted with boot logs.
-Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, sha/size/count/tick mismatch), 5 selftest red.
-d/p: --d/--p if given, else gate/tolerance.json {d, p, ...}.
+      Synthetic refs a/b + manifest, frame sets identical/erased/shifted/advisory (title erased) with
+      boot logs, tol-advisory.json {d:8,p:0.001,advisory:["title"]}, tol-none.json {d:8,p:0.001}.
+Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, unknown advisory screen, sha/size/count/tick
+mismatch), 5 selftest red.
+d/p: --d/--p if given, else --tolerance file (default gate/tolerance.json) {d, p, advisory?, ...}.
+advisory: [screen, ...] from the tolerance file only (absent = []).
 """
 import argparse
 import datetime
@@ -88,15 +93,20 @@ def check_refs(a, takes):
 
 
 def tolerance(a):
-    d, p = a.d, a.p
-    if d is None or p is None:
-        if not os.path.isfile(TOLERANCE):
-            raise Refusal(f"no tolerance (--d/--p not given and {TOLERANCE} missing)")
-        with open(TOLERANCE, encoding="utf-8") as f:
+    """(d, p, advisory set). d/p: --d/--p override the file; advisory: from the file only (absent = [])."""
+    d, p, adv = a.d, a.p, []
+    if os.path.isfile(a.tolerance):
+        with open(a.tolerance, encoding="utf-8") as f:
             tol = json.load(f)
         d = tol["d"] if d is None else d
         p = tol["p"] if p is None else p
-    return int(d), float(p)
+        adv = tol.get("advisory", [])
+    elif d is None or p is None:
+        raise Refusal(f"no tolerance (--d/--p not given and {a.tolerance} missing)")
+    unknown = [s for s in adv if s not in SCREENS] if isinstance(adv, list) else [repr(adv)]
+    if unknown:
+        raise Refusal(f"tolerance advisory: unknown screen(s) {', '.join(map(str, unknown))}")
+    return int(d), float(p), set(adv)
 
 
 def verify_ref(man, refs, screen, take):
@@ -128,7 +138,7 @@ def read_ticks(log):
 def cmd_compare(a):
     try:
         man = check_refs(a, ["a"])
-        d, p = tolerance(a)
+        d, p, adv = tolerance(a)
     except Refusal as e:
         return finish(2, a.start, str(e))
     window = man.get("window")
@@ -168,13 +178,14 @@ def cmd_compare(a):
         for b in bad:
             print(f"refused: {b}")
         return finish(2, a.start, f"refused ({len(bad)} problem(s))")
-    green = 0
+    green, gated = 0, len(SCREENS) - len(adv)
     for s, (share, mx, k) in results:
         ok = share <= p
-        green += ok
-        print(f"{s} best k={k} tick={ticks[(s, k)]} max={mx} share={share:.6f} p={p:.6f} {'GREEN' if ok else 'RED'}")
-    code = 0 if green == len(SCREENS) else 1
-    return finish(code, a.start, f"{green}/{len(SCREENS)} green")
+        green += ok and s not in adv
+        print(f"{s} best k={k} tick={ticks[(s, k)]} max={mx} share={share:.6f} p={p:.6f} {'GREEN' if ok else 'RED'}"
+              f"{' ADVISORY' if s in adv else ''}")
+    code = 0 if green == gated else 1
+    return finish(code, a.start, f"{green}/{gated} gated green, {len(adv)} advisory")
 
 
 # ---- selftest damage -------------------------------------------------------------------------
@@ -259,7 +270,7 @@ def shifted_glyph(im):
 def cmd_selftest(a):
     try:
         check_refs(a, ["a", "b"])
-        d, p = tolerance(a)
+        d, p, adv = tolerance(a)
     except Refusal as e:
         return finish(2, a.start, str(e))
     tmp = os.path.join(TEMP_ROOT, f"selftest-{os.getpid()}")
@@ -282,10 +293,11 @@ def cmd_selftest(a):
                     mx, share = metric(ra, img, d)
                     green = share <= p
                 ok = green == want_green
-                ok_n += ok
-                total += 1
+                if s not in adv:
+                    ok_n += ok
+                    total += 1
                 print(f"{s} {name}: max={mx} share={share:.6f} p={p:.6f} {'GREEN' if green else 'RED'} "
-                      f"{'ok' if ok else 'FAIL'}{(' ' + desc) if desc else ''}")
+                      f"{'ok' if ok else 'FAIL'}{(' ' + desc) if desc else ''}{' advisory' if s in adv else ''}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return finish(0 if ok_n == total else 5, a.start, f"selftest {ok_n}/{total} ok")
@@ -391,11 +403,11 @@ def cmd_synth(a):
             im.save(path)
             entries.append({"screen": s, "take": take, "file": os.path.basename(path),
                             "sha256": sha256_file(path), "w": im.width, "h": im.height, "source": "synth"})
-        for kind in ("identical", "erased", "shifted"):
+        for kind in ("identical", "erased", "shifted", "advisory"):
             fd = os.path.join(out, f"frames-{kind}")
             os.makedirs(fd, exist_ok=True)
             img = ra.copy()
-            if kind == "erased":
+            if kind == "erased" or (kind == "advisory" and s == "title"):
                 img.paste((0, 0, 0), (70 + 10 * i, 60, 110 + 10 * i, 90))
             elif kind == "shifted":
                 img.paste(ra.crop((300, 252, 324, 276)), (302, 252))
@@ -403,7 +415,7 @@ def cmd_synth(a):
             img.putalpha(128)  # alpha must be ignored
             for k in range(3):
                 img.save(os.path.join(fd, f"{s}-{k}.png"))
-    for kind in ("identical", "erased", "shifted"):
+    for kind in ("identical", "erased", "shifted", "advisory"):
         with open(os.path.join(out, f"boot-{kind}.log"), "w", encoding="utf-8") as f:
             f.write("[run] window hidden=1\n")
             for i, s in enumerate(SCREENS):
@@ -416,7 +428,13 @@ def cmd_synth(a):
     with open(os.path.join(out, "ref_manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
         f.write("\n")
-    print(f"synth: refs + ref_manifest.json + frames-identical/erased/shifted + boot-*.log in {out}")
+    for name, tol in (("tol-advisory.json", {"d": 8, "p": 0.001, "advisory": ["title"]}),
+                      ("tol-none.json", {"d": 8, "p": 0.001})):
+        with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+            json.dump(tol, f)
+            f.write("\n")
+    print(f"synth: refs + ref_manifest.json + frames-identical/erased/shifted/advisory + boot-*.log"
+          f" + tol-advisory/none.json in {out}")
     return 0
 
 
@@ -432,6 +450,7 @@ def main():
         sp.add_argument("--manifest", default=DEFAULT_MANIFEST)
         sp.add_argument("--d", type=int)
         sp.add_argument("--p", type=float)
+        sp.add_argument("--tolerance", default=TOLERANCE)
         sp.add_argument("--start", type=float, default=time.time(), help="epoch seconds the wall time counts from")
     sub.add_parser("stamp")
     sp = sub.add_parser("synth")
