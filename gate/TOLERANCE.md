@@ -1,7 +1,7 @@
 # Gate tolerance — DRAFT (T5, 2026-10-22; not frozen, freeze is T6 with the developer)
 
-Status: draft. d proposed; p proposed for static screens only. Q2 decided (runner fault, 1.3); Q1 region split
-measured and fails its premise (section 6): the freeze stays blocked on Q1.
+Status: draft. d=8, p=0.0001, full frame, all six screens (developer 2026-10-22). Static screens proven; animated
+screens UNVERIFIED (section 7). Q2 decided (runner fault, 1.3). Open: section 7 premise (backgrounds are movies).
 Metric (gate.py `metric`): delta = max(|dR|,|dG|,|dB|) per pixel, alpha ignored; share = count(delta > d)/(512*448).
 Measured with scratch `.run/1.2/t5_tol.py`, `t5_field.py` (gate.py `metric`, `missing_layer`, `shifted_glyph`);
 logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
@@ -56,8 +56,8 @@ logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
 - p = 0.0001 (~23 px), static screens (savedata, access, capcom): PCSX2 noise 0, our noise 0 (charselect garbage
   7.0e-5 = 16 px would also fit) < p < smallest damage 0.000209 (savedata missing layer); margin x2 on the damage side.
   Edge/rounding effects across emulators beyond d: none measured (cannot be, without scoring the build; T7).
-- Holds on: savedata, access, capcom, provided Q2 is answered "runner fault".
-- No single p works on: title, mainmenu, charselect (Q1), and on no screen if field duplication is legitimate (Q2).
+- Proven on: savedata, access, capcom (Q2 decided: runner fault).
+- title, mainmenu, charselect: same d/p, full frame, best frame in window; UNVERIFIED (section 7).
 
 ## Open questions (for T6 / the developer; no p is widened to fit)
 - Q1 animated backgrounds: PCSX2 a vs b 0.14-0.44 at d8 vs smallest damage 0.000767-0.001495 (title, mainmenu, charselect). Options: (A) frame-
@@ -93,3 +93,28 @@ Plan: strict d/p on UI rectangles where PCSX2 a == b; background (complement) by
   4.56 (noise 5.54); title press 4.88 (noise 0.96, the one detectable case).
 - Conclusion: the split gives a working background check but no strict UI region on any of the three screens; a
   missing or misdrawn UI layer stays undetected. Not briefed to a coder. Options in the T5 summary.
+
+## 7. Animated screens: best-frame window (developer decision 2026-10-22), status UNVERIFIED
+Decision: full-frame d=8, p=0.0001 as on static screens; capture window long enough to cover the background
+animation, scored on the best (closest) frame (gate.py compare already does this: lowest share, then max, then k;
+no tool change). Region split (section 6) dropped; its numbers are the evidence for this choice.
+- Argument: the reference shows one phase of a looping animation; a correct build whose window covers one full loop
+  contains a frame of that phase, so its best frame is as close as PCSX2 is to itself on static screens.
+- Risk: (1) the loop must fit in the window and before the screen leaves (title idle -> attract after 960 ticks,
+  mainmenu idle -> title after 1800 ticks; R1.2-008); (2) on title the PRESS START pulse (decomp: 128 steps,
+  R1.2-008; ours ~85 ticks, T3) and the background must both match in one frame; (3) a static UI fault could hide in
+  a best frame only if it fits under p, as on static screens.
+- Re-check: when the backgrounds render (developer: phase 1.4), measure our loop and confirm a correct-looking build's
+  best frame is <= p. Fallback if it fails then: background-only coarse statistic (section 6 numbers: a-vs-b
+  title 1.10, mainmenu 5.01, charselect 10.26 vs black background 38.00 / 50.22 / 34.93; known blind spot: missing
+  UI layer, e.g. mainmenu menu 0.87 < 3.31).
+- Finding against the re-check timing (T5 resume 2): the backgrounds are CRI Sofdec movies, not procedural.
+  mainmenu: SUBMAIN movie func_0034A970 (decomp title.c:709-713); charselect: func_0034A3D0 (title.c:1276),
+  restart timer 108000 ticks (R1.2-008); SUBMAIN names PS2title1/2_eng.sfd, PS2select.sfd. Movies are M5
+  ("not started", PROJECT_CONTEXT.md), so they will not render in 1.4 without movie playback in scope.
+- Loop length: not measurable on our side (t3p frames: no background change over 120 frames; title/mainmenu mean RGB
+  ~1-2.6), not in the decomp (movie only), not resolvable to a named stream: the ISO's NETBIO*.DAT holds ~200 Sofdec
+  streams (`.run/1.2/t5_sfd2.py`; durations 3.55 s .. 376.9 s), no sector table found in SUBMAIN/ELF
+  (`t5_map.py`). Lower bound for any movie loop: 3.55 s = 213 ticks. Windows left unchanged (title 64, mainmenu 32,
+  charselect 6) pending the developer's answer.
+- Line-doubling (Q2): runner fault, phase 1.3; today's build expected RED on every screen until then.

@@ -60,3 +60,10 @@ so `watch 0x12000020` silently reads RDRAM 0x20. No env switch traces them. FBW 
   every screen inside its stable span; savedata, mainmenu, charselect hold both field phases; title luma 1..68.
 - For T5: our static access/capcom frames show one field phase only; a PCSX2 shot of the other phase differs by a
   1-line shift. Title text clipped at x=345 ("BUTTO") and black title/menu backgrounds: compare with the refs.
+
+## Tolerance (T5 draft, 2026-10-22; frozen in T6) — `gate/TOLERANCE.md`
+- d=8, p=0.0001 (~23 px), full frame, all six screens; no region split (measured, dropped: TOLERANCE.md section 6).
+- savedata/access/capcom proven: PCSX2 a==b, ours run==run, smallest damage 0.000209.
+- title/mainmenu/charselect: best frame in the capture window (existing compare logic); UNVERIFIED: backgrounds are
+  Sofdec movies (M5), loop length unknown (>= 213 ticks); fallback = coarse background statistic (section 7).
+- Runner line-doubling (applyFieldPresentation) is a runner fault for 1.3: every screen RED until fixed.
