@@ -1,0 +1,12 @@
+{
+  "d": 8,
+  "p": 0.0001,
+  "advisory": [
+    "title",
+    "mainmenu",
+    "charselect"
+  ],
+  "metric": "per-pixel max |dR|,|dG|,|dB| (alpha ignored); share = count(delta > d)/(w*h)",
+  "evidence": "gate/TOLERANCE.md",
+  "frozen": "2026-10-22"
+}

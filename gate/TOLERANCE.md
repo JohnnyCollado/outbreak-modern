@@ -1,6 +1,18 @@
-# Gate tolerance — DRAFT (T5, 2026-10-22; not frozen, freeze is T6 with the developer)
+# Gate tolerance — FROZEN 2026-10-22 (T5 analysis, T6 self-test; developer approved the freeze)
 
-Status: draft (freeze in T6). d=8, p=0.0001, full frame. GATED (pass/fail, exit code): savedata, access, capcom,
+## Plain-English summary
+The gate compares each boot screen our build draws with a PCSX2 screenshot of the same screen. For every pixel it
+takes the largest difference in red, green or blue (0 to 255). A pixel counts as wrong when that difference is
+more than 8. A screen passes when no more than 0.01% of its pixels are wrong, which is about 23 of the 229,376
+pixels in a 512x448 frame. Why 8: the two emulators turn 16-bit colours into 8-bit colours slightly differently
+(up to 7 levels), and blending can round by 1 more level; nothing else legitimate was found. Why 0.01%: PCSX2
+matches itself exactly on the save-data, ACCESS and CAPCOM screens and our runner matches itself too, while the
+smallest deliberate damage we tested (a 48-pixel missing box) is twice the limit. Those three screens decide pass
+or fail. The title, main menu and character select screens have movie backgrounds that the runner cannot play
+yet, so PCSX2 does not even match itself there; they are printed every run but do not affect the result. Once
+frozen, these numbers change only through a plan change the developer approves (rule P9).
+
+Status: draft, awaiting the developer's freeze (T6). d=8, p=0.0001, full frame. GATED (pass/fail, exit code): savedata, access, capcom,
 proven (section 5). ADVISORY (printed, not in the exit code; `advisory` in gate/tolerance.json): title, mainmenu,
 charselect, UNVERIFIED: backgrounds are Sofdec movies (M5); re-check belongs to the movie generation (section 8).
 Line-doubling: runner fault, phase 1.3 (Q2).
@@ -61,8 +73,8 @@ logs `.run/1.2/logs/t5_tol.log`, `t5_field.log`. 1 px = 4.36e-6 share.
 - Proven on: savedata, access, capcom (Q2 decided: runner fault).
 - title, mainmenu, charselect: same d/p, full frame, best frame in window; UNVERIFIED (section 7).
 
-## Open questions (for T6 / the developer; no p is widened to fit)
-- Q1 animated backgrounds: PCSX2 a vs b 0.14-0.44 at d8 vs smallest damage 0.000767-0.001495 (title, mainmenu, charselect). Options: (A) frame-
+## Open questions (resolved; kept as history)
+- Q1 RESOLVED 2026-10-22 by option A of section 8 (movie screens advisory). Original: animated backgrounds: PCSX2 a vs b 0.14-0.44 at d8 vs smallest damage 0.000767-0.001495 (title, mainmenu, charselect). Options: (A) frame-
   locked references: PCSX2 frame advance to a fixed vsync count after the screen's predicate, a/b must be
   identical, our window must cover that count; (B) mask the animated background (hides the missing title
   background, 1.4 scope); (C) mask it from the strict metric and check it with a coarse statistic (metric change,
@@ -96,7 +108,7 @@ Plan: strict d/p on UI rectangles where PCSX2 a == b; background (complement) by
 - Conclusion: the split gives a working background check but no strict UI region on any of the three screens; a
   missing or misdrawn UI layer stays undetected. Not briefed to a coder. Options in the T5 summary.
 
-## 7. Animated screens: best-frame window (developer decision 2026-10-22), status UNVERIFIED
+## 7. SUPERSEDED by section 8 (plan Changes 2026-10-22: best-frame idea dropped; kept as history)
 Decision: full-frame d=8, p=0.0001 as on static screens; capture window long enough to cover the background
 animation, scored on the best (closest) frame (gate.py compare already does this: lowest share, then max, then k;
 no tool change). Region split (section 6) dropped; its numbers are the evidence for this choice.
@@ -131,3 +143,26 @@ no tool change). Region split (section 6) dropped; its numbers are the evidence 
   mainmenu single-phase span to alternation, charselect two field periods inside its 49-tick stable span); the movie
   loop is unknown (>= 213 ticks) and cannot be sized until movies render; title idle limit 960 ticks and mainmenu
   1800 bound any future window (R1.2-008).
+
+## 9. Self-test on the real references (T6, 2026-10-22)
+`bash tools/ob.sh gate --selftest` with the draft gate/tolerance.json (d 8, p 0.0001, advisory title/mainmenu/
+charselect); refs a/b sha256 and size verified against gate/ref_manifest.json (12/12). Exit 0, `selftest 9/9 ok`;
+two runs, output identical except wall time (logs `.run/1.2/logs/t6-selftest.log`, `t6-selftest2.log`). Damaged
+copies of ref a generated in `.run/1.2/selftest-<pid>/` and deleted (game-derived, never committed).
+- Gated, counted (9): savedata b-vs-a max 0 share 0 GREEN; missing layer 0.000209 RED; shifted glyph 0.001212 RED.
+  access b-vs-a 0 GREEN; missing 0.007276 RED; shifted 0.001931 RED. capcom b-vs-a 0 GREEN; missing 0.145700 RED;
+  shifted 0.000593 RED.
+- Advisory, printed, not counted (9): title b-vs-a max 90 share 0.142526 RED; missing 0.003435 RED; shifted 0.001495
+  RED. mainmenu b-vs-a 114 / 0.436646 RED; missing 0.004464 RED; shifted 0.000767 RED. charselect b-vs-a 226 /
+  0.425297 RED; missing 0.314135 RED; shifted 0.001365 RED. (b-vs-a RED = the movie backgrounds, section 1.)
+- Margins on the gated screens: noise 0 vs p; smallest damage 0.000209 = 2.09 x p (savedata missing layer, 48 px).
+- Plan done-when wording "all six b-vs-a green, all twelve damaged red" applies to the 3 gated screens under
+  option A (6 cases/3 b-vs-a): the advisory screens' b-vs-a cannot be green while their backgrounds are movies.
+- Tool (T6, commit 3f75886): `gate.py compare` and the full `ob.sh gate` refuse `--d/--p` (exit 2); d/p come from
+  gate/tolerance.json only; `--d/--p` stay for selftest. Selftest refuses refs whose sha256/size != manifest.
+
+## 10. Freeze
+- Values: d = 8, p = 0.0001, advisory = [title, mainmenu, charselect]; metric and evidence as in gate/tolerance.json.
+- Freeze commit: PENDING (the developer's word; this line then carries the commit hash).
+- After the freeze, d, p, the metric and the advisory list change only through a developer-approved plan change
+  (rule P9); a red gate is fixed in the runner, never by moving the tolerance.
