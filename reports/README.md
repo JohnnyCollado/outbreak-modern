@@ -29,3 +29,5 @@ lessons learned.
 | Date | Report | Covers |
 |---|---|---|
 | 2026-10-21 | [Native port bring-up](2026-10-21-native-port-bring-up.md) | Milestone plans, choosing PS2Recomp, nine PS2Recomp fixes, first recompile and boot of SLPM-65428 up to the data archives |
+| 2026-10-21 | [Windows bring-up: to the main menu](2026-10-21-windows-port-bank-wall.md) | Patches 0010-0018, the sound bank wall, overlays as guest modules; the boot reaches the main menu |
+| 2026-10-21 | [Project Architect groundwork and boot speed](2026-10-21-pa3-groundwork-and-boot-speed.md) | First PA3 plan, `tools/ob.sh`, patch 0019, the profiler deadlock, aggressive logs halving the boot speed |
