@@ -13,6 +13,7 @@
 #include "ob_gs_bridge.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -25,6 +26,17 @@ namespace
 	bool s_tried = false, s_open = false, s_logged_snap = false;
 	alignas(64) u8 s_basemem[0x2000] = {};
 	std::vector<u8> s_rgba;
+	HWND s_child = nullptr;   // set by ob_gs_attach_window: PCSX2 presents into this child of the runner window
+	bool s_visible = false;   // parent window visible at attach: Mailbox present, else Disabled
+	std::atomic<u64> s_pending_size{0}; // (w << 32) | h from ob_gs_window_resized; 0 = none; applied in ob_gs_vsync
+
+	// Child of the runner window: no background, disabled and hit-test transparent so input stays with the parent.
+	LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+	{
+		if (msg == WM_NCHITTEST)
+			return HTTRANSPARENT;
+		return DefWindowProcW(hwnd, msg, wp, lp);
+	}
 
 	GSRendererType ToType(ObGsRenderer r) { return r == ObGsRenderer::VK ? GSRendererType::VK : GSRendererType::SW; }
 
@@ -83,8 +95,10 @@ namespace
 		EmuFolders::AppRoot = std::string(Path::GetDirectory(FileSystem::GetProgramPath()));
 		EmuFolders::Resources = Path::Combine(EmuFolders::AppRoot, "resources");
 		const GSRendererType t = ToType(s_renderer);
-		s_open = CreateHiddenWindow() && GSopen(MakeOptions(t), t, s_basemem, GSVSyncMode::Disabled, false);
-		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s\n", static_cast<int>(t), s_open ? "ok" : "FAILED");
+		const GSVSyncMode vsync = (s_child && s_visible) ? GSVSyncMode::Mailbox : GSVSyncMode::Disabled;
+		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t), t, s_basemem, vsync, false);
+		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d\n", static_cast<int>(t),
+			s_open ? "ok" : "FAILED", s_child ? "child" : "hidden", static_cast<int>(vsync));
 		std::fflush(stderr);
 		return s_open;
 	}
@@ -225,7 +239,46 @@ void ob_gs_vsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint64_t b
 	Put64(0x1010, imr);
 	Put64(0x1040, busdir);
 	Put64(0x1080, siglblid);
+	if (const u64 size = s_pending_size.exchange(0))
+		GSResizeDisplayWindow(static_cast<u32>(size >> 32), static_cast<u32>(size), 1.0f);
 	GSvsync((csr & 0x2000) ? 1 : 0, true);
+}
+
+void ob_gs_attach_window(void* hwnd, uint32_t w, uint32_t h, bool visible)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	if (s_tried || s_child || !hwnd)
+		return; // the GS is already open (or attach repeated): keep its window
+	WNDCLASSEXW wc = {};
+	wc.cbSize = sizeof(wc);
+	wc.lpfnWndProc = ChildWndProc;
+	wc.hInstance = GetModuleHandleW(nullptr);
+	wc.hbrBackground = nullptr;
+	wc.lpszClassName = L"ObPcsx2GsChild";
+	if (!RegisterClassExW(&wc))
+		return;
+	s_child = CreateWindowExW(0, wc.lpszClassName, L"ob_pcsx2_gs", WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_CLIPSIBLINGS,
+		0, 0, static_cast<int>(w), static_cast<int>(h), static_cast<HWND>(hwnd), nullptr, wc.hInstance, nullptr);
+	if (!s_child)
+		return;
+	s_visible = visible;
+	WindowInfo wi;
+	wi.type = WindowInfo::Type::Win32;
+	wi.window_handle = s_child;
+	wi.surface_width = w;
+	wi.surface_height = h;
+	wi.surface_scale = 1.0f;
+	ObPcsx2GS::SetRenderWindow(wi);
+	std::fprintf(stderr, "[pcsx2-gs] attach child %ux%u visible=%d\n", w, h, visible ? 1 : 0);
+	std::fflush(stderr);
+}
+
+void ob_gs_window_resized(uint32_t w, uint32_t h)
+{
+	if (!s_child || w == 0 || h == 0)
+		return;
+	SetWindowPos(s_child, nullptr, 0, 0, static_cast<int>(w), static_cast<int>(h), SWP_NOZORDER | SWP_NOACTIVATE);
+	s_pending_size.store((static_cast<u64>(w) << 32) | h);
 }
 
 uint32_t ob_gs_read_local(uint8_t* dst, uint32_t max_bytes)

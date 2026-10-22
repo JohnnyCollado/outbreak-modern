@@ -1,0 +1,178 @@
+From d192a705a2cdf209bff421e4f31a25b4ac6e9cb3 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 12:25:22 -0400
+Subject: [PATCH] Runtime: external GS attachWindow/windowResized hooks; skip
+ raylib frame draw with an external GS
+
+---
+ ps2xRuntime/include/runtime/gs/gs_external.h |  4 ++
+ ps2xRuntime/src/lib/gs/gs_external.cpp       | 12 +++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          | 50 ++++++++++++++------
+ ps2xTest/src/ps2_gs_external_tests.cpp       | 31 ++++++++++++
+ 4 files changed, 82 insertions(+), 15 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_external.h b/ps2xRuntime/include/runtime/gs/gs_external.h
+index 65e8117..4810028 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_external.h
++++ b/ps2xRuntime/include/runtime/gs/gs_external.h
+@@ -20,9 +20,13 @@ public:
+   virtual uint32_t readLocalToHost(uint8_t *dst, uint32_t maxBytes) = 0; // replaces the backend's ConsumeLocalToHostBytes when a hook is set
+   virtual void reset() = 0; // GS::reset() and CSR RESET bit writes
+   virtual bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0; // called right after vsync; RGBA8
++  virtual void attachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible) {} // main thread, after InitWindow; the GS presents into it
++  virtual void windowResized(uint32_t w, uint32_t h) {} // main thread, on a host window resize
+ };
+ PS2ExternalGS *ps2ExternalGS();           // null = CPU GS
+ void ps2SetExternalGS(PS2ExternalGS *gs); // tests and startup
++void ps2ExternalGSAttachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible); // no-op without an external GS
++void ps2ExternalGSWindowResized(uint32_t w, uint32_t h);                                   // no-op without an external GS
+ #ifdef PS2X_EXTERNAL_GS
+ PS2ExternalGS *ps2CreateExternalGS(const char *mode); // defined by the external library; null = failure
+ #endif
+diff --git a/ps2xRuntime/src/lib/gs/gs_external.cpp b/ps2xRuntime/src/lib/gs/gs_external.cpp
+index 957c3b8..5d75e65 100644
+--- a/ps2xRuntime/src/lib/gs/gs_external.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_external.cpp
+@@ -16,3 +16,15 @@ void ps2SetExternalGS(PS2ExternalGS *gs)
+ {
+     s_externalGS.store(gs, std::memory_order_release);
+ }
++
++void ps2ExternalGSAttachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible)
++{
++    if (PS2ExternalGS *gs = ps2ExternalGS())
++        gs->attachWindow(nativeHandle, w, h, visible);
++}
++
++void ps2ExternalGSWindowResized(uint32_t w, uint32_t h)
++{
++    if (PS2ExternalGS *gs = ps2ExternalGS())
++        gs->windowResized(w, h);
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index b728659..6fb3c06 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -477,6 +477,15 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+         ps2DumpPresentedFrame(s_frameDumpDir, currentTick, s_scratch.data(), width, height);
+     }
+ 
++    if (ps2ExternalGS())
++    {
++        // The external GS presents into its own child window; the raylib texture is never drawn.
++        outWidth = width;
++        outHeight = height;
++        s_hasUploadedFrame = true;
++        return;
++    }
++
+     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
+     if (!s_scratch.empty() && width != 0u && height != 0u)
+     {
+@@ -828,6 +837,8 @@ bool PS2Runtime::initialize(const char *title)
+             std::cout << "[run] window hidden=" << (IsWindowHidden() ? 1 : 0) << " flags=0x" << std::hex << windowFlags
+                       << std::dec << std::endl;
+         }
++        ps2ExternalGSAttachWindow(GetWindowHandle(), static_cast<uint32_t>(GetScreenWidth()),
++                                  static_cast<uint32_t>(GetScreenHeight()), !IsWindowHidden());
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+ #endif
+@@ -2571,22 +2582,31 @@ void PS2Runtime::run()
+         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+         UploadFrame(frameTex, this, presentWidth, presentHeight);
+ 
++        const bool externalPresent = ps2ExternalGS() != nullptr; // the external GS draws into its child window
++        if (externalPresent && IsWindowResized())
++        {
++            ps2ExternalGSWindowResized(static_cast<uint32_t>(GetScreenWidth()), static_cast<uint32_t>(GetScreenHeight()));
++        }
++
+         BeginDrawing();
+-        ClearBackground(BLACK);
+-        const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
+-        const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
+-        const float screenWidth = static_cast<float>(GetScreenWidth());
+-        const float screenHeight = static_cast<float>(GetScreenHeight());
+-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+-        const float dstWidth = srcWidth * scale;
+-        const float dstHeight = srcHeight * scale;
+-        const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+-        const Rectangle dstRect{
+-            (screenWidth - dstWidth) * 0.5f,
+-            (screenHeight - dstHeight) * 0.5f,
+-            dstWidth,
+-            dstHeight};
+-        DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++        if (!externalPresent)
++        {
++            ClearBackground(BLACK);
++            const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
++            const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
++            const float screenWidth = static_cast<float>(GetScreenWidth());
++            const float screenHeight = static_cast<float>(GetScreenHeight());
++            const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
++            const float dstWidth = srcWidth * scale;
++            const float dstHeight = srcHeight * scale;
++            const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
++            const Rectangle dstRect{
++                (screenWidth - dstWidth) * 0.5f,
++                (screenHeight - dstHeight) * 0.5f,
++                dstWidth,
++                dstHeight};
++            DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++        }
+         if (m_debugUiInitialized && m_debugUiDrawCallback)
+         {
+             m_debugUiDrawCallback(*this, m_debugUiUserData);
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index 92228ff..f6116b6 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -55,6 +55,14 @@ namespace
+             height = 2u;
+             return true;
+         }
++        void attachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible) override
++        {
++            events.push_back({'a', w, reinterpret_cast<uintptr_t>(nativeHandle), h | (visible ? (1ull << 32) : 0ull), {}});
++        }
++        void windowResized(uint32_t w, uint32_t h) override
++        {
++            events.push_back({'z', w, h, 0u, {}});
++        }
+     };
+ 
+     struct ExternalGSScope
+@@ -300,5 +308,28 @@ void register_ps2_gs_external_tests()
+                 t.IsTrue(rec.events[i].data == expected, "NLOOP 1 EOP PACKED NREG 1 A+D tag, then {value, reg}, in order");
+             }
+         });
++
++        tc.Run("window helpers forward attach and resize to the external GS, no-op without one", [](TestCase &t)
++        {
++            int handleTarget = 0;
++            ps2ExternalGSAttachWindow(&handleTarget, 1u, 2u, true); // no external GS: no-op
++            ps2ExternalGSWindowResized(3u, 4u);
++
++            RecordingExternalGS rec;
++            ExternalGSScope scope(&rec);
++            ps2ExternalGSAttachWindow(&handleTarget, 640u, 448u, false);
++            ps2ExternalGSWindowResized(1280u, 896u);
++
++            t.Equals(rec.events.size(), static_cast<size_t>(2u), "one attach, one resize");
++            if (rec.events.size() != 2u)
++                return;
++            t.Equals(rec.events[0].kind, 'a', "attach first");
++            t.Equals(rec.events[0].a, 640u, "attach width");
++            t.Equals(rec.events[0].b, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&handleTarget)), "attach handle");
++            t.Equals(rec.events[0].c, 448ull, "attach height, hidden");
++            t.Equals(rec.events[1].kind, 'z', "resize second");
++            t.Equals(rec.events[1].a, 1280u, "resize width");
++            t.Equals(rec.events[1].b, 896ull, "resize height");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

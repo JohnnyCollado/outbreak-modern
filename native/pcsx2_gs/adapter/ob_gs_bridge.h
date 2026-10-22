@@ -22,3 +22,8 @@ uint32_t ob_gs_read_local(uint8_t* dst, uint32_t max_bytes);
 void ob_gs_reset();
 // RGBA8 (alpha 0xFF) of the current display; pointer valid until the next call. Null on failure.
 const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height);
+// Main thread, before the game thread starts: PCSX2 presents into a child of this native window (HWND).
+// visible picks the present mode (Mailbox) vs Disabled for a hidden window.
+void ob_gs_attach_window(void* hwnd, uint32_t w, uint32_t h, bool visible);
+// Main thread: resizes the child now; PCSX2 sees the new size at the next ob_gs_vsync (game thread).
+void ob_gs_window_resized(uint32_t w, uint32_t h);

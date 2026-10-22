@@ -37,6 +37,11 @@ namespace
 			height = h;
 			return true;
 		}
+		void attachWindow(void* nativeHandle, uint32_t w, uint32_t h, bool visible) override
+		{
+			ob_gs_attach_window(nativeHandle, w, h, visible);
+		}
+		void windowResized(uint32_t w, uint32_t h) override { ob_gs_window_resized(w, h); }
 	};
 } // namespace
 
