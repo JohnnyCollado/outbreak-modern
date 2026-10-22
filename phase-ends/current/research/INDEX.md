@@ -1,2 +1,8 @@
 # Research reports -- this phase
 # id | task | title | tags | agent | date | lines
+R1.2-001 | phase 1.2 gate plan, Interfaces section (read-only research) | ob.sh gate interfaces: dispatch, boot, script grammar, frame dump, GS presentation | ob.sh, gate, boot, PS2X_INPUT_SCRIPT, frame-dump, GS, PSMCT16, interlace, DISPLAY | retriever-code | 2026-10-21 | 61 lines
+R1.2-002 | what phase 1.1 leaves for building the screenshot gate (timing, frame capture, noise, open items, R0-005 conclusions, reports) | Phase 1.1 handoff for the 1.2 screenshot gate | phase-1.1, gate, scripted-boot, frame-dump, compare, tolerance, pcsx2, reports | retriever-digest | 2026-10-21 | 58 lines
+R1.2-003 | phase 1.2 reference screenshots (PCSX2 vs native 512x448 PNG frames) | PCSX2 2.x screenshot geometry and settings for 512x448 1:1 reference captures | pcsx2, screenshot, gs, geometry, reference-capture | retriever-web | 2026-10-21 | 53 lines
+R1.2-004 | phase 1.2 tolerance freeze, native vs PCSX2 2.9.134 SW renderer, 512x448 | PS2 GS legitimate per-pixel deltas for frame tolerance (phase 1.2) | ps2, gs, pcsx2, tolerance, dithering, crtc, research | retriever-web | 2026-10-21 | 46 lines
+R1.2-005 | Phase 1.2 plan, PCSX2 deinterlace choice and tolerance analysis for comparing 512x448 frames to PCSX2 screenshots | RE Outbreak (SLPM_654.28) GS display init: what the decomp shows | ps2, gs, display, interlace, pmode, dither, outbreak, decomp | retriever-code | 2026-10-21 | 49 lines
+R1.2-006 | R1.2 PCSX2 reference-screenshot settings checklist | PCSX2 2.9.134 settings, output size, deinterlace, bilinear (for phase 1.2 checklist) | pcsx2, settings, deinterlace, screenshot, gs, phase-1.2 | retriever-web | 2026-10-21 | 62 lines
