@@ -2,3 +2,4 @@
 <!-- T<n> | <status> | <title> | <tags> | tasks/T<n>.md | logs/T<n>.md | <research ids, comma-separated> -->
 T1 | review | write PROJECT_CONTEXT.md | - | tasks/T1.md | logs/T1.md | R0-004
 T2 | question | Windows build and boot scripts into the repo | - | tasks/T2.md | logs/T2.md | R0-003,R0-002
+T3 | done | clean C:\ob\src; frame dump as patch 0019 | - | tasks/T3.md | logs/T3.md | R0-001,R0-003
