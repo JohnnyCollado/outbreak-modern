@@ -14,7 +14,7 @@ Done-criteria: one repo command rebuilds the runner from PS2Recomp eb8688b + our
 
 ## Phases
 
-- 1.1 Groundwork | milestone: PROJECT_CONTEXT.md exists, the card has no TODO, and repo commands build the runner from eb8688b + patches 0001-0020 and run a hidden scripted boot that ends by itself at character select, leaving tagged frame dumps for the six gate screens (`bash tools/ob.sh recompile`, then `bash tools/ob.sh boot --script gate/boot.script`) | scope: constitution; card; C:\ob build/boot scripts into tools/; C:\ob\src traces dropped, frame dump as patch 0019; scripted input + hidden window as patch 0020 | depends: — | status: open | phase-end: phase-ends/PhaseEnd_Phase1.1.md
+- 1.1 Groundwork | milestone: PROJECT_CONTEXT.md exists, the card has no TODO, and repo commands build the runner from eb8688b + patches 0001-0020 and run a hidden scripted boot that ends by itself at character select, leaving tagged frame dumps for the six gate screens (`bash tools/ob.sh recompile`, then `bash tools/ob.sh boot --script gate/boot.script`) | scope: constitution; card; C:\ob build/boot scripts into tools/; C:\ob\src traces dropped, frame dump as patch 0019; scripted input + hidden window as patch 0020 | depends: — | status: closed | phase-end: phase-ends/PhaseEnd_Phase1.1.md
 - 1.2 The gate | milestone: the gate command compares the six dumped screens with PCSX2 references under a tolerance frozen and justified in a committed file, passes a PCSX2-vs-PCSX2 self-check, fails a deliberately damaged frame, and prints the baseline (expected red) for today's build (`bash tools/ob.sh gate`) | scope: reference capture in PCSX2 2.9.134 (fixed settings, developer's proceed); the gate tool; noise-floor measurement on both sides; tolerance analysis and freeze; baseline report | depends: 1.1 | status: open | phase-end: phase-ends/PhaseEnd_Phase1.2.md
 - 1.3 Boot logos | milestone: ACCESS and CAPCOM are green in the gate, no other screen's numbers get worse | scope: diagnose and fix the colour fringing on ACCESS and anything wrong on CAPCOM in the GS/presenter path, as numbered patches with tests | depends: 1.2 | status: open | phase-end: phase-ends/PhaseEnd_Phase1.3.md
 - 1.4 Title and save-data screens | milestone: title "PRESS START" and the save-data screens are green in the gate, ACCESS and CAPCOM stay green | scope: missing title background, misshapen save-data glyphs (texture formats, CLUT, uploads, blending as the evidence says) | depends: 1.3 | status: open | phase-end: phase-ends/PhaseEnd_Phase1.4.md
@@ -42,3 +42,4 @@ Done-criteria: one repo command rebuilds the runner from PS2Recomp eb8688b + our
 ## Changes
 
 <!-- - <date> claude|developer: <what> — <why> -->
+- 2026-10-21 developer: phase 1.1 status -> closed
