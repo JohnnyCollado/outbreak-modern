@@ -1,0 +1,145 @@
+{
+  "pcsx2": "2.9.134",
+  "settings": {
+    "Snapshots": "snaps",
+    "Renderer": "13",
+    "ScreenshotSize": "2",
+    "ScreenshotFormat": "0",
+    "OrganizeScreenshotsByGame": "false",
+    "deinterlace_mode": "1",
+    "linear_present_mode": "0",
+    "CropLeft": "0",
+    "CropTop": "0",
+    "CropRight": "0",
+    "CropBottom": "0",
+    "fxaa": "false",
+    "ShadeBoost": "false",
+    "TVShader": "0",
+    "CASMode": "0",
+    "pcrtc_offsets": "false",
+    "pcrtc_overscan": "false",
+    "upscale_multiplier": "1",
+    "pcrtc_antiblur": "true",
+    "dithering_ps2": "2",
+    "AspectRatio": "Auto 4:3/3:2"
+  },
+  "window": {
+    "savedata": 6,
+    "access": 6,
+    "capcom": 6,
+    "title": 64,
+    "mainmenu": 32,
+    "charselect": 6
+  },
+  "session": "2026-10-22T02:53:32-04:00",
+  "refs": [
+    {
+      "screen": "savedata",
+      "take": "a",
+      "file": "savedata-a.png",
+      "sha256": "f82ecfa8465a2176125f0e9d1b17399b6904d22f90c63797e356c2e640e1cbb4",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030008.png"
+    },
+    {
+      "screen": "savedata",
+      "take": "b",
+      "file": "savedata-b.png",
+      "sha256": "f82ecfa8465a2176125f0e9d1b17399b6904d22f90c63797e356c2e640e1cbb4",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030305.png"
+    },
+    {
+      "screen": "access",
+      "take": "a",
+      "file": "access-a.png",
+      "sha256": "e1d7a3fd60842ddce355b20579ef05440b15d82e605070d285be9ab6a3c2a8ae",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030027.png"
+    },
+    {
+      "screen": "access",
+      "take": "b",
+      "file": "access-b.png",
+      "sha256": "e1d7a3fd60842ddce355b20579ef05440b15d82e605070d285be9ab6a3c2a8ae",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030325.png"
+    },
+    {
+      "screen": "capcom",
+      "take": "a",
+      "file": "capcom-a.png",
+      "sha256": "3addb6d4a313601a31b6be9f1cfd264d35638af24c10f2c225ab39d0eb3fa0b8",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030033.png"
+    },
+    {
+      "screen": "capcom",
+      "take": "b",
+      "file": "capcom-b.png",
+      "sha256": "3addb6d4a313601a31b6be9f1cfd264d35638af24c10f2c225ab39d0eb3fa0b8",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030331.png"
+    },
+    {
+      "screen": "title",
+      "take": "a",
+      "file": "title-a.png",
+      "sha256": "1e1cac0a0575fa2d9fb2952076df3836f95a1d91be1892438e1ae42cf006ceca",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030040.png"
+    },
+    {
+      "screen": "title",
+      "take": "b",
+      "file": "title-b.png",
+      "sha256": "a155c01c430c92d196f867ebdb91a4a39b6dfb192fde9f798fc7f508fd161c0f",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030337.png"
+    },
+    {
+      "screen": "mainmenu",
+      "take": "a",
+      "file": "mainmenu-a.png",
+      "sha256": "ea326cd5dae22b7d557d8aca387677227f0f0287d6b5bb1f4014484dfd0f6147",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030047.png"
+    },
+    {
+      "screen": "mainmenu",
+      "take": "b",
+      "file": "mainmenu-b.png",
+      "sha256": "5ca567deb8dc4ce24d4f73f782ad6091612fa0ae0b6e1ad6f697b5513c4f0b09",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030354.png"
+    },
+    {
+      "screen": "charselect",
+      "take": "a",
+      "file": "charselect-a.png",
+      "sha256": "abf9ea671d831a7350d36c2b62789505bc6771db2f49ed694d8aece81981f85f",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030135.png"
+    },
+    {
+      "screen": "charselect",
+      "take": "b",
+      "file": "charselect-b.png",
+      "sha256": "86e199568d6957929b67ac111f5e4a336c9a058377ff65ea3894cd09dc35487a",
+      "w": 512,
+      "h": 448,
+      "source": "BioHazard Outbreak_SLPM-65428_20261022030411.png"
+    }
+  ]
+}
