@@ -1,0 +1,619 @@
+From 07392f3e7671c4f10e8ef388e1e32421da7c8c4b Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 06:46:35 -0400
+Subject: [PATCH] Runtime: external GS hook (gs_external.h), PS2X_GS selector,
+ PS2X_EXTERNAL_GS_DIR option
+
+---
+ ps2xRuntime/CMakeLists.txt                   |  16 ++
+ ps2xRuntime/include/runtime/gs/gs_external.h |  30 ++++
+ ps2xRuntime/include/runtime/gs/gs_frontend.h |   4 +
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp   |   8 +
+ ps2xRuntime/src/lib/gs/gs_external.cpp       |  18 ++
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       |  31 +++-
+ ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp   |   4 +
+ ps2xRuntime/src/lib/ps2_memory.cpp           |  26 +++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          |  39 ++++-
+ ps2xTest/CMakeLists.txt                      |   1 +
+ ps2xTest/gs_cache/CMakeLists.txt             |   1 +
+ ps2xTest/src/main.cpp                        |   2 +
+ ps2xTest/src/ps2_gs_external_tests.cpp       | 165 +++++++++++++++++++
+ 13 files changed, 342 insertions(+), 3 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/gs/gs_external.h
+ create mode 100644 ps2xRuntime/src/lib/gs/gs_external.cpp
+ create mode 100644 ps2xTest/src/ps2_gs_external_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 137a49e..458d77f 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -16,6 +16,12 @@ option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" O
+ option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
+ option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
+ option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
++set(PS2X_EXTERNAL_GS_DIR "" CACHE PATH "Directory of an external GS library (target ps2x_external_gs); empty = CPU GS only")
++
++if(PS2X_EXTERNAL_GS_DIR AND PS2X_ENABLE_DEBUG_UI)
++    # An external GS may bring its own imgui; two imgui versions in one binary break the ODR.
++    message(FATAL_ERROR "PS2X_EXTERNAL_GS_DIR needs -DPS2X_ENABLE_DEBUG_UI=OFF")
++endif()
+ 
+ if(PS2X_ENABLE_SCCACHE)
+     find_program(PS2X_SCCACHE_PROGRAM sccache)
+@@ -377,6 +383,7 @@ endfunction()
+ 
+ add_library(ps2_runtime STATIC
+     src/lib/game_overrides.cpp
++    src/lib/gs/gs_external.cpp
+     src/lib/gs/ps2_gif_arbiter.cpp
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
+@@ -509,6 +516,15 @@ target_include_directories(ps2_runtime PUBLIC
+ )
+ 
+ target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
++
++if(PS2X_EXTERNAL_GS_DIR)
++    add_subdirectory("${PS2X_EXTERNAL_GS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/external_gs")
++    if(NOT TARGET ps2x_external_gs)
++        message(FATAL_ERROR "PS2X_EXTERNAL_GS_DIR=${PS2X_EXTERNAL_GS_DIR} defines no ps2x_external_gs target")
++    endif()
++    target_link_libraries(ps2_runtime PUBLIC ps2x_external_gs)
++    target_compile_definitions(ps2_runtime PUBLIC PS2X_EXTERNAL_GS=1)
++endif()
+ target_link_libraries(ps2EntryRunner
+     PRIVATE
+     ps2_runtime
+diff --git a/ps2xRuntime/include/runtime/gs/gs_external.h b/ps2xRuntime/include/runtime/gs/gs_external.h
+new file mode 100644
+index 0000000..65e8117
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_external.h
+@@ -0,0 +1,30 @@
++#ifndef PS2_GS_EXTERNAL_H
++#define PS2_GS_EXTERNAL_H
++
++#include <cstdint>
++#include <vector>
++
++#include "runtime/gs/ps2_gif_arbiter.h"
++
++struct GSRegisters;
++
++// Optional external GS: when set, it receives the GS input stream in the
++// order the runtime produces it and supplies the presented frame and the
++// local-to-host readback. Unset (the default), the CPU GS alone runs.
++class PS2ExternalGS {
++public:
++  virtual ~PS2ExternalGS() = default;
++  virtual void gifPacket(GifPathId path, const uint8_t *data, uint32_t sizeBytes) = 0; // whole packet as the arbiter drains it
++  virtual void privWrite(uint32_t offset, uint64_t value) = 0; // offset from 0x12000000, 8-aligned; value = whole 64-bit register after the write (32-bit half writes included)
++  virtual void vsync(uint64_t tick, const GSRegisters &regs) = 0; // VBlankStart, after the CSR FIELD set/clear, before script->onVSync
++  virtual uint32_t readLocalToHost(uint8_t *dst, uint32_t maxBytes) = 0; // replaces the backend's ConsumeLocalToHostBytes when a hook is set
++  virtual void reset() = 0; // GS::reset() and CSR RESET bit writes
++  virtual bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0; // called right after vsync; RGBA8
++};
++PS2ExternalGS *ps2ExternalGS();           // null = CPU GS
++void ps2SetExternalGS(PS2ExternalGS *gs); // tests and startup
++#ifdef PS2X_EXTERNAL_GS
++PS2ExternalGS *ps2CreateExternalGS(const char *mode); // defined by the external library; null = failure
++#endif
++
++#endif
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 4c3f641..9510a3d 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -142,6 +142,9 @@ public:
+     uint64_t nativePackedGIFPacketCount() const { return m_nativePackedGIFPacketCount; }
+ 
+     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
++    // Frame from an external GS (gs_external.h); latchHostPresentationFrame
++    // latches it instead of the backend's Present while a hook is set.
++    void publishExternalFrame(PresentationFrame &&frame);
+ 
+     void refreshDisplaySnapshot();
+ 
+@@ -229,6 +232,7 @@ private:
+     uint32_t m_hostPresentationSourceFbp = 0;
+     bool m_hostPresentationUsedPreferred = false;
+     bool m_hasHostPresentationFrame = false;
++    PresentationFrame m_externalFrame; // guarded by m_presentationMutex
+     uint64_t m_nativeImageUploadCount = 0;
+     uint64_t m_nativePackedGIFPacketCount = 0;
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 41c625f..c97a557 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "ps2_log.h"
+ #include "ps2_runtime_macros.h"
++#include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_input_script.h"
+ 
+ #include <algorithm>
+@@ -1880,6 +1881,13 @@ void EeScheduler::processEvent(const EeEvent &event)
+         {
+             m_runtime.memory().gs().csr.fetch_and(~0x2000ull, std::memory_order_acq_rel);
+         }
++        if (PS2ExternalGS *externalGS = ps2ExternalGS())
++        {
++            externalGS->vsync(m_vsyncTick, m_runtime.memory().gs());
++            PresentationFrame frame{};
++            if (externalGS->snapshot(frame.pixels, frame.width, frame.height))
++                m_runtime.gs().publishExternalFrame(std::move(frame));
++        }
+         writeGuestU32(m_vsyncFlagAddress, 1u);
+         if (m_vsyncTickAddress != 0u)
+         {
+diff --git a/ps2xRuntime/src/lib/gs/gs_external.cpp b/ps2xRuntime/src/lib/gs/gs_external.cpp
+new file mode 100644
+index 0000000..957c3b8
+--- /dev/null
++++ b/ps2xRuntime/src/lib/gs/gs_external.cpp
+@@ -0,0 +1,18 @@
++#include "runtime/gs/gs_external.h"
++
++#include <atomic>
++
++namespace
++{
++    std::atomic<PS2ExternalGS *> s_externalGS{nullptr};
++}
++
++PS2ExternalGS *ps2ExternalGS()
++{
++    return s_externalGS.load(std::memory_order_acquire);
++}
++
++void ps2SetExternalGS(PS2ExternalGS *gs)
++{
++    s_externalGS.store(gs, std::memory_order_release);
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 5658928..49ca23b 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_cpu_backend.h"
++#include "runtime/gs/gs_external.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_memory.h"
+ #include <atomic>
+@@ -165,6 +166,8 @@ void GS::reset()
+         m_backend->Sync(GSSyncReason::Reset);
+         m_backend->Reset();
+     }
++    if (PS2ExternalGS *externalGS = ps2ExternalGS())
++        externalGS->reset();
+     {
+         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+         m_hostPresentationFrame.clear();
+@@ -174,6 +177,7 @@ void GS::reset()
+         m_hostPresentationSourceFbp = 0u;
+         m_hostPresentationUsedPreferred = false;
+         m_hasHostPresentationFrame = false;
++        m_externalFrame = {};
+     }
+ 
+     m_debugHistoryWrite = 0;
+@@ -526,6 +530,20 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
+ 
+ void GS::latchHostPresentationFrame()
+ {
++    if (ps2ExternalGS())
++    {
++        // An external GS presents: latch the frame it last published.
++        std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
++        m_hostPresentationFrame = m_externalFrame.pixels;
++        m_hostPresentationWidth = m_externalFrame.width;
++        m_hostPresentationHeight = m_externalFrame.height;
++        m_hostPresentationDisplayFbp = m_externalFrame.displayFbp;
++        m_hostPresentationSourceFbp = m_externalFrame.sourceFbp;
++        m_hostPresentationUsedPreferred = m_externalFrame.usedPreferred;
++        m_hasHostPresentationFrame = static_cast<bool>(m_externalFrame);
++        return;
++    }
++
+     GSPresentationRequest request{};
+     {
+         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+@@ -1629,7 +1647,18 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
+ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+-    return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
++    const uint32_t bytes = m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
++    // An external GS owns the readback; the CPU backend is still drained above
++    // so its transfer state stays as without the hook.
++    if (PS2ExternalGS *externalGS = ps2ExternalGS())
++        return externalGS->readLocalToHost(dst, maxBytes);
++    return bytes;
++}
++
++void GS::publishExternalFrame(PresentationFrame &&frame)
++{
++    std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
++    m_externalFrame = std::move(frame);
+ }
+ 
+ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index c289ba0..b4857e5 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
++#include "runtime/gs/gs_external.h"
+ #include <algorithm>
+ #include <cstring>
+ 
+@@ -51,11 +52,14 @@ void GifArbiter::drain()
+                          return pathPriority(a.pathId) < pathPriority(b.pathId);
+                      });
+ 
++    PS2ExternalGS *const externalGS = ps2ExternalGS();
+     for (size_t i = 0; i < m_queue.size(); ++i)
+     {
+         auto &pkt = m_queue[i];
+         if (!pkt.data.empty())
+         {
++            if (externalGS)
++                externalGS->gifPacket(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 37b6a4d..4f68b47 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_address.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/gs/gs_external.h"
+ #include "ps2_log.h"
+ #include <atomic>
+ #include <cstring>
+@@ -141,6 +142,28 @@ namespace
+         } while (!csr.compare_exchange_weak(expected, desired));
+     }
+ 
++    // Forward a landed privileged write to the external GS, if one is set:
++    // the whole 64-bit register as it now stands. writtenBits is the write
++    // positioned in the 64-bit register (a CSR RESET bit there resets it).
++    inline void notifyExternalGsPrivWrite(GSRegisters &gs, uint32_t address, uint64_t writtenBits)
++    {
++        PS2ExternalGS *const externalGS = ps2ExternalGS();
++        if (!externalGS)
++            return;
++        constexpr uint64_t kCsrResetBit = 1ull << 9u;
++        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
++        if (regOff == kGsCsrRegOffset)
++        {
++            externalGS->privWrite(regOff, gs.csr.load());
++            if (writtenBits & kCsrResetBit)
++                externalGS->reset();
++        }
++        else if (const uint64_t *reg = gsRegPtr(gs, address))
++        {
++            externalGS->privWrite(regOff, *reg);
++        }
++    }
++
+     constexpr std::array<uint32_t, 4> kEeTimerBases = {
+         0x10000000u,
+         0x10000800u,
+@@ -967,6 +990,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
+             uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
+             *reg = newVal;
+         }
++        notifyExternalGsPrivWrite(gs_regs, address, static_cast<uint64_t>(value) << (off * 8u));
+         return;
+     }
+ 
+@@ -1024,6 +1048,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
+         {
+             *reg = value;
+         }
++        notifyExternalGsPrivWrite(gs_regs, address, value);
+         return;
+     }
+ 
+@@ -1175,6 +1200,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+             const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
+             *reg = (*reg & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
+         }
++        notifyExternalGsPrivWrite(gs_regs, address, static_cast<uint64_t>(value) << (off * 8u));
+         m_gsWriteCount.fetch_add(1, std::memory_order_relaxed);
+         return true;
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index bd5520b..e5f8516 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -5,6 +5,7 @@
+ #include "game_overrides.h"
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/gs/gs_external.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_frame_dump.h"
+ #include "runtime/ps2_input_script.h"
+@@ -747,6 +748,37 @@ bool PS2Runtime::syncCoreSubsystems()
+ 
+ bool PS2Runtime::initialize(const char *title)
+ {
++    {
++        // PS2X_GS selects the GS: unset or "cpu" = the built-in CPU GS; the
++        // external modes need a build with PS2X_EXTERNAL_GS_DIR.
++        const char *gsEnv = std::getenv("PS2X_GS");
++        const std::string gsMode = (gsEnv && *gsEnv) ? gsEnv : "cpu";
++        if (gsMode == "pcsx2-sw" || gsMode == "pcsx2-vk")
++        {
++#ifdef PS2X_EXTERNAL_GS
++            PS2ExternalGS *externalGS = ps2CreateExternalGS(gsMode.c_str());
++            if (!externalGS)
++            {
++                std::cerr << "[gs] backend " << gsMode << " failed to start" << std::endl;
++                std::cerr.flush();
++                std::_Exit(2);
++            }
++            ps2SetExternalGS(externalGS);
++#else
++            std::cerr << "[gs] backend " << gsMode << " needs a build with PS2X_EXTERNAL_GS_DIR" << std::endl;
++            std::cerr.flush();
++            std::_Exit(2);
++#endif
++        }
++        else if (gsMode != "cpu")
++        {
++            std::cerr << "[gs] unknown PS2X_GS=" << gsMode << " (cpu|pcsx2-sw|pcsx2-vk)" << std::endl;
++            std::cerr.flush();
++            std::_Exit(2);
++        }
++        std::cout << "[gs] backend=" << gsMode << std::endl;
++    }
++
+     if (const char *scriptPath = std::getenv("PS2X_INPUT_SCRIPT"))
+     {
+         static Ps2InputScript s_inputScript;
+@@ -2278,12 +2310,15 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
+     ps2TraceGuestWrite(rdram, GIF_TADR, 4u, tadr, 0u, "WRITE32", ctx);
+     m_memory.writeIORegister(GIF_TADR, tadr);
+     ps2TraceGuestWrite(rdram, GIF_CHCR, 4u, chcr, 0u, "WRITE32", ctx);
+-    if (m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
++    // The native chains feed the CPU GS directly, past the arbiter; an
++    // external GS sees only arbiter packets, so they are skipped for it.
++    const bool nativeGifChains = ps2ExternalGS() == nullptr;
++    if (nativeGifChains && m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
+     {
+         drainCompletedDmacHandlers(rdram);
+         return;
+     }
+-    if (m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
++    if (nativeGifChains && m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
+     {
+         drainCompletedDmacHandlers(rdram);
+         return;
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 39734d4..8bb206b 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -40,6 +40,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_float_semantics_tests.cpp
+     src/ps2_frame_dump_tests.cpp
+     src/ps2_input_script_tests.cpp
++    src/ps2_gs_external_tests.cpp
+ )
+ 
+ target_compile_definitions(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/gs_cache/CMakeLists.txt b/ps2xTest/gs_cache/CMakeLists.txt
+index 6b7210a..56dd551 100644
+--- a/ps2xTest/gs_cache/CMakeLists.txt
++++ b/ps2xTest/gs_cache/CMakeLists.txt
+@@ -13,6 +13,7 @@ option(PS2_GS_CACHE_BUILD_MEMORY_TESTS "Build tests for the new shared cached-re
+ find_package(Threads REQUIRED)
+ add_library(ps2_gs_cache_backend_under_test STATIC
+     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_cpu_backend.cpp"
++    "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_external.cpp"
+     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_frontend.cpp"
+     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/ps2_gs_memory.cpp"
+ )
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 8108c5e..e7db4e1 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -21,6 +21,7 @@ void register_ps2_runtime_expansion_tests();
+ void register_ps2_float_semantics_tests();
+ void register_ps2_frame_dump_tests();
+ void register_ps2_input_script_tests();
++void register_ps2_gs_external_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -46,6 +47,7 @@ int main()
+     register_ps2_float_semantics_tests();
+     register_ps2_frame_dump_tests();
+     register_ps2_input_script_tests();
++    register_ps2_gs_external_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+new file mode 100644
+index 0000000..7b4c05b
+--- /dev/null
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -0,0 +1,165 @@
++#include "MiniTest.h"
++#include "ps2_runtime.h"
++#include "runtime/ee_scheduler.h"
++#include "runtime/gs/gs_external.h"
++#include "runtime/gs/gs_frontend.h"
++
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++namespace
++{
++    struct ExternalGSEvent
++    {
++        char kind = 0; // p packet, w priv write, v vsync, s snapshot, r reset, l readback
++        uint32_t a = 0;
++        uint64_t b = 0;
++        uint64_t c = 0;
++        std::vector<uint8_t> data;
++    };
++
++    class RecordingExternalGS : public PS2ExternalGS
++    {
++    public:
++        std::vector<ExternalGSEvent> events;
++
++        void gifPacket(GifPathId path, const uint8_t *data, uint32_t sizeBytes) override
++        {
++            events.push_back({'p', static_cast<uint32_t>(path), 0u, 0u, std::vector<uint8_t>(data, data + sizeBytes)});
++        }
++        void privWrite(uint32_t offset, uint64_t value) override
++        {
++            events.push_back({'w', offset, value, 0u, {}});
++        }
++        void vsync(uint64_t tick, const GSRegisters &regs) override
++        {
++            events.push_back({'v', 0u, tick, regs.pmode, {}});
++            events.back().a = static_cast<uint32_t>(regs.csr.load() & 0x2000ull);
++        }
++        uint32_t readLocalToHost(uint8_t *dst, uint32_t maxBytes) override
++        {
++            events.push_back({'l', maxBytes, 0u, 0u, {}});
++            std::memset(dst, 0x5A, maxBytes);
++            return maxBytes;
++        }
++        void reset() override
++        {
++            events.push_back({'r', 0u, 0u, 0u, {}});
++        }
++        bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
++        {
++            events.push_back({'s', 0u, 0u, 0u, {}});
++            rgba = {1u, 2u, 3u, 255u, 4u, 5u, 6u, 255u};
++            width = 2u;
++            height = 1u;
++            return true;
++        }
++    };
++
++    struct ExternalGSScope
++    {
++        explicit ExternalGSScope(PS2ExternalGS *gs) { ps2SetExternalGS(gs); }
++        ~ExternalGSScope() { ps2SetExternalGS(nullptr); }
++    };
++
++    constexpr uint32_t kDrivePc = 0x00170000u;
++    constexpr uint32_t kResumePc = 0x00170010u;
++    constexpr uint32_t kGsPmode = 0x12000000u;
++    constexpr uint32_t kGsDispfb2Hi = 0x12000094u;
++    constexpr uint32_t kGsCsr = 0x12001000u;
++    constexpr uint64_t kPmodeValue = 0x0000000000000066ull;
++    constexpr uint64_t kCsrReset = 1ull << 9u;
++
++    // One PACKED A+D GIFtag (NLOOP 1, EOP) and its data qword, tagged by path.
++    std::vector<uint8_t> makeGifPacket(uint8_t path)
++    {
++        const uint64_t q[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, 0x1000ull + path, 0x4Cull};
++        std::vector<uint8_t> bytes(sizeof(q));
++        std::memcpy(bytes.data(), q, sizeof(q));
++        return bytes;
++    }
++
++    void externalGsDrive(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        PS2Memory &mem = runtime->memory();
++        const std::vector<uint8_t> p3 = makeGifPacket(3u), p2 = makeGifPacket(2u), p1 = makeGifPacket(1u);
++        mem.submitGifPacket(GifPathId::Path3, p3.data(), static_cast<uint32_t>(p3.size()), false);
++        mem.submitGifPacket(GifPathId::Path2, p2.data(), static_cast<uint32_t>(p2.size()), false);
++        mem.submitGifPacket(GifPathId::Path1, p1.data(), static_cast<uint32_t>(p1.size()), true);
++        mem.write64(kGsPmode, kPmodeValue);
++        mem.write32(kGsDispfb2Hi, 0x00ABCDEFu);
++        mem.write64(kGsCsr, kCsrReset);
++        ctx->pc = kResumePc;
++        runtime->eeScheduler().waitVSync(runtime->eeScheduler().currentVSyncTick());
++    }
++
++    void externalGsResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        ctx->pc = 0u;
++        runtime->requestStop();
++    }
++}
++
++void register_ps2_gs_external_tests()
++{
++    MiniTest::Case("PS2ExternalGS", [](TestCase &tc)
++    {
++        tc.Run("external GS hook sees arbiter packets, privileged writes and vsync in order", [](TestCase &t)
++        {
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            PS2Runtime runtime;
++            uint32_t cpuPackets = 0u;
++            runtime.gifArbiter().setProcessPacketFn([&cpuPackets](const uint8_t *, uint32_t) { ++cpuPackets; });
++            runtime.memory().setGifArbiter(&runtime.gifArbiter());
++            runtime.memory().gs().dispfb2 = 0x0000000011112222ull;
++            runtime.registerFunction(kDrivePc, externalGsDrive);
++            runtime.registerFunction(kResumePc, externalGsResume);
++
++            RecordingExternalGS rec;
++            ExternalGSScope scope(&rec);
++            R5900Context mainContext{};
++            mainContext.pc = kDrivePc;
++            runtime.eeScheduler().reset(rdram.data(), mainContext);
++            runtime.eeScheduler().run();
++
++            const std::vector<ExternalGSEvent> &ev = rec.events;
++            t.Equals(ev.size(), static_cast<size_t>(9u), "3 packets, 3 privileged writes, a reset, a vsync, a snapshot");
++            if (ev.size() != 9u)
++                return;
++            for (uint32_t i = 0; i < 3u; ++i)
++            {
++                t.Equals(ev[i].kind, 'p', "packets come first");
++                t.Equals(ev[i].a, i + 1u, "packets arrive in arbiter order (PATH1, PATH2, PATH3)");
++                t.IsTrue(ev[i].data == makeGifPacket(static_cast<uint8_t>(i + 1u)), "packet payload is the whole packet");
++            }
++            t.Equals(cpuPackets, 3u, "the CPU GS sink still gets every packet");
++            t.Equals(ev[3].kind, 'w', "PMODE write follows the packets");
++            t.Equals(ev[3].a, 0x0u, "PMODE offset");
++            t.Equals(ev[3].b, kPmodeValue, "PMODE value");
++            t.Equals(ev[4].kind, 'w', "DISPFB2 half write");
++            t.Equals(ev[4].a, 0x90u, "DISPFB2 offset is 8-aligned");
++            t.Equals(ev[4].b, 0x00ABCDEF11112222ull, "DISPFB2 value is the whole register after the write");
++            t.Equals(ev[5].kind, 'w', "CSR write");
++            t.Equals(ev[5].a, 0x1000u, "CSR offset");
++            t.Equals(ev[6].kind, 'r', "CSR RESET bit resets the external GS");
++            t.Equals(ev[7].kind, 'v', "vsync after the writes");
++            t.Equals(ev[7].b, 1ull, "first vsync tick");
++            t.Equals(ev[7].c, kPmodeValue, "vsync passes the privileged registers");
++            t.Equals(ev[7].a, 0x2000u, "vsync comes after the CSR FIELD set");
++            t.Equals(ev[8].kind, 's', "snapshot right after vsync");
++
++            runtime.gs().latchHostPresentationFrame();
++            std::vector<uint8_t> pixels;
++            uint32_t width = 0u, height = 0u;
++            t.IsTrue(runtime.gs().copyLatchedHostPresentationFrame(pixels, width, height), "published frame is latched");
++            t.Equals(width, 2u, "latched width");
++            t.Equals(height, 1u, "latched height");
++            t.IsTrue(pixels == std::vector<uint8_t>{1u, 2u, 3u, 255u, 4u, 5u, 6u, 255u}, "latched pixels");
++
++            uint8_t readback[8] = {};
++            t.Equals(runtime.gs().consumeLocalToHostBytes(readback, 8u), 8u, "readback comes from the external GS");
++            t.Equals(readback[7], static_cast<uint8_t>(0x5Au), "readback bytes");
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+
