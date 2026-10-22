@@ -30,6 +30,7 @@ GAMESETTINGS_GLOB = "ps2_emu/gamesettings/SLPM-65428*.ini"
 DEFAULT_SNAPS = "ps2_emu/snaps"
 DEFAULT_OUT = "C:/ob/ref"
 DEFAULT_MANIFEST = "gate/ref_manifest.json"
+BOOT_SCRIPT = "gate/boot.script"
 REF_SIZE = (512, 448)
 
 GS = "EmuCore/GS"
@@ -102,6 +103,17 @@ def cmd_begin(a):
     return 0
 
 
+def capture_window():
+    """{screen: n} from the `capture <screen> <n>` lines of BOOT_SCRIPT (the gate's frames per screen)."""
+    win = {}
+    with open(BOOT_SCRIPT, encoding="utf-8") as f:
+        for line in f:
+            p = line.split()
+            if len(p) == 3 and p[0] == "capture" and p[2].isdigit():
+                win[p[1]] = int(p[2])
+    return win
+
+
 def cmd_intake(a):
     marker = os.path.join(a.out, "session.json")
     if not os.path.isfile(marker):
@@ -139,7 +151,8 @@ def cmd_intake(a):
             sha = hashlib.sha256(f.read()).hexdigest()
         refs.append({"screen": screen, "take": take, "file": os.path.basename(dst),
                      "sha256": sha, "w": w, "h": h, "source": name})
-    manifest = {"pcsx2": PCSX2_VERSION, "settings": settings, "window": sess["iso"], "refs": refs}
+    manifest = {"pcsx2": PCSX2_VERSION, "settings": settings, "window": capture_window(),
+                "session": sess["iso"], "refs": refs}
     md = os.path.dirname(a.manifest)
     if md:
         os.makedirs(md, exist_ok=True)

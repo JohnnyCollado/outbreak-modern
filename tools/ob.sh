@@ -9,6 +9,7 @@
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
 #   tools/ob.sh boot --script F [--tag T]    hidden scripted boot (PS2X_INPUT_SCRIPT, patch 0020); ends by
 #                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
+#   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
 #
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
 # OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat.
@@ -158,10 +159,41 @@ cmd_boot() {
     return $rc
 }
 
+# Gate (docs/ops/gate.md): exit 0 green, 1 red, 2 refusal, 3 boot failed, 4 recompile failed, 5 selftest red.
+cmd_gate() {
+    local start selftest=0 tol=() s t rc
+    start=$(date +%s)
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --selftest) selftest=1; shift ;;
+            --d|--p) tol+=("$1" "$2"); shift 2 ;;
+            *) echo "gate: unknown arg $1"; return 2 ;;
+        esac
+    done
+    local G="$REPO/tools/gate/gate.py"
+    if [ $selftest = 0 ]; then
+        s=$("$PY" -I "$G" stamp) || { echo "gate: stamp failed, exit 2, wall $(( $(date +%s) - start )) s"; return 2; }
+        if [ "$s" != "$(cat "$OB_R/gate.stamp" 2>/dev/null)" ] || [ ! -f "$OB_R/ps2xRuntime/ps2EntryRunner.exe" ]; then
+            t=$(date +%s)
+            ( cmd_recompile ) || { echo "gate: recompile failed, exit 4, wall $(( $(date +%s) - start )) s"; return 4; }
+            echo "$s" > "$OB_R/gate.stamp"
+            echo "gate: recompiled in $(( $(date +%s) - t )) s"
+        else
+            echo "gate: not recompiled (stamp unchanged)"
+        fi
+        cmd_boot --script "$REPO/gate/boot.script" --tag gate ||
+            { echo "gate: boot failed, exit 3, wall $(( $(date +%s) - start )) s"; return 3; }
+    fi
+    "$PY" -I "$G" selftest --start "$start" "${tol[@]}"; rc=$?
+    [ $selftest = 0 ] && [ $rc = 0 ] || return $rc
+    "$PY" -I "$G" compare --frames "$OB_ROOT/frames-gate" --log "$OB_LOGS/boot-gate.log" --start "$start" "${tol[@]}"
+}
+
 case ${1:-} in
     tools) cmd_tools ;;
     test) cmd_test ;;
     recompile) cmd_recompile ;;
     boot) shift; cmd_boot "$@" ;;
-    *) sed -n '6,9p' "$0"; exit 2 ;;
+    gate) shift; cmd_gate "$@" ;;
+    *) sed -n '6,12p' "$0"; exit 2 ;;
 esac
