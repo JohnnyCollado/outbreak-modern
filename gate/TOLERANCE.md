@@ -163,6 +163,6 @@ copies of ref a generated in `.run/1.2/selftest-<pid>/` and deleted (game-derive
 
 ## 10. Freeze
 - Values: d = 8, p = 0.0001, advisory = [title, mainmenu, charselect]; metric and evidence as in gate/tolerance.json.
-- Freeze commit: PENDING (the developer's word; this line then carries the commit hash).
+- Freeze commit: 20233c3 (2026-10-22, developer: "Freeze the tolerance as drafted").
 - After the freeze, d, p, the metric and the advisory list change only through a developer-approved plan change
   (rule P9); a red gate is fixed in the runner, never by moving the tolerance.
