@@ -9,6 +9,7 @@ whatever changed it.
 - `tools.md` — project tools in `tools/` (live, unclear, legacy ARMSX2-mod / device tools)
 - `gate.md` — the gate: files, refs.py, display-mode probe result
 - `reference-capture.md` — PCSX2 reference settings (UI path, ini key), hotkeys, per-screen capture checklist
+- `gs.md` — the GPU GS: PCSX2 GS decision, phase 1.3 stop, where it plugs in
 boot.md | Booting the runner | 16
 gotchas.md | Harness and build gotchas | 33
 pins.md | Pins | 14
