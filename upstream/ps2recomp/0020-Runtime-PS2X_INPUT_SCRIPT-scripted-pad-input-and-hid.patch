@@ -1,0 +1,1089 @@
+From ee2299270e7b6393e8e783e73905fe8db32bfe5c Mon Sep 17 00:00:00 2001
+From: Johnny Collado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 21:09:19 -0400
+Subject: [PATCH] Runtime: PS2X_INPUT_SCRIPT scripted pad input and hidden
+ window
+
+---
+ ps2xRuntime/CMakeLists.txt                    |   1 +
+ ps2xRuntime/include/runtime/ps2_frame_dump.h  |   4 +
+ .../include/runtime/ps2_input_script.h        | 123 +++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp    |  17 +
+ ps2xRuntime/src/lib/ps2_frame_dump.cpp        |  16 +-
+ ps2xRuntime/src/lib/ps2_input_script.cpp      | 444 ++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_pad.cpp               |  10 +
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  71 ++-
+ ps2xTest/CMakeLists.txt                       |   1 +
+ ps2xTest/src/main.cpp                         |   2 +
+ ps2xTest/src/ps2_input_script_tests.cpp       | 206 ++++++++
+ 11 files changed, 888 insertions(+), 7 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_input_script.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_input_script.cpp
+ create mode 100644 ps2xTest/src/ps2_input_script_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 8e6c2f6..137a49e 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -381,6 +381,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
+     src/lib/ps2_frame_dump.cpp
++    src/lib/ps2_input_script.cpp
+     src/lib/gs/ps2_gs_memory.cpp
+     src/lib/gs/gs_frontend.cpp
+     src/lib/gs/gs_cpu_backend.cpp
+diff --git a/ps2xRuntime/include/runtime/ps2_frame_dump.h b/ps2xRuntime/include/runtime/ps2_frame_dump.h
+index 7676cf7..639c17a 100644
+--- a/ps2xRuntime/include/runtime/ps2_frame_dump.h
++++ b/ps2xRuntime/include/runtime/ps2_frame_dump.h
+@@ -7,4 +7,8 @@
+ // Returns false on a null or empty dir, null pixels, a zero size, or a failed write.
+ bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height);
+ 
++// Writes one presented RGBA8 frame as <dir>/<fileName> at its native size (creates dir).
++// Returns false on a null or empty dir or fileName, null pixels, a zero size, or a failed write.
++bool ps2DumpPresentedFrameNamed(const char *dir, const char *fileName, const uint8_t *rgba, uint32_t width, uint32_t height);
++
+ #endif
+diff --git a/ps2xRuntime/include/runtime/ps2_input_script.h b/ps2xRuntime/include/runtime/ps2_input_script.h
+new file mode 100644
+index 0000000..db0d2ea
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_input_script.h
+@@ -0,0 +1,123 @@
++#ifndef PS2_INPUT_SCRIPT_H
++#define PS2_INPUT_SCRIPT_H
++
++#include <atomic>
++#include <cstdint>
++#include <functional>
++#include <mutex>
++#include <ostream>
++#include <string>
++#include <vector>
++
++// Scripted pad input (PS2X_INPUT_SCRIPT=<file>). One step per line, '#' comments, numbers dec or 0x:
++//   timeout <secs>                        header, whole-script wall clock (default 600)
++//   wait vsync <n>
++//   wait mem <ref> <1|2|4> <==|!=> <value>  ref = <addr> or *<ptraddr>+<off> (null pointer = not satisfied)
++//   press <btn[+btn..]> <held vsyncs>       then released for 1 vsync before the next step
++//   capture <screen> <n>                  completes after n frames dumped as <screen>-<k>.png
++//   watch <ref> <1|2|4>                   non-blocking; logs every change for the rest of the run
++//   log <text>
++//   quit
++// Threads: onVSync (vsync thread) steps; buttons() (game thread) reads; takeCapture/commitCapture and
++// timedOut (main thread). No raylib dependency.
++class Ps2InputScript
++{
++public:
++    enum class Op
++    {
++        WaitVsync,
++        WaitMem,
++        Press,
++        Capture,
++        Watch,
++        Log,
++        Quit
++    };
++
++    struct MemRef
++    {
++        uint32_t addr = 0;
++        bool deref = false;
++        uint32_t offset = 0;
++    };
++
++    struct Step
++    {
++        Op op = Op::Log;
++        int line = 0;
++        std::string text;
++        MemRef ref;
++        uint32_t width = 4;
++        bool equal = true;
++        uint32_t value = 0;
++        uint16_t mask = 0;     // press: pressed buttons (bits of the active-low pad word)
++        uint32_t count = 0;    // wait vsync n, press held vsyncs, capture n
++        std::string name;      // capture screen, log text
++    };
++
++    // Reads <width> bytes of guest memory at a guest address; false when out of range.
++    using ReadMem = std::function<bool(uint32_t addr, uint32_t width, uint32_t &out)>;
++
++    // Parses a whole script; on failure returns false with "line <L>: <reason>" in error.
++    bool parse(const std::string &text, std::string &error);
++    bool loadFile(const std::string &path, std::string &error);
++
++    const std::vector<Step> &steps() const { return m_steps; }
++    double timeoutSeconds() const { return m_timeoutSeconds; }
++    bool hasCaptureSteps() const;
++
++    // Vsync thread: advance the script at guest vsync <tick>.
++    void onVSync(uint64_t tick, const ReadMem &read, std::ostream &log);
++
++    // Game thread: active-low pad button word (0xFFFF = nothing held).
++    uint16_t buttons() const { return m_buttons.load(std::memory_order_acquire); }
++    bool quitRequested() const { return m_quit.load(std::memory_order_acquire); }
++
++    // Main thread: when a capture step is active and <latchedTick> is new, reserves frame k and
++    // returns true with the file name "<screen>-<k>.png"; commitCapture(true) counts the frame as
++    // written, commitCapture(false) gives k back for the next tick.
++    bool takeCapture(uint64_t latchedTick, std::string &fileName, std::string &screen, uint32_t &k);
++    void commitCapture(bool written);
++
++    // Main thread: wall-clock timeout, measured from start(). On timeout, message holds
++    // "[script] TIMEOUT step <i> line <L>: <text>".
++    void start(double nowSeconds);
++    bool timedOut(double nowSeconds, std::string &message) const;
++
++private:
++    struct Watch
++    {
++        MemRef ref;
++        uint32_t width = 4;
++        bool valid = false;
++        uint32_t value = 0;
++        std::string label;
++    };
++
++    bool readRef(const MemRef &ref, uint32_t width, const ReadMem &read, uint32_t &out) const;
++    void beginStep(uint64_t tick, const ReadMem &read, std::ostream &log);
++
++    std::vector<Step> m_steps;
++    double m_timeoutSeconds = 600.0;
++    double m_startSeconds = 0.0;
++
++    mutable std::mutex m_mutex;
++    size_t m_index = 0;
++    bool m_begun = false;
++    uint64_t m_stepTick = 0;
++    std::vector<Watch> m_watches;
++    bool m_captureActive = false;
++    uint32_t m_captureTaken = 0;
++    uint32_t m_captureWritten = 0;
++    uint64_t m_lastCaptureTick = 0;
++    bool m_hasCaptureTick = false;
++
++    std::atomic<uint16_t> m_buttons{0xFFFFu};
++    std::atomic<bool> m_quit{false};
++};
++
++// The process-wide script (nullptr without PS2X_INPUT_SCRIPT).
++Ps2InputScript *ps2ActiveInputScript();
++void ps2SetActiveInputScript(Ps2InputScript *script);
++
++#endif
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 20e8af3..41c625f 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -2,10 +2,12 @@
+ 
+ #include "ps2_log.h"
+ #include "ps2_runtime_macros.h"
++#include "runtime/ps2_input_script.h"
+ 
+ #include <algorithm>
+ #include <cassert>
+ #include <cstring>
++#include <iostream>
+ #include <limits>
+ #include <stdexcept>
+ 
+@@ -1889,6 +1891,21 @@ void EeScheduler::processEvent(const EeEvent &event)
+         }
+         m_vsyncFlagAddress = 0u;
+         m_vsyncTickAddress = 0u;
++        if (Ps2InputScript *script = ps2ActiveInputScript())
++        {
++            const uint8_t *rdram = m_rdram;
++            script->onVSync(m_vsyncTick,
++                            [rdram](uint32_t addr, uint32_t width, uint32_t &out)
++                            {
++                                const uint32_t physical = addr & 0x01FFFFFFu;
++                                if (!rdram || physical > PS2_RAM_SIZE - width)
++                                    return false;
++                                out = 0u;
++                                std::memcpy(&out, rdram + physical, width);
++                                return true;
++                            },
++                            std::cout);
++        }
+         completeVSync(m_vsyncTick);
+         if (m_gsVSyncCallback != 0u && m_runtime.hasFunction(m_gsVSyncCallback))
+         {
+diff --git a/ps2xRuntime/src/lib/ps2_frame_dump.cpp b/ps2xRuntime/src/lib/ps2_frame_dump.cpp
+index 5297fac..daba872 100644
+--- a/ps2xRuntime/src/lib/ps2_frame_dump.cpp
++++ b/ps2xRuntime/src/lib/ps2_frame_dump.cpp
+@@ -6,9 +6,10 @@
+ #include <string>
+ #include <system_error>
+ 
+-bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height)
++bool ps2DumpPresentedFrameNamed(const char *dir, const char *fileName, const uint8_t *rgba, uint32_t width, uint32_t height)
+ {
+-    if (dir == nullptr || dir[0] == '\0' || rgba == nullptr || width == 0u || height == 0u)
++    if (dir == nullptr || dir[0] == '\0' || fileName == nullptr || fileName[0] == '\0' || rgba == nullptr ||
++        width == 0u || height == 0u)
+     {
+         return false;
+     }
+@@ -25,9 +26,7 @@ bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *r
+         s_createdDir = dir;
+     }
+ 
+-    char name[32];
+-    std::snprintf(name, sizeof(name), "frame-%08llu.png", static_cast<unsigned long long>(vsyncTick));
+-    const std::string path = (std::filesystem::path(dir) / name).string();
++    const std::string path = (std::filesystem::path(dir) / fileName).string();
+ 
+     Image image{};
+     image.data = const_cast<uint8_t *>(rgba);
+@@ -37,3 +36,10 @@ bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *r
+     image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+     return ExportImage(image, path.c_str());
+ }
++
++bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height)
++{
++    char name[32];
++    std::snprintf(name, sizeof(name), "frame-%08llu.png", static_cast<unsigned long long>(vsyncTick));
++    return ps2DumpPresentedFrameNamed(dir, name, rgba, width, height);
++}
+diff --git a/ps2xRuntime/src/lib/ps2_input_script.cpp b/ps2xRuntime/src/lib/ps2_input_script.cpp
+new file mode 100644
+index 0000000..aba78e6
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_input_script.cpp
+@@ -0,0 +1,444 @@
++#include "runtime/ps2_input_script.h"
++
++#include <cctype>
++#include <fstream>
++#include <limits>
++#include <sstream>
++
++namespace
++{
++    struct ButtonName
++    {
++        const char *name;
++        uint16_t mask;
++    };
++
++    // Active-low pad bits, as ps2_pad.cpp.
++    constexpr ButtonName kButtons[] = {
++        {"up", 0x0010u},
++        {"down", 0x0040u},
++        {"left", 0x0080u},
++        {"right", 0x0020u},
++        {"start", 0x0008u},
++        {"select", 0x0001u},
++        {"cross", 0x4000u},
++        {"circle", 0x2000u},
++        {"square", 0x8000u},
++        {"triangle", 0x1000u},
++        {"l1", 0x0400u},
++        {"r1", 0x0800u},
++        {"l2", 0x0100u},
++        {"r2", 0x0200u},
++        {"l3", 0x0002u},
++        {"r3", 0x0004u},
++    };
++
++    bool parseNumber(const std::string &text, uint32_t &out)
++    {
++        if (text.empty())
++            return false;
++        uint64_t value = 0;
++        size_t pos = 0;
++        unsigned base = 10;
++        if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
++        {
++            base = 16;
++            pos = 2;
++        }
++        for (; pos < text.size(); ++pos)
++        {
++            const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(text[pos])));
++            unsigned digit = 0;
++            if (c >= '0' && c <= '9')
++                digit = static_cast<unsigned>(c - '0');
++            else if (base == 16 && c >= 'a' && c <= 'f')
++                digit = static_cast<unsigned>(c - 'a' + 10);
++            else
++                return false;
++            value = value * base + digit;
++            if (value > std::numeric_limits<uint32_t>::max())
++                return false;
++        }
++        out = static_cast<uint32_t>(value);
++        return true;
++    }
++
++    bool parseRef(const std::string &text, Ps2InputScript::MemRef &ref)
++    {
++        ref = {};
++        if (!text.empty() && text[0] == '*')
++        {
++            ref.deref = true;
++            const std::string body = text.substr(1);
++            const size_t plus = body.find('+');
++            if (plus == std::string::npos)
++                return parseNumber(body, ref.addr);
++            return parseNumber(body.substr(0, plus), ref.addr) && parseNumber(body.substr(plus + 1), ref.offset);
++        }
++        return parseNumber(text, ref.addr);
++    }
++
++    bool parseWidth(const std::string &text, uint32_t &width)
++    {
++        return parseNumber(text, width) && (width == 1u || width == 2u || width == 4u);
++    }
++
++    bool parseButtons(const std::string &text, uint16_t &mask)
++    {
++        mask = 0;
++        size_t start = 0;
++        while (start <= text.size())
++        {
++            const size_t plus = text.find('+', start);
++            const std::string name = text.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
++            bool found = false;
++            for (const ButtonName &button : kButtons)
++            {
++                if (name == button.name)
++                {
++                    mask |= button.mask;
++                    found = true;
++                    break;
++                }
++            }
++            if (!found)
++                return false;
++            if (plus == std::string::npos)
++                break;
++            start = plus + 1;
++        }
++        return mask != 0;
++    }
++
++    std::string hex(uint32_t value)
++    {
++        std::ostringstream out;
++        out << "0x" << std::hex << value;
++        return out.str();
++    }
++}
++
++bool Ps2InputScript::parse(const std::string &text, std::string &error)
++{
++    m_steps.clear();
++    m_timeoutSeconds = 600.0;
++    bool sawTimeout = false;
++
++    std::istringstream input(text);
++    std::string raw;
++    int lineNo = 0;
++    while (std::getline(input, raw))
++    {
++        ++lineNo;
++        const size_t hash = raw.find('#');
++        std::string line = hash == std::string::npos ? raw : raw.substr(0, hash);
++        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
++            line.pop_back();
++        size_t first = 0;
++        while (first < line.size() && std::isspace(static_cast<unsigned char>(line[first])))
++            ++first;
++        line = line.substr(first);
++        if (line.empty())
++            continue;
++
++        std::istringstream words(line);
++        std::vector<std::string> tok;
++        for (std::string w; words >> w;)
++            tok.push_back(w);
++
++        auto fail = [&](const std::string &why)
++        {
++            error = "line " + std::to_string(lineNo) + ": " + why + ": " + line;
++            m_steps.clear();
++            return false;
++        };
++
++        Step step;
++        step.line = lineNo;
++        step.text = line;
++        const std::string &cmd = tok[0];
++        if (cmd == "timeout")
++        {
++            uint32_t secs = 0;
++            if (tok.size() != 2 || !parseNumber(tok[1], secs) || secs == 0u)
++                return fail("expected 'timeout <secs>'");
++            if (sawTimeout || !m_steps.empty())
++                return fail("timeout must be a single header before the first step");
++            sawTimeout = true;
++            m_timeoutSeconds = static_cast<double>(secs);
++            continue;
++        }
++        if (cmd == "wait" && tok.size() == 3 && tok[1] == "vsync")
++        {
++            step.op = Op::WaitVsync;
++            if (!parseNumber(tok[2], step.count))
++                return fail("bad vsync count");
++        }
++        else if (cmd == "wait" && tok.size() == 6 && tok[1] == "mem")
++        {
++            step.op = Op::WaitMem;
++            if (!parseRef(tok[2], step.ref))
++                return fail("bad address");
++            if (!parseWidth(tok[3], step.width))
++                return fail("width must be 1, 2 or 4");
++            if (tok[4] != "==" && tok[4] != "!=")
++                return fail("operator must be == or !=");
++            step.equal = tok[4] == "==";
++            if (!parseNumber(tok[5], step.value))
++                return fail("bad value");
++            if (step.width < 4u && step.value >= (1u << (step.width * 8u)))
++                return fail("value does not fit the width");
++        }
++        else if (cmd == "wait")
++        {
++            return fail("expected 'wait vsync <n>' or 'wait mem <addr> <width> <op> <value>'");
++        }
++        else if (cmd == "press")
++        {
++            step.op = Op::Press;
++            if (tok.size() != 3)
++                return fail("expected 'press <btn[+btn..]> <held vsyncs>'");
++            if (!parseButtons(tok[1], step.mask))
++                return fail("unknown button");
++            if (!parseNumber(tok[2], step.count))
++                return fail("bad held vsync count");
++        }
++        else if (cmd == "capture")
++        {
++            step.op = Op::Capture;
++            if (tok.size() != 3)
++                return fail("expected 'capture <screen> <n>'");
++            step.name = tok[1];
++            if (step.name.find_first_of("/\\:") != std::string::npos)
++                return fail("screen name must not contain path separators");
++            if (!parseNumber(tok[2], step.count) || step.count == 0u)
++                return fail("bad frame count");
++        }
++        else if (cmd == "watch")
++        {
++            step.op = Op::Watch;
++            if (tok.size() != 3)
++                return fail("expected 'watch <addr|*ptr+off> <width>'");
++            if (!parseRef(tok[1], step.ref))
++                return fail("bad address");
++            if (!parseWidth(tok[2], step.width))
++                return fail("width must be 1, 2 or 4");
++            step.name = tok[1];
++        }
++        else if (cmd == "log")
++        {
++            step.op = Op::Log;
++            step.name = line.size() > 3 ? line.substr(4) : std::string();
++        }
++        else if (cmd == "quit")
++        {
++            step.op = Op::Quit;
++            if (tok.size() != 1)
++                return fail("quit takes no arguments");
++        }
++        else
++        {
++            return fail("unknown command '" + cmd + "'");
++        }
++        m_steps.push_back(step);
++    }
++    error.clear();
++    return true;
++}
++
++bool Ps2InputScript::loadFile(const std::string &path, std::string &error)
++{
++    std::ifstream file(path, std::ios::binary);
++    if (!file)
++    {
++        error = "cannot open " + path;
++        return false;
++    }
++    std::ostringstream text;
++    text << file.rdbuf();
++    return parse(text.str(), error);
++}
++
++bool Ps2InputScript::hasCaptureSteps() const
++{
++    for (const Step &step : m_steps)
++    {
++        if (step.op == Op::Capture)
++            return true;
++    }
++    return false;
++}
++
++bool Ps2InputScript::readRef(const MemRef &ref, uint32_t width, const ReadMem &read, uint32_t &out) const
++{
++    uint32_t addr = ref.addr;
++    if (ref.deref)
++    {
++        uint32_t pointer = 0;
++        if (!read(ref.addr, 4u, pointer) || pointer == 0u)
++            return false;
++        addr = pointer + ref.offset;
++    }
++    return read(addr, width, out);
++}
++
++void Ps2InputScript::beginStep(uint64_t tick, const ReadMem &read, std::ostream &log)
++{
++    const Step &step = m_steps[m_index];
++    log << "[script] step " << m_index << " line " << step.line << " begin tick=" << tick << std::endl;
++    m_begun = true;
++    m_stepTick = tick;
++    switch (step.op)
++    {
++    case Op::Press:
++        m_buttons.store(static_cast<uint16_t>(0xFFFFu & ~step.mask), std::memory_order_release);
++        break;
++    case Op::Capture:
++        m_captureActive = true;
++        m_captureTaken = 0;
++        m_captureWritten = 0;
++        m_hasCaptureTick = false;
++        break;
++    case Op::Watch:
++    {
++        Watch watch;
++        watch.ref = step.ref;
++        watch.width = step.width;
++        watch.label = step.name;
++        watch.valid = readRef(watch.ref, watch.width, read, watch.value);
++        m_watches.push_back(watch);
++        break;
++    }
++    case Op::Log:
++        log << "[script] log " << step.name << std::endl;
++        break;
++    case Op::Quit:
++        m_quit.store(true, std::memory_order_release);
++        break;
++    default:
++        break;
++    }
++}
++
++void Ps2InputScript::onVSync(uint64_t tick, const ReadMem &read, std::ostream &log)
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++
++    for (Watch &watch : m_watches)
++    {
++        uint32_t value = 0;
++        if (!readRef(watch.ref, watch.width, read, value))
++            continue;
++        if (watch.valid && value != watch.value)
++        {
++            log << "[script] watch " << watch.label << ' ' << hex(watch.value) << "->" << hex(value)
++                << " tick=" << tick << std::endl;
++        }
++        watch.value = value;
++        watch.valid = true;
++    }
++
++    while (m_index < m_steps.size())
++    {
++        if (!m_begun)
++            beginStep(tick, read, log);
++        const Step &step = m_steps[m_index];
++        const uint64_t elapsed = tick - m_stepTick;
++        bool done = false;
++        switch (step.op)
++        {
++        case Op::WaitVsync:
++            done = elapsed >= step.count;
++            break;
++        case Op::WaitMem:
++        {
++            uint32_t value = 0;
++            done = readRef(step.ref, step.width, read, value) && ((value == step.value) == step.equal);
++            break;
++        }
++        case Op::Press:
++            if (elapsed >= step.count)
++                m_buttons.store(0xFFFFu, std::memory_order_release);
++            done = elapsed >= static_cast<uint64_t>(step.count) + 1u;
++            break;
++        case Op::Capture:
++            done = m_captureWritten >= step.count;
++            if (done)
++                m_captureActive = false;
++            break;
++        case Op::Quit:
++            return;
++        default:
++            done = true;
++            break;
++        }
++        if (!done)
++            return;
++        ++m_index;
++        m_begun = false;
++    }
++}
++
++bool Ps2InputScript::takeCapture(uint64_t latchedTick, std::string &fileName, std::string &screen, uint32_t &k)
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++    if (!m_captureActive || m_index >= m_steps.size())
++        return false;
++    const Step &step = m_steps[m_index];
++    if (m_captureTaken >= step.count || (m_hasCaptureTick && m_lastCaptureTick == latchedTick))
++        return false;
++    k = m_captureTaken++;
++    m_lastCaptureTick = latchedTick;
++    m_hasCaptureTick = true;
++    screen = step.name;
++    fileName = step.name + "-" + std::to_string(k) + ".png";
++    return true;
++}
++
++void Ps2InputScript::commitCapture(bool written)
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++    if (written)
++        ++m_captureWritten;
++    else if (m_captureTaken > 0u)
++        --m_captureTaken;
++}
++
++void Ps2InputScript::start(double nowSeconds)
++{
++    m_startSeconds = nowSeconds;
++}
++
++bool Ps2InputScript::timedOut(double nowSeconds, std::string &message) const
++{
++    if (nowSeconds - m_startSeconds < m_timeoutSeconds)
++        return false;
++    std::lock_guard<std::mutex> lock(m_mutex);
++    std::ostringstream out;
++    if (m_index < m_steps.size())
++    {
++        const Step &step = m_steps[m_index];
++        out << "[script] TIMEOUT step " << m_index << " line " << step.line << ": " << step.text;
++    }
++    else
++    {
++        out << "[script] TIMEOUT step " << m_index << " line 0: end of script without quit";
++    }
++    message = out.str();
++    return true;
++}
++
++namespace
++{
++    std::atomic<Ps2InputScript *> g_activeScript{nullptr};
++}
++
++Ps2InputScript *ps2ActiveInputScript()
++{
++    return g_activeScript.load(std::memory_order_acquire);
++}
++
++void ps2SetActiveInputScript(Ps2InputScript *script)
++{
++    g_activeScript.store(script, std::memory_order_release);
++}
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 8590f14..8653dfb 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_pad.h"
++#include "runtime/ps2_input_script.h"
+ #include "ps2_host_backend.h"
+ #include <cstring>
+ 
+@@ -37,6 +38,15 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     data[3] = 0xFF;
+     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+ 
++    // PS2X_INPUT_SCRIPT owns the pad: only the script's held buttons, no host pad or keys.
++    if (const Ps2InputScript *script = ps2ActiveInputScript())
++    {
++        const uint16_t scripted = script->buttons();
++        data[2] = static_cast<uint8_t>(scripted & 0xFF);
++        data[3] = static_cast<uint8_t>(scripted >> 8);
++        return true;
++    }
++
+     uint16_t btns = 0xFFFFu;
+     constexpr int kGamepad = 0;
+     const bool useGamepad = IsGamepadAvailable(kGamepad);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f6063d9..4c0be7b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -7,6 +7,7 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_frame_dump.h"
++#include "runtime/ps2_input_script.h"
+ #include "ThreadNaming.h"
+ #include "Kernel/Stubs/Audio.h"
+ #include "Kernel/Stubs/GS.h"
+@@ -454,7 +455,23 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     s_lastHeight = height;
+ 
+     static const char *s_frameDumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
+-    if (s_frameDumpDir != nullptr)
++    if (Ps2InputScript *script = ps2ActiveInputScript())
++    {
++        // Script mode: dump only while a capture step is active, one <screen>-<k>.png per latched tick.
++        std::string fileName;
++        std::string screen;
++        uint32_t k = 0u;
++        if (s_frameDumpDir != nullptr && script->takeCapture(currentTick, fileName, screen, k))
++        {
++            const bool written = ps2DumpPresentedFrameNamed(s_frameDumpDir, fileName.c_str(), s_scratch.data(), width, height);
++            script->commitCapture(written);
++            if (written)
++                std::cout << "[script] capture " << screen << " k=" << k << " tick=" << currentTick << std::endl;
++            else
++                std::cerr << "[script] capture " << screen << " k=" << k << " write failed" << std::endl;
++        }
++    }
++    else if (s_frameDumpDir != nullptr)
+     {
+         ps2DumpPresentedFrame(s_frameDumpDir, currentTick, s_scratch.data(), width, height);
+     }
+@@ -730,6 +747,28 @@ bool PS2Runtime::syncCoreSubsystems()
+ 
+ bool PS2Runtime::initialize(const char *title)
+ {
++    if (const char *scriptPath = std::getenv("PS2X_INPUT_SCRIPT"))
++    {
++        static Ps2InputScript s_inputScript;
++        std::string error;
++        if (!s_inputScript.loadFile(scriptPath, error))
++        {
++            std::cerr << "[script] parse error in " << scriptPath << ": " << error << std::endl;
++            std::cerr.flush();
++            std::_Exit(2);
++        }
++        if (s_inputScript.hasCaptureSteps() && std::getenv("PS2X_FRAME_DUMP_DIR") == nullptr)
++        {
++            std::cerr << "[script] capture steps need PS2X_FRAME_DUMP_DIR" << std::endl;
++            std::cerr.flush();
++            std::_Exit(2);
++        }
++        s_inputScript.start(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
++        ps2SetActiveInputScript(&s_inputScript);
++        std::cout << "[script] loaded " << scriptPath << " steps=" << s_inputScript.steps().size()
++                  << " timeout=" << s_inputScript.timeoutSeconds() << "s" << std::endl;
++    }
++
+     try
+     {
+         if (!m_memory.initialize())
+@@ -746,8 +785,17 @@ bool PS2Runtime::initialize(const char *title)
+ #if defined(PLATFORM_VITA)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+-        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
++        const char *hiddenEnv = std::getenv("PS2X_HIDDEN");
++        const bool hidden = ps2ActiveInputScript() != nullptr || (hiddenEnv != nullptr && std::strcmp(hiddenEnv, "1") == 0);
++        const unsigned int windowFlags = hidden ? (FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN) : FLAG_WINDOW_RESIZABLE;
++        SetConfigFlags(windowFlags);
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
++        if (hidden)
++        {
++            SetExitKey(KEY_NULL); // a hidden window is never closed by input
++            std::cout << "[run] window hidden=" << (IsWindowHidden() ? 1 : 0) << " flags=0x" << std::hex << windowFlags
++                      << std::dec << std::endl;
++        }
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+ #endif
+@@ -2511,6 +2559,25 @@ void PS2Runtime::run()
+         }
+         EndDrawing();
+ 
++        if (const Ps2InputScript *script = ps2ActiveInputScript())
++        {
++            std::string timeoutMessage;
++            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++            if (script->timedOut(now, timeoutMessage))
++            {
++                std::cout.flush();
++                std::cerr << timeoutMessage << std::endl;
++                std::cerr.flush();
++                std::_Exit(3);
++            }
++            if (script->quitRequested())
++            {
++                RUNTIME_LOG("[run] script quit, breaking out of loop");
++                requestStop();
++                break;
++            }
++        }
++
+         if (WindowShouldClose())
+         {
+             RUNTIME_LOG("[run] window close requested, breaking out of loop");
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index f47a8e9..39734d4 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -39,6 +39,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_runtime_expansion_tests.cpp
+     src/ps2_float_semantics_tests.cpp
+     src/ps2_frame_dump_tests.cpp
++    src/ps2_input_script_tests.cpp
+ )
+ 
+ target_compile_definitions(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 33d4993..8108c5e 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -20,6 +20,7 @@ void register_ps2_recompiler_tests();
+ void register_ps2_runtime_expansion_tests();
+ void register_ps2_float_semantics_tests();
+ void register_ps2_frame_dump_tests();
++void register_ps2_input_script_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -44,6 +45,7 @@ int main()
+     register_ps2_runtime_expansion_tests();
+     register_ps2_float_semantics_tests();
+     register_ps2_frame_dump_tests();
++    register_ps2_input_script_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_input_script_tests.cpp b/ps2xTest/src/ps2_input_script_tests.cpp
+new file mode 100644
+index 0000000..646c77c
+--- /dev/null
++++ b/ps2xTest/src/ps2_input_script_tests.cpp
+@@ -0,0 +1,206 @@
++#include "MiniTest.h"
++#include "runtime/ps2_input_script.h"
++
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <sstream>
++#include <string>
++
++namespace
++{
++    struct FakeMemory
++    {
++        std::array<uint8_t, 0x1000> bytes{};
++
++        void write32(uint32_t addr, uint32_t value) { std::memcpy(bytes.data() + addr, &value, 4u); }
++
++        Ps2InputScript::ReadMem reader()
++        {
++            return [this](uint32_t addr, uint32_t width, uint32_t &out)
++            {
++                const uint32_t physical = addr & 0x01FFFFFFu;
++                if (physical + width > bytes.size())
++                    return false;
++                out = 0u;
++                std::memcpy(&out, bytes.data() + physical, width);
++                return true;
++            };
++        }
++    };
++
++    bool parseOk(Ps2InputScript &script, const std::string &text)
++    {
++        std::string error;
++        return script.parse(text, error);
++    }
++}
++
++void register_ps2_input_script_tests()
++{
++    MiniTest::Case("InputScript", [](TestCase &tc)
++                   {
++        tc.Run("parses every step kind, comments and blank lines", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            std::string error;
++            const bool ok = script.parse(
++                "# title screen\n"
++                "timeout 0x3c\n"
++                "\n"
++                "wait vsync 10   # settle\n"
++                "wait mem 0x100 4 == 0x2a\n"
++                "wait mem *0x200+0x10 2 != 7\n"
++                "press start+cross 3\n"
++                "capture title 2\n"
++                "watch *0x200+4 1\n"
++                "log hello world\n"
++                "quit\n",
++                error);
++            t.IsTrue(ok, "parse succeeds: " + error);
++            t.Equals(script.timeoutSeconds(), 60.0, "timeout header");
++            const auto &steps = script.steps();
++            t.Equals(steps.size(), static_cast<size_t>(8), "eight steps");
++            if (steps.size() != 8u)
++                return;
++            t.IsTrue(steps[0].op == Ps2InputScript::Op::WaitVsync && steps[0].count == 10u, "wait vsync");
++            t.Equals(steps[0].line, 4, "line numbers count comments and blanks");
++            t.IsTrue(steps[1].op == Ps2InputScript::Op::WaitMem && steps[1].ref.addr == 0x100u && !steps[1].ref.deref &&
++                         steps[1].width == 4u && steps[1].equal && steps[1].value == 0x2au,
++                     "wait mem");
++            t.IsTrue(steps[2].ref.deref && steps[2].ref.addr == 0x200u && steps[2].ref.offset == 0x10u &&
++                         steps[2].width == 2u && !steps[2].equal && steps[2].value == 7u,
++                     "wait mem deref");
++            t.IsTrue(steps[3].op == Ps2InputScript::Op::Press && steps[3].mask == (0x0008u | 0x4000u) && steps[3].count == 3u,
++                     "press");
++            t.IsTrue(steps[4].op == Ps2InputScript::Op::Capture && steps[4].name == "title" && steps[4].count == 2u, "capture");
++            t.IsTrue(steps[5].op == Ps2InputScript::Op::Watch && steps[5].ref.deref && steps[5].ref.offset == 4u &&
++                         steps[5].width == 1u,
++                     "watch");
++            t.IsTrue(steps[6].op == Ps2InputScript::Op::Log && steps[6].name == "hello world", "log text");
++            t.IsTrue(steps[7].op == Ps2InputScript::Op::Quit, "quit");
++            t.IsTrue(script.hasCaptureSteps(), "has capture steps"); });
++
++        tc.Run("default timeout is 600 seconds", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "quit\n"), "parse");
++            t.Equals(script.timeoutSeconds(), 600.0, "default timeout");
++            t.IsFalse(script.hasCaptureSteps(), "no capture steps"); });
++
++        tc.Run("parse errors name the line", [](TestCase &t)
++               {
++            const char *bad[] = {
++                "wait vsync\n",
++                "\n# c\npress jump 2\n",
++                "wait mem 0x100 3 == 1\n",
++                "wait mem 0x100 1 < 1\n",
++                "wait mem 0x100 1 == 0x100\n",
++                "capture title 0\n",
++                "frobnicate\n",
++                "quit\ntimeout 5\n",
++                "wait vsync 12abc\n",
++            };
++            const int lines[] = {1, 3, 1, 1, 1, 1, 1, 2, 1};
++            for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i)
++            {
++                Ps2InputScript script;
++                std::string error;
++                t.IsFalse(script.parse(bad[i], error), std::string("rejects: ") + bad[i]);
++                const std::string prefix = "line " + std::to_string(lines[i]) + ":";
++                t.IsTrue(error.rfind(prefix, 0) == 0u, "error '" + error + "' starts with " + prefix);
++            }
++        });
++
++        tc.Run("wait vsync and press hold length", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "wait vsync 2\npress circle+up 3\nquit\n"), "parse");
++            FakeMemory mem;
++            std::ostringstream log;
++            const auto read = mem.reader();
++
++            uint64_t tick = 100;
++            script.onVSync(tick, read, log); // step 0 begins
++            t.Equals(script.buttons(), static_cast<uint16_t>(0xFFFFu), "nothing held while waiting");
++            script.onVSync(++tick, read, log);
++            t.Equals(script.buttons(), static_cast<uint16_t>(0xFFFFu), "still waiting");
++            script.onVSync(++tick, read, log); // 102: wait done, press begins
++            const uint16_t held = static_cast<uint16_t>(0xFFFFu & ~(0x2000u | 0x0010u));
++            t.Equals(script.buttons(), held, "press begins at tick 102");
++            script.onVSync(++tick, read, log);
++            script.onVSync(++tick, read, log);
++            t.Equals(script.buttons(), held, "held through tick 104");
++            script.onVSync(++tick, read, log); // 105: released
++            t.Equals(script.buttons(), static_cast<uint16_t>(0xFFFFu), "released after 3 vsyncs");
++            t.IsFalse(script.quitRequested(), "release vsync before next step");
++            script.onVSync(++tick, read, log); // 106: quit
++            t.IsTrue(script.quitRequested(), "quit after release vsync");
++            const std::string text = log.str();
++            t.IsTrue(text.find("[script] step 0 line 1 begin tick=100") != std::string::npos, "step 0 logged");
++            t.IsTrue(text.find("[script] step 1 line 2 begin tick=102") != std::string::npos, "step 1 logged");
++            t.IsTrue(text.find("[script] step 2 line 3 begin tick=106") != std::string::npos, "step 2 logged"); });
++
++        tc.Run("wait mem with deref and watch", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "watch 0x40 4\nwait mem *0x200+0x8 4 == 5\nlog done\nquit\n"), "parse");
++            FakeMemory mem;
++            std::ostringstream log;
++            const auto read = mem.reader();
++
++            script.onVSync(1, read, log);
++            t.IsFalse(script.quitRequested(), "null pointer is not satisfied");
++            mem.write32(0x200, 0x300);
++            mem.write32(0x40, 9);
++            script.onVSync(2, read, log);
++            t.IsFalse(script.quitRequested(), "pointee not yet 5");
++            t.IsTrue(log.str().find("[script] watch 0x40 0x0->0x9 tick=2") != std::string::npos, "watch logged change");
++            mem.write32(0x308, 5);
++            script.onVSync(3, read, log);
++            t.IsTrue(script.quitRequested(), "deref satisfied, log and quit run in the same vsync");
++            t.IsTrue(log.str().find("[script] log done") != std::string::npos, "log step printed"); });
++
++        tc.Run("capture counts one frame per distinct tick", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "capture title 2\nquit\n"), "parse");
++            FakeMemory mem;
++            std::ostringstream log;
++            const auto read = mem.reader();
++            std::string fileName;
++            std::string screen;
++            uint32_t k = 99;
++
++            t.IsFalse(script.takeCapture(5, fileName, screen, k), "no capture before the step begins");
++            script.onVSync(10, read, log);
++            t.IsTrue(script.takeCapture(10, fileName, screen, k), "first frame");
++            t.Equals(fileName, std::string("title-0.png"), "k=0 file");
++            t.Equals(k, 0u, "k=0");
++            script.commitCapture(true);
++            t.IsFalse(script.takeCapture(10, fileName, screen, k), "same tick not captured twice");
++            script.onVSync(11, read, log);
++            t.IsFalse(script.quitRequested(), "one of two frames");
++            t.IsTrue(script.takeCapture(11, fileName, screen, k), "second frame");
++            script.commitCapture(false);
++            t.IsTrue(script.takeCapture(12, fileName, screen, k), "failed write retried");
++            t.Equals(fileName, std::string("title-1.png"), "k=1 reused after failure");
++            script.commitCapture(true);
++            t.IsFalse(script.takeCapture(13, fileName, screen, k), "no more than n frames");
++            script.onVSync(12, read, log);
++            t.IsTrue(script.quitRequested(), "capture completes after n written frames"); });
++
++        tc.Run("timeout with injected clock", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "timeout 30\nwait vsync 1000\nquit\n"), "parse");
++            FakeMemory mem;
++            std::ostringstream log;
++            script.start(100.0);
++            script.onVSync(1, mem.reader(), log);
++            std::string message;
++            t.IsFalse(script.timedOut(129.5, message), "within timeout");
++            t.IsTrue(script.timedOut(130.0, message), "timed out");
++            t.Equals(message, std::string("[script] TIMEOUT step 0 line 2: wait vsync 1000"), "timeout message"); });
++    });
++}
+-- 
+2.46.2.windows.1
+
