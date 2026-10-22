@@ -54,7 +54,7 @@ cmd_test() {
     local red=0 log exe p t
     # ps2x_tests (tests.bat): build t with -k 0, then run from ps2xTest's source dir.
     # Only the test programs: building every target here recompiled a second, unused copy of the runner.
-    vc cmake --build "$OB_T" -j $JOBS --target ps2x_tests ps2_gs_clut_cache_tests ps2_gs_memory_cache_tests ps2_gs_texture_cache_tests -- -k 0 > "$OB_LOGS/ob-test-build.log" 2>&1 || echo "build t: errors (ob-test-build.log)"
+    vc cmake --build "$OB_T" -j $JOBS --target ps2x_tests ps2_gs_clut_cache_tests ps2_gs_memory_cache_tests ps2_gs_texture_cache_tests -- -k 0 > "$OB_LOGS/ob-test-build.log" 2>&1 || { red=1; echo "build t: errors (ob-test-build.log): the counts below are from a stale binary"; }
     log="$OB_LOGS/ob-test-ps2x.log"
     exe=$(find "$OB_T" -name ps2x_tests.exe | head -1)
     if [ -n "$exe" ]; then

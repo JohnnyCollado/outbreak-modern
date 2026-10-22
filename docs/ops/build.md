@@ -8,7 +8,7 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 |---|---|---|
 | Build the tools | `bash tools/run.sh ob-tools -- bash tools/ob.sh tools` | Analyzer + recompiler into `C:\ob\t` |
 | PCSX2 GS library + smoke test | `bash tools/run.sh pcsx2-gs -- bash tools/ob.sh pcsx2-gs` | Clones/builds deps if missing (`gs.md`) |
-| Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`. ~16 s when generated code is unchanged; a full rebuild after a header change takes minutes |
+| Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`. ~16 s when generated code is unchanged; ~30 s after a runtime-internal change (patch 0028: game code sees only `ps2_runtime_api.h`); a full rebuild (~6 min) only when the recompiler output or the game-facing headers change |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
 | Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest |
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`) |

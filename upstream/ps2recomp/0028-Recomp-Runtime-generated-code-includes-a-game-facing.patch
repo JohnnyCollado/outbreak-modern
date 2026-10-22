@@ -1,0 +1,2301 @@
+From d49ee99b0a052a2143fcfd5179f64513eb974972 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 17:26:44 -0400
+Subject: [PATCH] Recomp+Runtime: generated code includes a game-facing API
+ header, not ps2_runtime.h
+
+Every generated source included ps2_runtime.h, the runtime's whole interior (GS, memory, VU, audio, pad, VFS, IOP), so any runtime-internal change rebuilt all generated code. New ps2_runtime_api.h declares only what generated code uses: R5900Context, PS2Exception, the function-table types and the ps2x_* entry points (dispatchGuestBranch, eeCheckpointDue, syscall/break/trap/TLB handlers, SignalException, clearLLBit, VU0 microprogram calls, the GIF DMA kick, Load/Store 8-128). The emitters call ps2x_*(runtime, ...); the PS2Runtime members of the same name are inline wrappers. Guest address constants move to runtime/ps2_memory_map.h. Runner PCH uses the API header; main.cpp is kept out of the generated unity batches.
+---
+ ps2xRecomp/src/lib/control_flow_emitter.cpp   |   8 +-
+ ps2xRecomp/src/lib/cop0_translator.cpp        |  10 +-
+ ps2xRecomp/src/lib/function_emitter.cpp       |   2 +-
+ ps2xRecomp/src/lib/function_table_emitter.cpp |   6 +-
+ ps2xRecomp/src/lib/gif_dma_kick_analyzer.cpp  |   2 +-
+ ps2xRecomp/src/lib/instruction_translator.cpp |  12 +-
+ ps2xRecomp/src/lib/ps2_recompiler.cpp         |   6 +-
+ ps2xRecomp/src/lib/regimm_translator.cpp      |  12 +-
+ ps2xRecomp/src/lib/special_translator.cpp     |  24 +-
+ ps2xRecomp/src/lib/vu_translation_helpers.cpp |   4 +-
+ ps2xRuntime/CMakeLists.txt                    |  11 +-
+ ps2xRuntime/include/ps2_runtime.h             | 334 ++++-------------
+ ps2xRuntime/include/ps2_runtime_api.h         | 338 ++++++++++++++++++
+ ps2xRuntime/include/ps2_runtime_macros.h      |  42 +--
+ ps2xRuntime/include/ps2_stubs.h               |   2 +-
+ ps2xRuntime/include/ps2_syscalls.h            |   2 +-
+ ps2xRuntime/include/runtime/ps2_address.h     |   2 +-
+ ps2xRuntime/include/runtime/ps2_memory.h      |  53 +--
+ ps2xRuntime/include/runtime/ps2_memory_map.h  |  63 ++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 164 +++++----
+ ps2xTest/CMakeLists.txt                       |   3 +
+ ps2xTest/src/code_generator_tests.cpp         |  52 ++-
+ ps2xTest/src/main.cpp                         |   2 +
+ ps2xTest/src/ps2_runtime_api_support.cpp      |  27 ++
+ ps2xTest/src/ps2_runtime_api_tests.cpp        | 272 ++++++++++++++
+ 25 files changed, 988 insertions(+), 465 deletions(-)
+ create mode 100644 ps2xRuntime/include/ps2_runtime_api.h
+ create mode 100644 ps2xRuntime/include/runtime/ps2_memory_map.h
+ create mode 100644 ps2xTest/src/ps2_runtime_api_support.cpp
+ create mode 100644 ps2xTest/src/ps2_runtime_api_tests.cpp
+
+diff --git a/ps2xRecomp/src/lib/control_flow_emitter.cpp b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index 95f69d7..b8554e6 100644
+--- a/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -177,7 +177,7 @@ namespace ps2recomp
+         m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
+         if (target <= sourcePc && !isCallLikeEdge())
+         {
+-            m_ss << fmt::format("{}if (runtime->eeCheckpointDue()) {{\n", indent);
++            m_ss << fmt::format("{}if (ps2x_eeCheckpointDue(runtime)) {{\n", indent);
+             m_ss << fmt::format("{}    return;\n", indent);
+             m_ss << fmt::format("{}}}\n", indent);
+         }
+@@ -193,7 +193,7 @@ namespace ps2recomp
+                                                        bool returnOnTransfer)
+     {
+         m_ss << fmt::format(
+-            "{}if (!runtime->dispatchGuestBranch(rdram, ctx, {}, 0x{:X}u, 0x{:X}u, PS2Runtime::GuestBranchKind::{}, \"{}\")) {{\n",
++            "{}if (!ps2x_dispatchGuestBranch(runtime, rdram, ctx, {}, 0x{:X}u, 0x{:X}u, Ps2GuestBranchKind::{}, \"{}\")) {{\n",
+             indent,
+             targetExpression,
+             sourcePc,
+@@ -257,9 +257,9 @@ namespace ps2recomp
+         if (isReturn)
+         {
+             m_ss << indent << "#if defined(PS2X_STRICT_RETURN_DIAGNOSTICS) && PS2X_STRICT_RETURN_DIAGNOSTICS\n";
+-            m_ss << indent << "(void)runtime->dispatchGuestBranch(rdram, ctx, " << jumpTargetExpression
++            m_ss << indent << "(void)ps2x_dispatchGuestBranch(runtime, rdram, ctx, " << jumpTargetExpression
+                  << ", 0x" << fmt::format("{:X}", branchPc())
+-                 << "u, 0u, PS2Runtime::GuestBranchKind::Return, \"JR $ra\");\n";
++                 << "u, 0u, Ps2GuestBranchKind::Return, \"JR $ra\");\n";
+             m_ss << indent << "return;\n";
+             m_ss << indent << "#else\n";
+             m_ss << indent << "ctx->pc = " << jumpTargetExpression << ";\n";
+diff --git a/ps2xRecomp/src/lib/cop0_translator.cpp b/ps2xRecomp/src/lib/cop0_translator.cpp
+index 1823a39..2833756 100644
+--- a/ps2xRecomp/src/lib/cop0_translator.cpp
++++ b/ps2xRecomp/src/lib/cop0_translator.cpp
+@@ -132,13 +132,13 @@ namespace ps2recomp
+             switch (function)
+             {
+             case COP0_CO_TLBR:
+-                return fmt::format("runtime->handleTLBR(rdram, ctx);");
++                return fmt::format("ps2x_handleTLBR(runtime, rdram, ctx);");
+             case COP0_CO_TLBWI:
+-                return fmt::format("runtime->handleTLBWI(rdram, ctx);");
++                return fmt::format("ps2x_handleTLBWI(runtime, rdram, ctx);");
+             case COP0_CO_TLBWR:
+-                return fmt::format("runtime->handleTLBWR(rdram, ctx);");
++                return fmt::format("ps2x_handleTLBWR(runtime, rdram, ctx);");
+             case COP0_CO_TLBP:
+-                return fmt::format("runtime->handleTLBP(rdram, ctx);");
++                return fmt::format("ps2x_handleTLBP(runtime, rdram, ctx);");
+             case COP0_CO_ERET:
+                 return fmt::format(
+                     "if (ctx->cop0_status & 0x4) {{ \n" // Check ERL bit (bit 2)
+@@ -148,7 +148,7 @@ namespace ps2recomp
+                     "    ctx->pc = ctx->cop0_epc; \n"  // Note: If neither ERL/EXL set, behavior is undefined; using EPC is common.
+                     "    ctx->cop0_status &= ~0x2; \n" // Clear EXL bit
+                     "}} \n"
+-                    "runtime->clearLLBit(ctx); \n" // Essential: Clear Load-Linked bit
++                    "ps2x_clearLLBit(runtime, ctx); \n" // Essential: Clear Load-Linked bit
+                     "return;"                      // Stop execution in this recompiled block
+                 );
+             case COP0_CO_EI:
+diff --git a/ps2xRecomp/src/lib/function_emitter.cpp b/ps2xRecomp/src/lib/function_emitter.cpp
+index 43ae47f..fb7c7ab 100644
+--- a/ps2xRecomp/src/lib/function_emitter.cpp
++++ b/ps2xRecomp/src/lib/function_emitter.cpp
+@@ -44,7 +44,7 @@ namespace ps2recomp
+         {
+             ss << "#include <stdexcept>\n";
+             ss << "#include \"ps2_runtime_macros.h\"\n";
+-            ss << "#include \"ps2_runtime.h\"\n";
++            ss << "#include \"ps2_runtime_api.h\"\n";
+             ss << "#include <" << cg.functionsHeaderName() << ">\n";
+             ss << "#include <" << cg.stubsHeaderName() << ">\n\n";
+             ss << "#include \"ps2_syscalls.h\"\n";
+diff --git a/ps2xRecomp/src/lib/function_table_emitter.cpp b/ps2xRecomp/src/lib/function_table_emitter.cpp
+index 526c6c8..3fbfe92 100644
+--- a/ps2xRecomp/src/lib/function_table_emitter.cpp
++++ b/ps2xRecomp/src/lib/function_table_emitter.cpp
+@@ -146,7 +146,7 @@ namespace ps2recomp
+         }
+ 
+         std::stringstream ss;
+-        ss << "#include \"ps2_runtime.h\"\n";
++        ss << "#include \"ps2_runtime_api.h\"\n";
+         ss << "#include <" << cg.functionsHeaderName() << ">\n";
+         ss << "#include \"ps2_stubs.h\"\n";
+         ss << "#include <" << cg.stubsHeaderName() << ">\n";
+@@ -173,7 +173,7 @@ namespace ps2recomp
+             const uint32_t fingerprintSize = std::min<uint32_t>(imageStart->size, 64u);
+ 
+             ss << "namespace {\n";
+-            ss << "PS2Runtime::RecompiledFunction g_moduleTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n";
++            ss << "Ps2RecompiledFunction g_moduleTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n";
+             ss << "const uint8_t g_moduleFingerprint[" << fingerprintSize << "u] = {";
+             for (uint32_t i = 0; i < fingerprintSize; ++i)
+             {
+@@ -201,7 +201,7 @@ namespace ps2recomp
+         ss << "extern const uint32_t g_ps2RecompiledFunctionTableBase = 0x" << std::hex << tableBase << "u;\n";
+         ss << "extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x" << std::hex << tableEnd << "u;\n";
+         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
+-        ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
++        ss << "Ps2RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
+ 
+         ss << "namespace {\n";
+         ss << "struct GeneratedFunctionTableInitializer {\n";
+diff --git a/ps2xRecomp/src/lib/gif_dma_kick_analyzer.cpp b/ps2xRecomp/src/lib/gif_dma_kick_analyzer.cpp
+index b7c17c6..e35a06c 100644
+--- a/ps2xRecomp/src/lib/gif_dma_kick_analyzer.cpp
++++ b/ps2xRecomp/src/lib/gif_dma_kick_analyzer.cpp
+@@ -258,7 +258,7 @@ namespace ps2recomp
+     std::string gifDmaKickCall(const GifDmaKickPlan &plan)
+     {
+         std::ostringstream ss;
+-        ss << "runtime->kickGifDmaChainFromMMIO(rdram, ctx, "
++        ss << "ps2x_kickGifDmaChainFromMMIO(runtime, rdram, ctx, "
+            << plan.values[0] << ", "
+            << plan.values[1] << ", "
+            << plan.values[2] << ", "
+diff --git a/ps2xRecomp/src/lib/instruction_translator.cpp b/ps2xRecomp/src/lib/instruction_translator.cpp
+index 7684097..05b0fdc 100644
+--- a/ps2xRecomp/src/lib/instruction_translator.cpp
++++ b/ps2xRecomp/src/lib/instruction_translator.cpp
+@@ -84,14 +84,14 @@ namespace ps2recomp
+             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
+             if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+             {
+-                return fmt::format("runtime->Load{}(rdram, ctx, {})", width, resolvedAddressExpr);
++                return fmt::format("ps2x_Load{}(runtime, rdram, ctx, {})", width, resolvedAddressExpr);
+             }
+             return fmt::format("FAST_READ{}({})", width, resolvedAddressExpr);
+         }
+ 
+         if (inst.isMmio)
+         {
+-            return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
++            return fmt::format("ps2x_Load{}(runtime, rdram, ctx, {})", width, addr);
+         }
+         return fmt::format("READ{}({})", width, addr);
+     }
+@@ -108,14 +108,14 @@ namespace ps2recomp
+             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
+             if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+             {
+-                return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, resolvedAddressExpr, value);
++                return fmt::format("ps2x_Store{}(runtime, rdram, ctx, {}, {})", width, resolvedAddressExpr, value);
+             }
+             return genFastWrite(width, resolvedAddress, value);
+         }
+ 
+         if (inst.isMmio)
+         {
+-            return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, addr, value);
++            return fmt::format("ps2x_Store{}(runtime, rdram, ctx, {}, {})", width, addr, value);
+         }
+         return fmt::format("WRITE{}({}, {})", width, addr, value);
+     }
+@@ -157,7 +157,7 @@ namespace ps2recomp
+             return fmt::format(
+                 "{{ uint32_t tmp; bool ov; "
+                 "ADD32_OV(GPR_U32(ctx, {}), (int32_t){}, tmp, ov); "
+-                "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
++                "if (ov) ps2x_SignalException(runtime, ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                 "else SET_GPR_S32(ctx, {}, (int32_t)tmp); }}",
+                 inst.rs, inst.simmediate, inst.rt);
+ 
+@@ -220,7 +220,7 @@ namespace ps2recomp
+                 "int64_t imm = (int64_t)(int32_t){}; "
+                 "int64_t res = src + imm; "
+                 "if (((src ^ imm) >= 0) && ((src ^ res) < 0)) "
+-                "    runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
++                "    ps2x_SignalException(runtime, ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                 "else SET_GPR_S64(ctx, {}, res); }}",
+                 inst.rs, inst.simmediate, inst.rt);
+         case OPCODE_DADDIU:
+diff --git a/ps2xRecomp/src/lib/ps2_recompiler.cpp b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+index d314e9e..740af3f 100644
+--- a/ps2xRecomp/src/lib/ps2_recompiler.cpp
++++ b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+@@ -110,7 +110,7 @@ namespace ps2recomp
+             output << "#include <stdexcept>\n";
+             output << "#include <" << codeGenerator.functionsHeaderName() << ">\n\n";
+             output << "#include \"ps2_runtime_macros.h\"\n";
+-            output << "#include \"ps2_runtime.h\"\n";
++            output << "#include \"ps2_runtime_api.h\"\n";
+             output << "#include <" << codeGenerator.stubsHeaderName() << ">\n";
+             output << "#include \"ps2_syscalls.h\"\n";
+             output << "#include \"ps2_stubs.h\"\n";
+@@ -1356,7 +1356,7 @@ namespace ps2recomp
+                         }
+ 
+                         std::stringstream stubFile;
+-                        stubFile << "#include \"ps2_runtime.h\"\n";
++                        stubFile << "#include \"ps2_runtime_api.h\"\n";
+                         stubFile << "#include \"ps2_syscalls.h\"\n";
+                         stubFile << "#include \"ps2_stubs.h\"\n";
+                         stubFile << "#ifdef _DEBUG\n";
+@@ -1814,7 +1814,7 @@ namespace ps2recomp
+ 
+             ss << "#pragma once\n\n";
+             ss << "#include <cstdint>\n";
+-            ss << "#include \"ps2_runtime.h\"\n";
++            ss << "#include \"ps2_runtime_api.h\"\n";
+             ss << "#include \"ps2_syscalls.h\"\n\n";
+             // ss << "namespace ps2recomp {\n";
+             // ss << "namespace stubs {\n\n";
+diff --git a/ps2xRecomp/src/lib/regimm_translator.cpp b/ps2xRecomp/src/lib/regimm_translator.cpp
+index 8d8e09f..73a9573 100644
+--- a/ps2xRecomp/src/lib/regimm_translator.cpp
++++ b/ps2xRecomp/src/lib/regimm_translator.cpp
+@@ -38,17 +38,17 @@ namespace ps2recomp
+         case REGIMM_MTSAH:
+             return fmt::format("ctx->sa = ((GPR_U32(ctx, {}) ^ (uint32_t){}) & 0x7) << 4;", inst.rs, inst.simmediate);
+         case REGIMM_TGEI:
+-            return fmt::format("if (GPR_S64(ctx, {}) >= (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
++            return fmt::format("if (GPR_S64(ctx, {}) >= (int64_t)(int32_t){}) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.simmediate);
+         case REGIMM_TGEIU:
+-            return fmt::format("if (GPR_U64(ctx, {}) >= (uint64_t)(int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
++            return fmt::format("if (GPR_U64(ctx, {}) >= (uint64_t)(int64_t)(int32_t){}) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.simmediate);
+         case REGIMM_TLTI:
+-            return fmt::format("if (GPR_S64(ctx, {}) < (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
++            return fmt::format("if (GPR_S64(ctx, {}) < (int64_t)(int32_t){}) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.simmediate);
+         case REGIMM_TLTIU:
+-            return fmt::format("if (GPR_U64(ctx, {}) < (uint64_t)(int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
++            return fmt::format("if (GPR_U64(ctx, {}) < (uint64_t)(int64_t)(int32_t){}) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.simmediate);
+         case REGIMM_TEQI:
+-            return fmt::format("if (GPR_S64(ctx, {}) == (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
++            return fmt::format("if (GPR_S64(ctx, {}) == (int64_t)(int32_t){}) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.simmediate);
+         case REGIMM_TNEI:
+-            return fmt::format("if (GPR_S64(ctx, {}) != (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
++            return fmt::format("if (GPR_S64(ctx, {}) != (int64_t)(int32_t){}) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.simmediate);
+         default:
+             return m_codeGenerator.emitUnhandledInstruction(inst, fmt::format("Unhandled REGIMM instruction: 0x{:X}", inst.rt));
+         }
+diff --git a/ps2xRecomp/src/lib/special_translator.cpp b/ps2xRecomp/src/lib/special_translator.cpp
+index b01a937..b5dc711 100644
+--- a/ps2xRecomp/src/lib/special_translator.cpp
++++ b/ps2xRecomp/src/lib/special_translator.cpp
+@@ -41,11 +41,11 @@ namespace ps2recomp
+         case SPECIAL_JALR:
+             return fmt::format("// JALR ${}, ${} - Handled by branch logic", inst.rd, inst.rs);
+         case SPECIAL_SYSCALL:
+-            return fmt::format("ctx->pc = 0x{:X}u;\nruntime->handleSyscall(rdram, ctx, 0x{:X}u);",
++            return fmt::format("ctx->pc = 0x{:X}u;\nps2x_handleSyscall(runtime, rdram, ctx, 0x{:X}u);",
+                                inst.address + 4u,
+                                (inst.raw >> 6) & 0xFFFFFu);
+         case SPECIAL_BREAK:
+-            return fmt::format("runtime->handleBreak(rdram, ctx);");
++            return fmt::format("ps2x_handleBreak(runtime, rdram, ctx);");
+         case SPECIAL_SYNC:
+             return "// SYNC instruction - memory barrier\n// In recompiled code, we don't need explicit memory barriers";
+         case SPECIAL_MFHI:
+@@ -91,7 +91,7 @@ namespace ps2recomp
+                 "    int32_t rt_val = GPR_S32(ctx, {}); "
+                 "    int64_t result = (int64_t)rs_val + (int64_t)rt_val; "
+                 "    if (result > INT32_MAX || result < INT32_MIN) {{ "
+-                "        runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
++                "        ps2x_SignalException(runtime, ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                 "    }} else {{ "
+                 "        SET_GPR_S32(ctx, {}, (int32_t)result); "
+                 "    }} "
+@@ -103,7 +103,7 @@ namespace ps2recomp
+             return fmt::format(
+                 "{{ uint32_t tmp; bool ov; "
+                 "SUB32_OV(GPR_U32(ctx, {}), GPR_U32(ctx, {}), tmp, ov); "
+-                "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
++                "if (ov) ps2x_SignalException(runtime, ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                 "else SET_GPR_S32(ctx, {}, (int32_t)tmp); }}",
+                 inst.rs, inst.rt, inst.rd);
+         case SPECIAL_SUBU:
+@@ -133,7 +133,7 @@ namespace ps2recomp
+                 "{{ int64_t a = (int64_t)GPR_S64(ctx, {}); "
+                 "int64_t b = (int64_t)GPR_S64(ctx, {}); "
+                 "int64_t r = a + b; "
+-                "if (((a ^ b) >= 0) && ((a ^ r) < 0)) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
++                "if (((a ^ b) >= 0) && ((a ^ r) < 0)) ps2x_SignalException(runtime, ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                 "else SET_GPR_S64(ctx, {}, r); }}",
+                 inst.rs, inst.rt, inst.rd);
+         case SPECIAL_DADDU:
+@@ -145,7 +145,7 @@ namespace ps2recomp
+                 "{{ int64_t a = (int64_t)GPR_S64(ctx, {}); "
+                 "int64_t b = (int64_t)GPR_S64(ctx, {}); "
+                 "int64_t r = a - b; "
+-                "if (((a ^ b) < 0) && ((a ^ r) < 0)) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
++                "if (((a ^ b) < 0) && ((a ^ r) < 0)) ps2x_SignalException(runtime, ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                 "else SET_GPR_S64(ctx, {}, r); }}",
+                 inst.rs, inst.rt, inst.rd);
+         case SPECIAL_DSUBU:
+@@ -169,17 +169,17 @@ namespace ps2recomp
+         case SPECIAL_DSRA32:
+             return fmt::format("SET_GPR_S64(ctx, {}, GPR_S64(ctx, {}) >> (32 + {}));", inst.rd, inst.rt, inst.sa);
+         case SPECIAL_TGE:
+-            return fmt::format("if (GPR_S64(ctx, {}) >= GPR_S64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
++            return fmt::format("if (GPR_S64(ctx, {}) >= GPR_S64(ctx, {})) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.rt);
+         case SPECIAL_TGEU:
+-            return fmt::format("if (GPR_U64(ctx, {}) >= GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
++            return fmt::format("if (GPR_U64(ctx, {}) >= GPR_U64(ctx, {})) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.rt);
+         case SPECIAL_TLT:
+-            return fmt::format("if (GPR_S64(ctx, {}) < GPR_S64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
++            return fmt::format("if (GPR_S64(ctx, {}) < GPR_S64(ctx, {})) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.rt);
+         case SPECIAL_TLTU:
+-            return fmt::format("if (GPR_U64(ctx, {}) < GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
++            return fmt::format("if (GPR_U64(ctx, {}) < GPR_U64(ctx, {})) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.rt);
+         case SPECIAL_TEQ:
+-            return fmt::format("if (GPR_U64(ctx, {}) == GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
++            return fmt::format("if (GPR_U64(ctx, {}) == GPR_U64(ctx, {})) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.rt);
+         case SPECIAL_TNE:
+-            return fmt::format("if (GPR_U64(ctx, {}) != GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
++            return fmt::format("if (GPR_U64(ctx, {}) != GPR_U64(ctx, {})) {{ ps2x_handleTrap(runtime, rdram, ctx); }}", inst.rs, inst.rt);
+         default:
+             return m_codeGenerator.emitUnhandledInstruction(inst, fmt::format("Unhandled SPECIAL instruction: 0x{:X}", inst.function));
+         }
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 981baad..c75a476 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -177,7 +177,7 @@ namespace ps2recomp
+         return fmt::format(
+             "{{ "
+             "    ctx->vu0_tpc = 0x{:X}; " // Set target program counter
+-            "    runtime->executeVU0Microprogram(rdram, ctx, 0x{:X}); "
++            "    ps2x_executeVU0Microprogram(runtime, rdram, ctx, 0x{:X}); "
+             "}}",
+             target_byte_addr, target_byte_addr);
+     }
+@@ -192,7 +192,7 @@ namespace ps2recomp
+             "    uint16_t instr_index = ctx->vi[{}] & 0x1FF; "             // Get instruction index from VI[IS], mask to 9 bits
+             "    uint32_t target_byte_addr = (uint32_t)instr_index << 3; " // Convert to byte address
+             "    ctx->vu0_pc = target_byte_addr; "
+-            "    runtime->vu0StartMicroProgram(rdram, ctx, target_byte_addr); "
++            "    ps2x_vu0StartMicroProgram(runtime, rdram, ctx, target_byte_addr); "
+             "}}",
+             vis_reg_idx);
+     }
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 62f6d92..8b2991b 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -477,12 +477,21 @@ if(PS2X_ENABLE_RUNNER_UNITY_BUILD)
+         UNITY_BUILD ON
+         UNITY_BUILD_BATCH_SIZE "${PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE}"
+     )
++    # The generated sources depend on ps2_runtime_api.h only; main.cpp needs the whole
++    # runtime and must not drag it into a unity batch of game code.
++    foreach(PS2X_RUNNER_HOST_SOURCE IN LISTS RUNNER_MAIN_CPP ROOT_MAIN_CPP)
++        if(EXISTS "${PS2X_RUNNER_HOST_SOURCE}")
++            set_source_files_properties("${PS2X_RUNNER_HOST_SOURCE}" PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
++        endif()
++    endforeach()
+ endif()
+ 
+ if(PS2X_ENABLE_RUNNER_PCH)
++    # Only what generated code includes: never ps2_runtime.h, or every generated file
++    # would rebuild after a change to a runtime-internal header.
+     set(PS2X_RUNNER_PCH_HEADERS
+         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime_macros.h"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime.h"
++        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime_api.h"
+     )
+ 
+     foreach(PS2X_RUNNER_GENERATED_HEADER IN ITEMS
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 3749226..c1eea9e 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -24,6 +24,7 @@
+ #include <unordered_set>
+ 
+ #include "ps2_log.h"
++#include "ps2_runtime_api.h"
+ #include "runtime/ps2_address.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/ps2_memory.h"
+@@ -45,230 +46,6 @@ class PS2IopTransport;
+ class EeScheduler;
+ struct EeEvent;
+ 
+-enum PS2Exception
+-{
+-    EXCEPTION_TLB_REFILL = 0x02,          // TLB refill/load exception
+-    EXCEPTION_ADDRESS_ERROR_LOAD = 0x04,  // Address error on load
+-    EXCEPTION_ADDRESS_ERROR_STORE = 0x05, // Address error on store
+-    EXCEPTION_SYSCALL = 0x08,             // SYSCALL instruction
+-    EXCEPTION_BREAKPOINT = 0x09,          // BREAK instruction
+-    EXCEPTION_RESERVED_INSTRUCTION = 0x0A,
+-    EXCEPTION_INTEGER_OVERFLOW = 0x0C, // From MIPS spec
+-    EXCEPTION_TRAP = 0x0D,             // Trap instruction condition met
+-};
+-
+-// PS2 CPU context (R5900)
+-struct alignas(16) R5900Context
+-{
+-    // General Purpose Registers (128-bit)
+-    __m128i r[32]; // Main registers
+-
+-    // Control registers
+-    uint32_t pc;         // Program counter
+-    uint64_t insn_count; // Instruction counter
+-    uint64_t hi, lo;     // HI/LO registers for mult/div results
+-    uint64_t hi1, lo1;   // Secondary HI/LO registers for MULT1/DIV1
+-    uint32_t sa;         // Shift amount register
+-
+-    // VU0 registers (when used in macro mode)
+-    __m128 vu0_vf[32];        // VU0 vector float registers
+-    uint16_t vi[16];          // VU0 vector integer registers
+-    float vu0_q;              // VU0 Q register (quotient)
+-    float vu0_p;              // VU0 P register (EFU result)
+-    float vu0_i;              // VU0 I register (integer value)
+-    __m128 vu0_r;             // VU0 R register
+-    __m128 vu0_acc;           // VU0 ACC accumulator register
+-    uint16_t vu0_status;      // VU0 status register
+-    uint32_t vu0_mac_flags;   // VU0 MAC flags
+-    uint32_t vu0_clip_flags;  // VU0 clipping flags
+-    uint32_t vu0_clip_flags2; // VU0 clipping flags
+-    uint32_t vu0_cmsar0;      // VU0 microprogram start address
+-    uint32_t vu0_cmsar1;      // VU0 microprogram start address
+-    uint32_t vu0_cmsar2;      // VU0 microprogram start address
+-    uint32_t vu0_cmsar3;      // VU0 microprogram start address
+-    uint32_t vu0_vpu_stat;
+-    uint32_t vu0_vpu_stat2; // extra VPU status (used by CR_VPU_STAT2)
+-    uint32_t vu0_vpu_stat3; // extra VPU status 3
+-    uint32_t vu0_vpu_stat4; // extra VPU status 4
+-    uint32_t vu0_tpc;       // TPC (VU0 PC)
+-    uint32_t vu0_tpc2;      // second TPC
+-    uint32_t vu0_fbrst;     // VIF/VU reset register
+-    uint32_t vu0_fbrst2;    // FBRST2
+-    uint32_t vu0_fbrst3;    // FBRST3
+-    uint32_t vu0_fbrst4;    // FBRST4
+-    uint32_t vu0_itop;
+-    uint32_t vu0_top;
+-    uint32_t vu0_info;
+-    uint32_t vu0_xitop; // VU0 XITOP - input ITOP for VIF/VU sync
+-    uint32_t vu0_pc;
+-
+-    float vu0_cf[4]; // VU0 FMAC control floating-point registers
+-
+-    // COP0 System control registers
+-    uint32_t cop0_index;
+-    uint32_t cop0_random;
+-    uint32_t cop0_entrylo0;
+-    uint32_t cop0_entrylo1;
+-    uint32_t cop0_context;
+-    uint32_t cop0_pagemask;
+-    uint32_t cop0_wired;
+-    uint32_t cop0_badvaddr;
+-    uint32_t cop0_count;
+-    uint32_t cop0_entryhi;
+-    uint32_t cop0_compare;
+-    uint32_t cop0_status;
+-    uint32_t cop0_cause;
+-    uint32_t cop0_epc;
+-    uint32_t cop0_prid;
+-    uint32_t cop0_config;
+-    uint32_t cop0_badpaddr;
+-    uint32_t cop0_debug;
+-    uint32_t cop0_perf;
+-    uint32_t cop0_taglo;
+-    uint32_t cop0_taghi;
+-    uint32_t cop0_errorepc;
+-
+-    // LL/SC reservation state (not part of COP0 Status bits).
+-    uint32_t llbit;
+-    uint32_t lladdr;
+-
+-    // Delay slot state tracking
+-    bool in_delay_slot;
+-    uint32_t branch_pc;
+-
+-    // COP2 control registers (VU0 integer + control)
+-    uint32_t cop2_ccr[32];
+-
+-    // FPU registers (COP1)
+-    float f[32];
+-    float f_acc;    // FPU accumulator
+-    uint32_t fcr31; // Control/status register
+-
+-    R5900Context()
+-    {
+-        std::memset(this, 0, sizeof(*this));
+-
+-        // Initialize VU0 registers
+-        vu0_q = 1.0f; // Q register usually initialized to 1.0
+-
+-        // Reset COP0 registers
+-        cop0_random = 47; // Start at maximum value
+-        // Status as the EE kernel leaves it at handoff. IE (bit 0) and EIE
+-        // (bit 16) are separate enables and guest code reads both; libkernel's
+-        // StartThread refuses to run while IE is clear.
+-        cop0_status = 0x00010001; // EIE | IE
+-        cop0_prid = 0x00002e20; // CPU ID for R5900
+-
+-        in_delay_slot = false;
+-        branch_pc = 0;
+-    }
+-
+-    void dump() const
+-    {
+-        std::ios_base::fmtflags flags = std::cout.flags();
+-        std::cout << std::hex << std::setfill('0');
+-        std::cout << "--- R5900 Context Dump ---\n";
+-        std::cout << "PC: 0x" << std::setw(8) << pc << "\n";
+-        std::cout << "HI: 0x" << std::setw(8) << hi << " LO: 0x" << std::setw(8) << lo << "\n";
+-        std::cout << "HI1:0x" << std::setw(8) << hi1 << " LO1:0x" << std::setw(8) << lo1 << "\n";
+-        std::cout << "SA: 0x" << std::setw(8) << sa << "\n";
+-        for (int i = 0; i < 32; ++i)
+-        {
+-            std::cout << "R" << std::setw(2) << std::dec << i << ": 0x" << std::hex
+-                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 3))
+-                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 2)) << "_"
+-                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 1))
+-                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 0)) << "\n";
+-        }
+-        std::cout << "Status: 0x" << std::setw(8) << cop0_status
+-                  << " Cause: 0x" << std::setw(8) << cop0_cause
+-                  << " EPC: 0x" << std::setw(8) << cop0_epc << "\n";
+-        std::cout << "--- End Context Dump ---\n";
+-        std::cout.flags(flags); // Restore format flags
+-    }
+-
+-    ~R5900Context() = default;
+-};
+-
+-inline uint32_t getRegU32(const R5900Context *ctx, int reg)
+-{
+-    // Check if reg is valid (0-31)
+-    if (reg < 0 || reg > 31)
+-        return 0;
+-    if (reg == 0)
+-        return 0;
+-    return static_cast<uint32_t>(_mm_extract_epi32(ctx->r[reg], 0));
+-}
+-
+-inline void setReturnU32(R5900Context *ctx, uint32_t value)
+-{
+-    // R5900 sign-extends 32-bit results into 64-bit GPR, even for unsigned values.
+-    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value))); // $v0
+-}
+-
+-inline void setReturnS32(R5900Context *ctx, int32_t value)
+-{
+-    // Signed 32-bit return should be sign-extended when observed as 64-bit.
+-    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(value)); // $v0
+-}
+-
+-inline void setReturnU64(R5900Context *ctx, uint64_t value)
+-{
+-    // Keep both conventions: full 64-bit value in $v0 and high 32-bit in $v1.
+-    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(value));
+-    ctx->r[3] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<uint32_t>(value >> 32)));
+-}
+-
+-inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
+-inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
+-
+-inline uint32_t ps2PathWatchPhysAddr()
+-{
+-    return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
+-}
+-
+-inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t watchAddr, uint64_t valueLo, uint64_t valueHi)
+-{
+-    const uint32_t byteIndex = watchAddr - writeAddr;
+-    if (byteIndex < 8u)
+-    {
+-        return static_cast<uint8_t>((valueLo >> (byteIndex * 8u)) & 0xFFu);
+-    }
+-    return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
+-}
+-
+-inline void ps2TraceGuestWrite(uint8_t *rdram,
+-                               uint32_t guestAddr,
+-                               uint32_t size,
+-                               uint64_t valueLo,
+-                               uint64_t valueHi,
+-                               const char *op,
+-                               const R5900Context *ctx)
+-{
+-    (void)rdram;
+-    (void)guestAddr;
+-    (void)size;
+-    (void)valueLo;
+-    (void)valueHi;
+-    (void)op;
+-    (void)ctx;
+-    // TODO we dont need this anymore so on next release it will be deleted
+-}
+-
+-inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
+-                                    uint32_t guestAddr,
+-                                    uint32_t size,
+-                                    const char *op,
+-                                    const R5900Context *ctx)
+-{
+-    (void)rdram;
+-    (void)guestAddr;
+-    (void)size;
+-    (void)op;
+-    (void)ctx;
+-    // TODO we dont need this anymore so on next release it will be deleted
+-}
+-
+ class PS2Runtime
+ {
+ public:
+@@ -308,16 +85,9 @@ public:
+                              DebugUiCallback shutdownCallback,
+                              void *userData);
+ 
+-    using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+-
+-    enum class GuestBranchKind
+-    {
+-        DirectJump,
+-        DirectCall,
+-        IndirectJump,
+-        IndirectCall,
+-        Return,
+-    };
++    // The game-facing spellings live in ps2_runtime_api.h; these keep the old names.
++    using RecompiledFunction = Ps2RecompiledFunction;
++    using GuestBranchKind = Ps2GuestBranchKind;
+ 
+     enum class MissingFunctionPolicy : uint32_t
+     {
+@@ -488,6 +258,23 @@ private:
+     friend class PS2IopTransport;
+     friend class EeScheduler;
+ 
++    // The game-facing entry points (ps2_runtime_api.h) are the implementations of the
++    // members of the same name; they touch the private state directly.
++    friend bool ps2x_dispatchGuestBranch(PS2Runtime *, uint8_t *, R5900Context *, uint32_t, uint32_t, uint32_t, Ps2GuestBranchKind, const char *);
++    friend bool ps2x_eeCheckpointDue(PS2Runtime *, uint32_t) noexcept;
++    friend void ps2x_SignalException(PS2Runtime *, R5900Context *, PS2Exception);
++    friend void ps2x_executeVU0Microprogram(PS2Runtime *, uint8_t *, R5900Context *, uint32_t);
++    friend uint8_t ps2x_Load8(PS2Runtime *, uint8_t *, R5900Context *, uint32_t);
++    friend uint16_t ps2x_Load16(PS2Runtime *, uint8_t *, R5900Context *, uint32_t);
++    friend uint32_t ps2x_Load32(PS2Runtime *, uint8_t *, R5900Context *, uint32_t);
++    friend uint64_t ps2x_Load64(PS2Runtime *, uint8_t *, R5900Context *, uint32_t);
++    friend __m128i ps2x_Load128(PS2Runtime *, uint8_t *, R5900Context *, uint32_t);
++    friend void ps2x_Store8(PS2Runtime *, uint8_t *, R5900Context *, uint32_t, uint8_t);
++    friend void ps2x_Store16(PS2Runtime *, uint8_t *, R5900Context *, uint32_t, uint16_t);
++    friend void ps2x_Store32(PS2Runtime *, uint8_t *, R5900Context *, uint32_t, uint32_t);
++    friend void ps2x_Store64(PS2Runtime *, uint8_t *, R5900Context *, uint32_t, uint64_t);
++    friend void ps2x_Store128(PS2Runtime *, uint8_t *, R5900Context *, uint32_t, __m128i);
++
+ private:
+     PS2Memory m_memory;
+     GifArbiter m_gifArbiter;
+@@ -546,29 +333,64 @@ private:
+     uint8_t *m_boundGSVram = nullptr;
+ };
+ 
+-// Generated by ps2xRecomp in ps2xRuntime/src/runner/register_functions.cpp.
+-extern const uint32_t g_ps2RecompiledFunctionTableBase;
+-extern const uint32_t g_ps2RecompiledFunctionTableEnd;
+-extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
+-extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+-
+-// A separately recompiled guest module, such as an overlay the game copies
+-// into RAM at run time. Several modules may share an address range; a module's
+-// functions are used only while its image is in guest RAM, which is checked by
+-// comparing `fingerprint` with the bytes at `fingerprintAddress`.
+-// ps2xRecomp generates one per `module` config and registers it at start-up.
+-struct PS2GuestModule
++// Members kept for the runtime's own callers and the tests; generated code calls the
++// ps2x_* entry points (ps2_runtime_api.h) directly, with no hop through here.
++inline bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
++                                            R5900Context *ctx,
++                                            uint32_t targetPc,
++                                            uint32_t sourcePc,
++                                            uint32_t fallthroughPc,
++                                            GuestBranchKind kind,
++                                            const char *debugName)
+ {
+-    const char *name;
+-    uint32_t base;                          // address of table[0]
+-    uint32_t end;                           // one past the last address in the table
+-    PS2Runtime::RecompiledFunction *table;  // (end - base) / 4 slots
+-    uint32_t fingerprintAddress;
+-    const uint8_t *fingerprint;
+-    uint32_t fingerprintSize;
+-};
++    return ps2x_dispatchGuestBranch(this, rdram, ctx, targetPc, sourcePc, fallthroughPc, kind, debugName);
++}
++
++inline bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
++{
++    return ps2x_eeCheckpointDue(this, cycles);
++}
++
++inline void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId)
++{
++    ps2x_handleSyscall(this, rdram, ctx, encodedSyscallId);
++}
++
++inline void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
++{
++    ps2x_handleBreak(this, rdram, ctx);
++}
++
++inline void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
++{
++    ps2x_SignalException(this, ctx, exception);
++}
++
++inline void PS2Runtime::clearLLBit(R5900Context *ctx)
++{
++    ps2x_clearLLBit(this, ctx);
++}
++
++inline void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
++{
++    ps2x_executeVU0Microprogram(this, rdram, ctx, address);
++}
++
++inline void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
++{
++    ps2x_vu0StartMicroProgram(this, rdram, ctx, address);
++}
+ 
+-void ps2RegisterGuestModule(const PS2GuestModule &module);
+-void ps2UnregisterGuestModule(const char *name);
++inline uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr) { return ps2x_Load8(this, rdram, ctx, vaddr); }
++inline uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr) { return ps2x_Load16(this, rdram, ctx, vaddr); }
++inline uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr) { return ps2x_Load32(this, rdram, ctx, vaddr); }
++inline uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr) { return ps2x_Load64(this, rdram, ctx, vaddr); }
++inline __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr) { return ps2x_Load128(this, rdram, ctx, vaddr); }
++
++inline void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value) { ps2x_Store8(this, rdram, ctx, vaddr, value); }
++inline void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value) { ps2x_Store16(this, rdram, ctx, vaddr, value); }
++inline void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value) { ps2x_Store32(this, rdram, ctx, vaddr, value); }
++inline void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value) { ps2x_Store64(this, rdram, ctx, vaddr, value); }
++inline void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value) { ps2x_Store128(this, rdram, ctx, vaddr, value); }
+ 
+ #endif // PS2_RUNTIME_H
+diff --git a/ps2xRuntime/include/ps2_runtime_api.h b/ps2xRuntime/include/ps2_runtime_api.h
+new file mode 100644
+index 0000000..9e1b62f
+--- /dev/null
++++ b/ps2xRuntime/include/ps2_runtime_api.h
+@@ -0,0 +1,338 @@
++#ifndef PS2_RUNTIME_API_H
++#define PS2_RUNTIME_API_H
++
++// The game-facing runtime API: everything generated code (ps2xRecomp output) needs
++// from the runtime, and nothing else. Generated sources and the generated function
++// tables include this header and ps2_runtime_macros.h only, so a change to a
++// runtime-internal header (ps2_runtime.h and what it includes: GS, memory, VU,
++// audio, pad, VFS, IOP) no longer rebuilds the generated game code.
++//
++// PS2Runtime stays an incomplete type here: the entry points are free functions
++// taking a PS2Runtime* and are the implementation (ps2_runtime.cpp); the member
++// functions of the same name are inline wrappers for the runtime's own callers.
++//
++// Rule: this header must not include ps2_runtime.h or any runtime/ header other
++// than ps2_memory_map.h and ps2_address.h (a test walks the includes).
++
++#include <cstdint>
++#include <cstring>
++#include <iomanip>
++#include <iostream>
++#if defined(_MSC_VER)
++#include <intrin.h>
++#elif defined(USE_SSE2NEON)
++#include "sse2neon.h"
++#else
++#include <immintrin.h> // For SSE/AVX instructions
++#include <smmintrin.h> // For SSE4.1 instructions
++#endif
++
++#include "runtime/ps2_memory_map.h"
++#include "runtime/ps2_address.h"
++
++class PS2Runtime;
++
++enum PS2Exception
++{
++    EXCEPTION_TLB_REFILL = 0x02,          // TLB refill/load exception
++    EXCEPTION_ADDRESS_ERROR_LOAD = 0x04,  // Address error on load
++    EXCEPTION_ADDRESS_ERROR_STORE = 0x05, // Address error on store
++    EXCEPTION_SYSCALL = 0x08,             // SYSCALL instruction
++    EXCEPTION_BREAKPOINT = 0x09,          // BREAK instruction
++    EXCEPTION_RESERVED_INSTRUCTION = 0x0A,
++    EXCEPTION_INTEGER_OVERFLOW = 0x0C, // From MIPS spec
++    EXCEPTION_TRAP = 0x0D,             // Trap instruction condition met
++};
++
++// PS2 CPU context (R5900)
++struct alignas(16) R5900Context
++{
++    // General Purpose Registers (128-bit)
++    __m128i r[32]; // Main registers
++
++    // Control registers
++    uint32_t pc;         // Program counter
++    uint64_t insn_count; // Instruction counter
++    uint64_t hi, lo;     // HI/LO registers for mult/div results
++    uint64_t hi1, lo1;   // Secondary HI/LO registers for MULT1/DIV1
++    uint32_t sa;         // Shift amount register
++
++    // VU0 registers (when used in macro mode)
++    __m128 vu0_vf[32];        // VU0 vector float registers
++    uint16_t vi[16];          // VU0 vector integer registers
++    float vu0_q;              // VU0 Q register (quotient)
++    float vu0_p;              // VU0 P register (EFU result)
++    float vu0_i;              // VU0 I register (integer value)
++    __m128 vu0_r;             // VU0 R register
++    __m128 vu0_acc;           // VU0 ACC accumulator register
++    uint16_t vu0_status;      // VU0 status register
++    uint32_t vu0_mac_flags;   // VU0 MAC flags
++    uint32_t vu0_clip_flags;  // VU0 clipping flags
++    uint32_t vu0_clip_flags2; // VU0 clipping flags
++    uint32_t vu0_cmsar0;      // VU0 microprogram start address
++    uint32_t vu0_cmsar1;      // VU0 microprogram start address
++    uint32_t vu0_cmsar2;      // VU0 microprogram start address
++    uint32_t vu0_cmsar3;      // VU0 microprogram start address
++    uint32_t vu0_vpu_stat;
++    uint32_t vu0_vpu_stat2; // extra VPU status (used by CR_VPU_STAT2)
++    uint32_t vu0_vpu_stat3; // extra VPU status 3
++    uint32_t vu0_vpu_stat4; // extra VPU status 4
++    uint32_t vu0_tpc;       // TPC (VU0 PC)
++    uint32_t vu0_tpc2;      // second TPC
++    uint32_t vu0_fbrst;     // VIF/VU reset register
++    uint32_t vu0_fbrst2;    // FBRST2
++    uint32_t vu0_fbrst3;    // FBRST3
++    uint32_t vu0_fbrst4;    // FBRST4
++    uint32_t vu0_itop;
++    uint32_t vu0_top;
++    uint32_t vu0_info;
++    uint32_t vu0_xitop; // VU0 XITOP - input ITOP for VIF/VU sync
++    uint32_t vu0_pc;
++
++    float vu0_cf[4]; // VU0 FMAC control floating-point registers
++
++    // COP0 System control registers
++    uint32_t cop0_index;
++    uint32_t cop0_random;
++    uint32_t cop0_entrylo0;
++    uint32_t cop0_entrylo1;
++    uint32_t cop0_context;
++    uint32_t cop0_pagemask;
++    uint32_t cop0_wired;
++    uint32_t cop0_badvaddr;
++    uint32_t cop0_count;
++    uint32_t cop0_entryhi;
++    uint32_t cop0_compare;
++    uint32_t cop0_status;
++    uint32_t cop0_cause;
++    uint32_t cop0_epc;
++    uint32_t cop0_prid;
++    uint32_t cop0_config;
++    uint32_t cop0_badpaddr;
++    uint32_t cop0_debug;
++    uint32_t cop0_perf;
++    uint32_t cop0_taglo;
++    uint32_t cop0_taghi;
++    uint32_t cop0_errorepc;
++
++    // LL/SC reservation state (not part of COP0 Status bits).
++    uint32_t llbit;
++    uint32_t lladdr;
++
++    // Delay slot state tracking
++    bool in_delay_slot;
++    uint32_t branch_pc;
++
++    // COP2 control registers (VU0 integer + control)
++    uint32_t cop2_ccr[32];
++
++    // FPU registers (COP1)
++    float f[32];
++    float f_acc;    // FPU accumulator
++    uint32_t fcr31; // Control/status register
++
++    R5900Context()
++    {
++        std::memset(this, 0, sizeof(*this));
++
++        // Initialize VU0 registers
++        vu0_q = 1.0f; // Q register usually initialized to 1.0
++
++        // Reset COP0 registers
++        cop0_random = 47; // Start at maximum value
++        // Status as the EE kernel leaves it at handoff. IE (bit 0) and EIE
++        // (bit 16) are separate enables and guest code reads both; libkernel's
++        // StartThread refuses to run while IE is clear.
++        cop0_status = 0x00010001; // EIE | IE
++        cop0_prid = 0x00002e20; // CPU ID for R5900
++
++        in_delay_slot = false;
++        branch_pc = 0;
++    }
++
++    void dump() const
++    {
++        std::ios_base::fmtflags flags = std::cout.flags();
++        std::cout << std::hex << std::setfill('0');
++        std::cout << "--- R5900 Context Dump ---\n";
++        std::cout << "PC: 0x" << std::setw(8) << pc << "\n";
++        std::cout << "HI: 0x" << std::setw(8) << hi << " LO: 0x" << std::setw(8) << lo << "\n";
++        std::cout << "HI1:0x" << std::setw(8) << hi1 << " LO1:0x" << std::setw(8) << lo1 << "\n";
++        std::cout << "SA: 0x" << std::setw(8) << sa << "\n";
++        for (int i = 0; i < 32; ++i)
++        {
++            std::cout << "R" << std::setw(2) << std::dec << i << ": 0x" << std::hex
++                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 3))
++                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 2)) << "_"
++                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 1))
++                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 0)) << "\n";
++        }
++        std::cout << "Status: 0x" << std::setw(8) << cop0_status
++                  << " Cause: 0x" << std::setw(8) << cop0_cause
++                  << " EPC: 0x" << std::setw(8) << cop0_epc << "\n";
++        std::cout << "--- End Context Dump ---\n";
++        std::cout.flags(flags); // Restore format flags
++    }
++
++    ~R5900Context() = default;
++};
++
++inline uint32_t getRegU32(const R5900Context *ctx, int reg)
++{
++    // Check if reg is valid (0-31)
++    if (reg < 0 || reg > 31)
++        return 0;
++    if (reg == 0)
++        return 0;
++    return static_cast<uint32_t>(_mm_extract_epi32(ctx->r[reg], 0));
++}
++
++inline void setReturnU32(R5900Context *ctx, uint32_t value)
++{
++    // R5900 sign-extends 32-bit results into 64-bit GPR, even for unsigned values.
++    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value))); // $v0
++}
++
++inline void setReturnS32(R5900Context *ctx, int32_t value)
++{
++    // Signed 32-bit return should be sign-extended when observed as 64-bit.
++    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(value)); // $v0
++}
++
++inline void setReturnU64(R5900Context *ctx, uint64_t value)
++{
++    // Keep both conventions: full 64-bit value in $v0 and high 32-bit in $v1.
++    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(value));
++    ctx->r[3] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<uint32_t>(value >> 32)));
++}
++
++inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
++inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
++
++inline uint32_t ps2PathWatchPhysAddr()
++{
++    return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
++}
++
++inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t watchAddr, uint64_t valueLo, uint64_t valueHi)
++{
++    const uint32_t byteIndex = watchAddr - writeAddr;
++    if (byteIndex < 8u)
++    {
++        return static_cast<uint8_t>((valueLo >> (byteIndex * 8u)) & 0xFFu);
++    }
++    return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
++}
++
++inline void ps2TraceGuestWrite(uint8_t *rdram,
++                               uint32_t guestAddr,
++                               uint32_t size,
++                               uint64_t valueLo,
++                               uint64_t valueHi,
++                               const char *op,
++                               const R5900Context *ctx)
++{
++    (void)rdram;
++    (void)guestAddr;
++    (void)size;
++    (void)valueLo;
++    (void)valueHi;
++    (void)op;
++    (void)ctx;
++    // TODO we dont need this anymore so on next release it will be deleted
++}
++
++inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
++                                    uint32_t guestAddr,
++                                    uint32_t size,
++                                    const char *op,
++                                    const R5900Context *ctx)
++{
++    (void)rdram;
++    (void)guestAddr;
++    (void)size;
++    (void)op;
++    (void)ctx;
++    // TODO we dont need this anymore so on next release it will be deleted
++}
++// A recompiled guest function. PS2Runtime::RecompiledFunction is an alias of this.
++using Ps2RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
++
++// How generated code reached a guest branch. PS2Runtime::GuestBranchKind is an alias of this.
++enum class Ps2GuestBranchKind
++{
++    DirectJump,
++    DirectCall,
++    IndirectJump,
++    IndirectCall,
++    Return,
++};
++
++// Entry points called by generated code (and by the READ*/WRITE* macros). Each one is the
++// implementation of the PS2Runtime member of the same name, which forwards here.
++bool ps2x_dispatchGuestBranch(PS2Runtime *runtime,
++                              uint8_t *rdram,
++                              R5900Context *ctx,
++                              uint32_t targetPc,
++                              uint32_t sourcePc,
++                              uint32_t fallthroughPc,
++                              Ps2GuestBranchKind kind,
++                              const char *debugName);
++bool ps2x_eeCheckpointDue(PS2Runtime *runtime, uint32_t cycles = 32u) noexcept;
++void ps2x_handleSyscall(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId);
++void ps2x_handleBreak(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx);
++void ps2x_handleTrap(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx);
++void ps2x_handleTLBR(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx);
++void ps2x_handleTLBWI(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx);
++void ps2x_handleTLBWR(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx);
++void ps2x_handleTLBP(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx);
++void ps2x_SignalException(PS2Runtime *runtime, R5900Context *ctx, PS2Exception exception);
++void ps2x_clearLLBit(PS2Runtime *runtime, R5900Context *ctx);
++void ps2x_executeVU0Microprogram(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t address);
++void ps2x_vu0StartMicroProgram(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t address);
++void ps2x_kickGifDmaChainFromMMIO(PS2Runtime *runtime,
++                                  uint8_t *rdram,
++                                  R5900Context *ctx,
++                                  uint32_t dPcrValue,
++                                  uint32_t dStatValue,
++                                  uint32_t tadr,
++                                  uint32_t chcr);
++
++uint8_t ps2x_Load8(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
++uint16_t ps2x_Load16(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
++uint32_t ps2x_Load32(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
++uint64_t ps2x_Load64(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
++__m128i ps2x_Load128(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
++
++void ps2x_Store8(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value);
++void ps2x_Store16(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value);
++void ps2x_Store32(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value);
++void ps2x_Store64(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value);
++void ps2x_Store128(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value);
++
++// Generated by ps2xRecomp in ps2xRuntime/src/runner/register_functions.cpp.
++extern const uint32_t g_ps2RecompiledFunctionTableBase;
++extern const uint32_t g_ps2RecompiledFunctionTableEnd;
++extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
++extern Ps2RecompiledFunction g_ps2RecompiledFunctionTable[];
++
++// A separately recompiled guest module, such as an overlay the game copies
++// into RAM at run time. Several modules may share an address range; a module's
++// functions are used only while its image is in guest RAM, which is checked by
++// comparing `fingerprint` with the bytes at `fingerprintAddress`.
++// ps2xRecomp generates one per `module` config and registers it at start-up.
++struct PS2GuestModule
++{
++    const char *name;
++    uint32_t base;                          // address of table[0]
++    uint32_t end;                           // one past the last address in the table
++    Ps2RecompiledFunction *table;  // (end - base) / 4 slots
++    uint32_t fingerprintAddress;
++    const uint8_t *fingerprint;
++    uint32_t fingerprintSize;
++};
++
++void ps2RegisterGuestModule(const PS2GuestModule &module);
++void ps2UnregisterGuestModule(const char *name);
++
++#endif // PS2_RUNTIME_API_H
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index 6608264..2af66cc 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -12,7 +12,7 @@
+ #include <immintrin.h> // For SSE/AVX intrinsics
+ #endif
+ 
+-#include "ps2_runtime.h"
++#include "ps2_runtime_api.h"
+ 
+ static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
+ {
+@@ -565,40 +565,40 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+ 
+ #define READ8(addr) ([&]() -> uint8_t {                       \
+     uint32_t _addr = (uint32_t)(addr);                        \
+-    return PS2Runtime::isSpecialAddress(_addr)                \
+-        ? runtime->Load8(rdram, ctx, _addr)                   \
++    return Ps2IsSpecialAddress(_addr)                \
++        ? ps2x_Load8(runtime, rdram, ctx, _addr)                   \
+         : FAST_READ8(_addr); }())
+ 
+ #define READ16(addr) ([&]() -> uint16_t {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
+-    return PS2Runtime::isSpecialAddress(_addr)                \
+-        ? runtime->Load16(rdram, ctx, _addr)                  \
++    return Ps2IsSpecialAddress(_addr)                \
++        ? ps2x_Load16(runtime, rdram, ctx, _addr)                  \
+         : FAST_READ16(_addr); }())
+ 
+ #define READ32(addr) ([&]() -> uint32_t {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
+-    return PS2Runtime::isSpecialAddress(_addr)                \
+-        ? runtime->Load32(rdram, ctx, _addr)                  \
++    return Ps2IsSpecialAddress(_addr)                \
++        ? ps2x_Load32(runtime, rdram, ctx, _addr)                  \
+         : FAST_READ32(_addr); }())
+ 
+ #define READ64(addr) ([&]() -> uint64_t {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
+-    return PS2Runtime::isSpecialAddress(_addr)                \
+-        ? runtime->Load64(rdram, ctx, _addr)                  \
++    return Ps2IsSpecialAddress(_addr)                \
++        ? ps2x_Load64(runtime, rdram, ctx, _addr)                  \
+         : FAST_READ64(_addr); }())
+ 
+ #define READ128(addr) ([&]() -> __m128i {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
+-    return PS2Runtime::isSpecialAddress(_addr)                \
+-        ? runtime->Load128(rdram, ctx, _addr)                 \
++    return Ps2IsSpecialAddress(_addr)                \
++        ? ps2x_Load128(runtime, rdram, ctx, _addr)                 \
+         : FAST_READ128(_addr); }())
+ 
+ #define WRITE8(addr, val)                                                            \
+     do                                                                               \
+     {                                                                                \
+         uint32_t _addr = (addr);                                                     \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                     \
+-            runtime->Store8(rdram, ctx, _addr, (val));                               \
++        if (Ps2IsSpecialAddress(_addr))                                     \
++            ps2x_Store8(runtime, rdram, ctx, _addr, (val));                               \
+         else                                                                         \
+         {                                                                            \
+             ps2TraceGuestWrite(rdram, _addr, 1u, (uint8_t)(val), 0u, "WRITE8", ctx); \
+@@ -610,8 +610,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+     do                                                                                 \
+     {                                                                                  \
+         uint32_t _addr = (addr);                                                       \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
+-            runtime->Store16(rdram, ctx, _addr, (val));                                \
++        if (Ps2IsSpecialAddress(_addr))                                       \
++            ps2x_Store16(runtime, rdram, ctx, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+             ps2TraceGuestWrite(rdram, _addr, 2u, (uint16_t)(val), 0u, "WRITE16", ctx); \
+@@ -623,8 +623,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+     do                                                                                 \
+     {                                                                                  \
+         uint32_t _addr = (addr);                                                       \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
+-            runtime->Store32(rdram, ctx, _addr, (val));                                \
++        if (Ps2IsSpecialAddress(_addr))                                       \
++            ps2x_Store32(runtime, rdram, ctx, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+             ps2TraceGuestWrite(rdram, _addr, 4u, (uint32_t)(val), 0u, "WRITE32", ctx); \
+@@ -636,8 +636,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+     do                                                                                 \
+     {                                                                                  \
+         uint32_t _addr = (addr);                                                       \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
+-            runtime->Store64(rdram, ctx, _addr, (val));                                \
++        if (Ps2IsSpecialAddress(_addr))                                       \
++            ps2x_Store64(runtime, rdram, ctx, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+             ps2TraceGuestWrite(rdram, _addr, 8u, (uint64_t)(val), 0u, "WRITE64", ctx); \
+@@ -650,8 +650,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+     {                                                                                \
+         uint32_t _addr = (addr);                                                     \
+         __m128i _value = (val);                                                      \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                     \
+-            runtime->Store128(rdram, ctx, _addr, _value);                            \
++        if (Ps2IsSpecialAddress(_addr))                                     \
++            ps2x_Store128(runtime, rdram, ctx, _addr, _value);                            \
+         else                                                                         \
+         {                                                                            \
+             const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); \
+diff --git a/ps2xRuntime/include/ps2_stubs.h b/ps2xRuntime/include/ps2_stubs.h
+index 4492ce1..cfb0490 100644
+--- a/ps2xRuntime/include/ps2_stubs.h
++++ b/ps2xRuntime/include/ps2_stubs.h
+@@ -5,7 +5,7 @@ class  PS2Runtime;
+ 
+ #include <cstdint>
+ #include "ps2_call_list.h"
+-#include "runtime/ps2_memory.h"
++#include "ps2_runtime_api.h"
+ #include "Stubs/Unimplemented.h"
+ 
+ namespace ps2_stubs
+diff --git a/ps2xRuntime/include/ps2_syscalls.h b/ps2xRuntime/include/ps2_syscalls.h
+index e0c4f5b..a5be250 100644
+--- a/ps2xRuntime/include/ps2_syscalls.h
++++ b/ps2xRuntime/include/ps2_syscalls.h
+@@ -1,7 +1,7 @@
+ #ifndef PS2_SYSCALLS_H
+ #define PS2_SYSCALLS_H
+ 
+-#include "ps2_runtime.h"
++#include "ps2_runtime_api.h"
+ #include "ps2_call_list.h"
+ #include <mutex>
+ #include <atomic>
+diff --git a/ps2xRuntime/include/runtime/ps2_address.h b/ps2xRuntime/include/runtime/ps2_address.h
+index f7689e0..c9c2a51 100644
+--- a/ps2xRuntime/include/runtime/ps2_address.h
++++ b/ps2xRuntime/include/runtime/ps2_address.h
+@@ -3,7 +3,7 @@
+ 
+ #include <cstdint>
+ 
+-#include "runtime/ps2_memory.h"
++#include "runtime/ps2_memory_map.h"
+ 
+ static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_BASE = 0x20000000u;
+ static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_SIZE = 0x20000000u;
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index 70fa426..a0cc843 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -23,58 +23,7 @@
+ 
+ class GS;
+ 
+-constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
+-constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
+-constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
+-// Guest RAM the runtime keeps for itself: the EE kernel's area between its syscall-table mirror
+-// (below 0x80000) and the usual ELF load address. Games own RAM from 0x100000 up to their stack,
+-// as on hardware. Pools (see Kernel/Syscalls/Helpers/State.h) come first, callback stacks last.
+-constexpr uint32_t PS2_RUNTIME_RESERVED_BASE = 0x00080000;
+-constexpr uint32_t PS2_RUNTIME_CALLBACK_STACK_FLOOR = 0x000B1000;
+-constexpr uint32_t PS2_RUNTIME_RESERVED_END = 0x00100000;
+-constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
+-constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
+-constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16u * 1024u;  // 16KB
+-constexpr uint32_t PS2_IO_BASE = 0x10000000;           // Base for many I/O regs (Timers, DMAC, INTC)
+-constexpr uint32_t PS2_IO_SIZE = 0x10000;              // 64KB
+-constexpr uint32_t PS2_BIOS_BASE = 0x1FC00000;         // Or BFC00000 depending on KSEG
+-constexpr uint32_t PS2_BIOS_SIZE = 4u * 1024u * 1024u; // 4MB
+-
+-constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000; // Base address as seen from EE
+-constexpr uint32_t PS2_VU0_DATA_BASE = 0x11004000;
+-constexpr uint32_t PS2_VU0_CODE_SIZE = 4u * 1024u; // 4KB Micro Memory
+-constexpr uint32_t PS2_VU0_DATA_SIZE = 4u * 1024u; // 4KB Data Memory (VU Mem)
+-
+-constexpr uint32_t PS2_VU1_CODE_BASE = 0x11008000;
+-constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
+-constexpr uint32_t PS2_VU1_MEM_BASE = PS2_VU1_CODE_BASE; // Alias used by older code paths
+-constexpr uint32_t PS2_VU1_CODE_SIZE = 16u * 1024u;      // 16KB Micro Memory
+-constexpr uint32_t PS2_VU1_DATA_SIZE = 16u * 1024u;      // 16KB Data Memory (VU Mem)
+-
+-constexpr uint32_t PS2_GS_BASE = 0x12000000;
+-constexpr uint32_t PS2_GS_PRIV_REG_BASE = PS2_GS_BASE; // GS Privileged Registers
+-constexpr uint32_t PS2_GS_PRIV_REG_SIZE = 0x2000;
+-constexpr size_t PS2_GS_VRAM_SIZE = 4u * 1024u * 1024u; // 4MB GS VRAM
+-
+-inline constexpr uint32_t PS2_FIO_O_RDONLY = 0x0001;
+-inline constexpr uint32_t PS2_FIO_O_WRONLY = 0x0002;
+-inline constexpr uint32_t PS2_FIO_O_RDWR = 0x0003;
+-inline constexpr uint32_t PS2_FIO_O_NBLOCK = 0x0010;
+-inline constexpr uint32_t PS2_FIO_O_APPEND = 0x0100;
+-inline constexpr uint32_t PS2_FIO_O_CREAT = 0x0200;
+-inline constexpr uint32_t PS2_FIO_O_TRUNC = 0x0400;
+-inline constexpr uint32_t PS2_FIO_O_EXCL = 0x0800;
+-inline constexpr uint32_t PS2_FIO_O_NOWAIT = 0x8000;
+-
+-inline constexpr uint32_t PS2_FIO_SEEK_SET = 0;
+-inline constexpr uint32_t PS2_FIO_SEEK_CUR = 1;
+-inline constexpr uint32_t PS2_FIO_SEEK_END = 2;
+-
+-inline constexpr uint32_t PS2_FIO_S_IFDIR = 0x1000;
+-inline constexpr uint32_t PS2_FIO_S_IFREG = 0x2000;
+-
+-static_assert((PS2_RAM_SIZE & (PS2_RAM_SIZE - 1u)) == 0u, "PS2_RAM_SIZE must be a power of two");
+-static_assert(PS2_RAM_MASK == (PS2_RAM_SIZE - 1u), "PS2_RAM_MASK must match PS2_RAM_SIZE");
++#include "runtime/ps2_memory_map.h"
+ 
+ inline std::atomic<uint8_t *> &ps2ScratchpadHostPtrStorage()
+ {
+diff --git a/ps2xRuntime/include/runtime/ps2_memory_map.h b/ps2xRuntime/include/runtime/ps2_memory_map.h
+new file mode 100644
+index 0000000..7a666f9
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_memory_map.h
+@@ -0,0 +1,63 @@
++#ifndef PS2_MEMORY_MAP_H
++#define PS2_MEMORY_MAP_H
++
++// Guest address-space constants: the part of ps2_memory.h that generated code and the
++// light game-facing headers (ps2_runtime_api.h, ps2_address.h) may see. No runtime types here.
++
++#include <cstddef>
++#include <cstdint>
++
++constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
++constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
++constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
++// Guest RAM the runtime keeps for itself: the EE kernel's area between its syscall-table mirror
++// (below 0x80000) and the usual ELF load address. Games own RAM from 0x100000 up to their stack,
++// as on hardware. Pools (see Kernel/Syscalls/Helpers/State.h) come first, callback stacks last.
++constexpr uint32_t PS2_RUNTIME_RESERVED_BASE = 0x00080000;
++constexpr uint32_t PS2_RUNTIME_CALLBACK_STACK_FLOOR = 0x000B1000;
++constexpr uint32_t PS2_RUNTIME_RESERVED_END = 0x00100000;
++constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
++constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
++constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16u * 1024u;  // 16KB
++constexpr uint32_t PS2_IO_BASE = 0x10000000;           // Base for many I/O regs (Timers, DMAC, INTC)
++constexpr uint32_t PS2_IO_SIZE = 0x10000;              // 64KB
++constexpr uint32_t PS2_BIOS_BASE = 0x1FC00000;         // Or BFC00000 depending on KSEG
++constexpr uint32_t PS2_BIOS_SIZE = 4u * 1024u * 1024u; // 4MB
++
++constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000; // Base address as seen from EE
++constexpr uint32_t PS2_VU0_DATA_BASE = 0x11004000;
++constexpr uint32_t PS2_VU0_CODE_SIZE = 4u * 1024u; // 4KB Micro Memory
++constexpr uint32_t PS2_VU0_DATA_SIZE = 4u * 1024u; // 4KB Data Memory (VU Mem)
++
++constexpr uint32_t PS2_VU1_CODE_BASE = 0x11008000;
++constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
++constexpr uint32_t PS2_VU1_MEM_BASE = PS2_VU1_CODE_BASE; // Alias used by older code paths
++constexpr uint32_t PS2_VU1_CODE_SIZE = 16u * 1024u;      // 16KB Micro Memory
++constexpr uint32_t PS2_VU1_DATA_SIZE = 16u * 1024u;      // 16KB Data Memory (VU Mem)
++
++constexpr uint32_t PS2_GS_BASE = 0x12000000;
++constexpr uint32_t PS2_GS_PRIV_REG_BASE = PS2_GS_BASE; // GS Privileged Registers
++constexpr uint32_t PS2_GS_PRIV_REG_SIZE = 0x2000;
++constexpr size_t PS2_GS_VRAM_SIZE = 4u * 1024u * 1024u; // 4MB GS VRAM
++
++inline constexpr uint32_t PS2_FIO_O_RDONLY = 0x0001;
++inline constexpr uint32_t PS2_FIO_O_WRONLY = 0x0002;
++inline constexpr uint32_t PS2_FIO_O_RDWR = 0x0003;
++inline constexpr uint32_t PS2_FIO_O_NBLOCK = 0x0010;
++inline constexpr uint32_t PS2_FIO_O_APPEND = 0x0100;
++inline constexpr uint32_t PS2_FIO_O_CREAT = 0x0200;
++inline constexpr uint32_t PS2_FIO_O_TRUNC = 0x0400;
++inline constexpr uint32_t PS2_FIO_O_EXCL = 0x0800;
++inline constexpr uint32_t PS2_FIO_O_NOWAIT = 0x8000;
++
++inline constexpr uint32_t PS2_FIO_SEEK_SET = 0;
++inline constexpr uint32_t PS2_FIO_SEEK_CUR = 1;
++inline constexpr uint32_t PS2_FIO_SEEK_END = 2;
++
++inline constexpr uint32_t PS2_FIO_S_IFDIR = 0x1000;
++inline constexpr uint32_t PS2_FIO_S_IFREG = 0x2000;
++
++static_assert((PS2_RAM_SIZE & (PS2_RAM_SIZE - 1u)) == 0u, "PS2_RAM_SIZE must be a power of two");
++static_assert(PS2_RAM_MASK == (PS2_RAM_SIZE - 1u), "PS2_RAM_MASK must match PS2_RAM_SIZE");
++
++#endif // PS2_MEMORY_MAP_H
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index ee538cc..0e67a9b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1501,49 +1501,52 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+     }
+ }
+ 
+-bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+-                                     R5900Context *ctx,
+-                                     uint32_t targetPc,
+-                                     uint32_t sourcePc,
+-                                     uint32_t fallthroughPc,
+-                                     GuestBranchKind kind,
+-                                     const char *debugName)
++// Game-facing entry points (ps2_runtime_api.h). Generated code calls these directly;
++// the PS2Runtime members of the same name are inline wrappers (ps2_runtime.h).
++bool ps2x_dispatchGuestBranch(PS2Runtime *runtime,
++                              uint8_t *rdram,
++                              R5900Context *ctx,
++                              uint32_t targetPc,
++                              uint32_t sourcePc,
++                              uint32_t fallthroughPc,
++                              Ps2GuestBranchKind kind,
++                              const char *debugName)
+ {
+     ctx->pc = targetPc;
+-    const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
++    const bool isCall = (kind == Ps2GuestBranchKind::DirectCall || kind == Ps2GuestBranchKind::IndirectCall);
+ 
+     // Every inter-function transfer is also a deterministic EE safe point.
+     // Backward edges inside generated functions use eeCheckpointDue(), while
+     // this charge bounds straight-line call chains that have no local loop.
+-    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
++    if (runtime->m_eeScheduler && runtime->m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+     {
+         return false;
+     }
+ 
+     if (!isCall)
+     {
+-        if (!hasFunction(targetPc))
++        if (!runtime->hasFunction(targetPc))
+         {
+-            reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
++            runtime->reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+         }
+ 
+         ctx->pc = targetPc;
+         return false;
+     }
+ 
+-    if (!hasFunction(targetPc))
++    if (!runtime->hasFunction(targetPc))
+     {
+-        reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
++        runtime->reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+ 
+-        const MissingFunctionPolicy policy = missingFunctionPolicy();
++        const PS2Runtime::MissingFunctionPolicy policy = runtime->missingFunctionPolicy();
+ 
+-        if (policy == MissingFunctionPolicy::SkipCallDebug && isCall)
++        if (policy == PS2Runtime::MissingFunctionPolicy::SkipCallDebug && isCall)
+         {
+             ctx->pc = fallthroughPc;
+             return true;
+         }
+ 
+-        if (policy == MissingFunctionPolicy::ContinueToTarget)
++        if (policy == PS2Runtime::MissingFunctionPolicy::ContinueToTarget)
+         {
+             ctx->pc = targetPc;
+             // if you need the app to keep open to open debug pannel change this to false
+@@ -1553,11 +1556,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    RecompiledFunction targetFn = lookupFunction(targetPc);
++    Ps2RecompiledFunction targetFn = runtime->lookupFunction(targetPc);
+     const uint32_t entryPc = ctx->pc;
+-    targetFn(rdram, ctx, this);
++    targetFn(rdram, ctx, runtime);
+ 
+-    if (isStopRequested() || ctx->pc == 0u)
++    if (runtime->isStopRequested() || ctx->pc == 0u)
+     {
+         return false;
+     }
+@@ -1570,11 +1573,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     return ctx->pc == fallthroughPc;
+ }
+ 
+-void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
++void ps2x_SignalException(PS2Runtime *runtime, R5900Context *ctx, PS2Exception exception)
+ {
+     if (exception == EXCEPTION_INTEGER_OVERFLOW)
+     {
+-        HandleIntegerOverflow(ctx);
++        runtime->HandleIntegerOverflow(ctx);
+         return;
+     }
+ 
+@@ -1582,12 +1585,12 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
+                        exception == EXCEPTION_TLB_REFILL);
+ }
+ 
+-void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
++void ps2x_executeVU0Microprogram(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t address)
+ {
+     (void)rdram;
+ 
+-    uint8_t *const vu0Code = m_memory.getVU0Code();
+-    uint8_t *const vu0Data = m_memory.getVU0Data();
++    uint8_t *const vu0Code = runtime->m_memory.getVU0Code();
++    uint8_t *const vu0Data = runtime->m_memory.getVU0Data();
+     const uint32_t startPC = address & ~0x7u;
+ 
+     if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
+@@ -1596,19 +1599,19 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+         return;
+     }
+ 
+-    m_vu0.reset();
+-    copyVu0ContextToState(ctx, m_vu0.state());
+-    m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+-                  vu0Data, PS2_VU0_DATA_SIZE,
+-                  m_gs, &m_memory,
+-                  startPC, 0u, ctx->vu0_itop, 4096);
+-    copyVu0StateToContext(m_vu0.state(), ctx);
++    runtime->m_vu0.reset();
++    copyVu0ContextToState(ctx, runtime->m_vu0.state());
++    runtime->m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
++                           vu0Data, PS2_VU0_DATA_SIZE,
++                           runtime->m_gs, &runtime->m_memory,
++                           startPC, 0u, ctx->vu0_itop, 4096);
++    copyVu0StateToContext(runtime->m_vu0.state(), ctx);
+ }
+ 
+-void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
++void ps2x_vu0StartMicroProgram(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t address)
+ {
+     // VCALLMS and VCALLMSR both route here.
+-    executeVU0Microprogram(rdram, ctx, address);
++    ps2x_executeVU0Microprogram(runtime, rdram, ctx, address);
+ }
+ 
+ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
+@@ -1616,7 +1619,7 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
+     handleSyscall(rdram, ctx, 0);
+ }
+ 
+-void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId)
++void ps2x_handleSyscall(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId)
+ {
+     if (ctx->in_delay_slot)
+     {
+@@ -1628,20 +1631,39 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
+                                    ? encodedSyscallId
+                                    : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
+ 
+-    if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
++    if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, runtime))
+     {
+         return;
+     }
+ 
+     // God help you
+-    ps2_syscalls::TODO(rdram, ctx, this, encodedSyscallId);
++    ps2_syscalls::TODO(rdram, ctx, runtime, encodedSyscallId);
+ }
+ 
+-void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
++void ps2x_handleBreak(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx)
+ {
++    (void)runtime;
++    (void)rdram;
+     raiseCop0Exception(ctx, EXCEPTION_BREAKPOINT);
+ }
+ 
++// Emitted by the recompiler for instructions Outbreak does not use; forwarded to the members.
++void ps2x_handleTrap(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx) { runtime->handleTrap(rdram, ctx); }
++void ps2x_handleTLBR(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx) { runtime->handleTLBR(rdram, ctx); }
++void ps2x_handleTLBWI(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx) { runtime->handleTLBWI(rdram, ctx); }
++void ps2x_handleTLBWR(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx) { runtime->handleTLBWR(rdram, ctx); }
++void ps2x_handleTLBP(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx) { runtime->handleTLBP(rdram, ctx); }
++void ps2x_kickGifDmaChainFromMMIO(PS2Runtime *runtime,
++                                  uint8_t *rdram,
++                                  R5900Context *ctx,
++                                  uint32_t dPcrValue,
++                                  uint32_t dStatValue,
++                                  uint32_t tadr,
++                                  uint32_t chcr)
++{
++    runtime->kickGifDmaChainFromMMIO(rdram, ctx, dPcrValue, dStatValue, tadr, chcr);
++}
++
+ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
+ {
+     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
+@@ -1738,7 +1760,7 @@ void PS2Runtime::handleTLBP(uint8_t *rdram, R5900Context *ctx)
+     }
+ }
+ 
+-void PS2Runtime::clearLLBit(R5900Context *ctx)
++void ps2x_clearLLBit(PS2Runtime *runtime, R5900Context *ctx)
+ {
+     // LL/SC reservation is tracked separately from COP0 Status.
+     ctx->llbit = 0;
+@@ -2170,136 +2192,136 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
+     return top - 0x10u;
+ }
+ 
+-uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
++uint8_t ps2x_Load8(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
+     try
+     {
+-        return m_memory.read8(vaddr);
++        return runtime->m_memory.read8(vaddr);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+ }
+ 
+-uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
++uint16_t ps2x_Load16(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
+     try
+     {
+-        return m_memory.read16(vaddr);
++        return runtime->m_memory.read16(vaddr);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+ }
+ 
+-uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
++uint32_t ps2x_Load32(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
+     try
+     {
+-        return m_memory.read32(vaddr);
++        return runtime->m_memory.read32(vaddr);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+ }
+ 
+-uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
++uint64_t ps2x_Load64(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
+     try
+     {
+-        return m_memory.read64(vaddr);
++        return runtime->m_memory.read64(vaddr);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return 0;
+     }
+ }
+ 
+-__m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
++__m128i ps2x_Load128(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
+ {
+     try
+     {
+-        return m_memory.read128(vaddr);
++        return runtime->m_memory.read128(vaddr);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
+         return _mm_setzero_si128();
+     }
+ }
+ 
+-void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
++void ps2x_Store8(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
+     try
+     {
+-        m_memory.write8(vaddr, value);
++        runtime->m_memory.write8(vaddr, value);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+ 
+-void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
++void ps2x_Store16(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
+     try
+     {
+-        m_memory.write16(vaddr, value);
++        runtime->m_memory.write16(vaddr, value);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+ 
+-void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
++void ps2x_Store32(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
+     try
+     {
+-        m_memory.write32(vaddr, value);
+-        drainCompletedDmacHandlers(rdram);
++        runtime->m_memory.write32(vaddr, value);
++        runtime->drainCompletedDmacHandlers(rdram);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+ 
+-void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
++void ps2x_Store64(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
+ {
+     ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
+     try
+     {
+-        m_memory.write64(vaddr, value);
++        runtime->m_memory.write64(vaddr, value);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+ 
+-void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
++void ps2x_Store128(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
+ {
+     alignas(16) uint64_t _parts[2];
+     _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
+     ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);
+     try
+     {
+-        m_memory.write128(vaddr, value);
++        runtime->m_memory.write128(vaddr, value);
+     }
+     catch (const std::exception &)
+     {
+-        SignalException(ctx, EXCEPTION_ADDRESS_ERROR_STORE);
++        ps2x_SignalException(runtime, ctx, EXCEPTION_ADDRESS_ERROR_STORE);
+     }
+ }
+ 
+@@ -2368,9 +2390,9 @@ void PS2Runtime::postEeEvent(EeEvent event)
+     m_eeScheduler->postEvent(event);
+ }
+ 
+-bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
++bool ps2x_eeCheckpointDue(PS2Runtime *runtime, uint32_t cycles) noexcept
+ {
+-    return m_eeScheduler->checkpointDue(cycles);
++    return runtime->m_eeScheduler->checkpointDue(cycles);
+ }
+ 
+ [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 8bb206b..182c779 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -41,10 +41,13 @@ add_library(ps2_test_lib STATIC
+     src/ps2_frame_dump_tests.cpp
+     src/ps2_input_script_tests.cpp
+     src/ps2_gs_external_tests.cpp
++    src/ps2_runtime_api_tests.cpp
++    src/ps2_runtime_api_support.cpp
+ )
+ 
+ target_compile_definitions(ps2_test_lib PRIVATE
+     PS2X_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}"
++    PS2X_RUNTIME_SOURCE_DIR="${CMAKE_SOURCE_DIR}/ps2xRuntime"
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 92f5804..492e624 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -238,7 +238,7 @@ void register_code_generator_tests()
+         CodeGenerator gen({}, {});
+         const std::string generated = gen.generateFunction(func, {syscall, after}, false);
+         const size_t continuation = generated.find("ctx->pc = 0x9004u;");
+-        const size_t dispatch = generated.find("runtime->handleSyscall(rdram, ctx, 0x44u);");
++        const size_t dispatch = generated.find("ps2x_handleSyscall(runtime, rdram, ctx, 0x44u);");
+ 
+         t.IsTrue(continuation != std::string::npos,
+                  "generated syscall must publish the next guest PC");
+@@ -248,6 +248,22 @@ void register_code_generator_tests()
+                  "the continuation PC must be visible before a syscall can transfer to the scheduler");
+     });
+ 
++    tc.Run("a generated source includes the game-facing API, not the runtime's internals", [](TestCase &t) {
++        Function func;
++        func.name = "api_include";
++        func.start = 0x9100;
++        func.end = 0x9104;
++        func.isRecompiled = true;
++
++        CodeGenerator gen({}, {});
++        const std::string generated = gen.generateFunction(func, {makeNop(0x9100)}, true);
++
++        t.IsTrue(generated.find("#include \"ps2_runtime_api.h\"") != std::string::npos,
++                 "generated code includes ps2_runtime_api.h");
++        t.IsTrue(generated.find("#include \"ps2_runtime.h\"") == std::string::npos,
++                 "generated code must not include ps2_runtime.h, or every runtime change rebuilds the game");
++    });
++
+     tc.Run("SYSCALL fallthrough is a resumable entry", [](TestCase &t) {
+         Function func;
+         func.name = "syscall_resume_entry";
+@@ -340,7 +356,7 @@ void register_code_generator_tests()
+         std::string generated = gen.generateFunction(func, instructions, false);
+         printGeneratedCode("constant MMIO store emits direct runtime store", generated);
+ 
+-        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000E020u, GPR_U32(ctx, 2));") != std::string::npos,
++        t.IsTrue(generated.find("ps2x_Store32(runtime, rdram, ctx, 0x1000E020u, GPR_U32(ctx, 2));") != std::string::npos,
+                  "constant MMIO SW should emit a direct runtime Store32");
+         t.IsTrue(generated.find("WRITE32(ADD32(GPR_U32(ctx, 1)") == std::string::npos,
+                  "constant MMIO SW should not go through WRITE32 address classification");
+@@ -355,7 +371,7 @@ void register_code_generator_tests()
+         const std::string generated = gen.translateInstruction(store);
+         printGeneratedCode("stale MMIO annotation does not replace the guest effective address", generated);
+ 
+-        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, ADD32(GPR_U32(ctx, 1), 0), GPR_U32(ctx, 2))") != std::string::npos,
++        t.IsTrue(generated.find("ps2x_Store32(runtime, rdram, ctx, ADD32(GPR_U32(ctx, 1), 0), GPR_U32(ctx, 2))") != std::string::npos,
+                  "MMIO annotations should select runtime access without hard-coding a possibly stale address");
+         t.IsTrue(generated.find("0x10000000u") == std::string::npos,
+                  "stale MMIO address should not replace the address calculated by guest registers");
+@@ -416,11 +432,11 @@ void register_code_generator_tests()
+ 
+         t.IsTrue(generated.find("uint32_t gifDmaKickValue_3024_2 = GPR_U32(ctx, 4);") != std::string::npos,
+                  "dynamic GIF TADR source should be captured when the store is coalesced");
+-        t.IsTrue(generated.find("runtime->kickGifDmaChainFromMMIO(rdram, ctx, 0x4u, 0x4u, gifDmaKickValue_3024_2, 0x105u);") != std::string::npos,
++        t.IsTrue(generated.find("ps2x_kickGifDmaChainFromMMIO(runtime, rdram, ctx, 0x4u, 0x4u, gifDmaKickValue_3024_2, 0x105u);") != std::string::npos,
+                  "known GIF DMA MMIO stores should coalesce into the native kick helper");
+-        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000E020u") == std::string::npos,
++        t.IsTrue(generated.find("ps2x_Store32(runtime, rdram, ctx, 0x1000E020u") == std::string::npos,
+                  "coalesced D_PCR store should not remain as an individual Store32");
+-        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000A000u") == std::string::npos,
++        t.IsTrue(generated.find("ps2x_Store32(runtime, rdram, ctx, 0x1000A000u") == std::string::npos,
+                  "coalesced GIF CHCR store should not remain as an individual Store32");
+     });
+ 
+@@ -457,7 +473,7 @@ void register_code_generator_tests()
+                  "TADR value should be captured before a0 is reused for CHCR");
+         t.IsTrue(generated.find("ctx->in_delay_slot = true;") != std::string::npos,
+                  "coalesced helper should still run as the return delay slot");
+-        t.IsTrue(generated.find("runtime->kickGifDmaChainFromMMIO(rdram, ctx, 0x4u, 0x4u, gifDmaKickValue_2e7cb4_2, 0x105u);") != std::string::npos,
++        t.IsTrue(generated.find("ps2x_kickGifDmaChainFromMMIO(runtime, rdram, ctx, 0x4u, 0x4u, gifDmaKickValue_2e7cb4_2, 0x105u);") != std::string::npos,
+                  "loadImage-like GIF DMA stores should coalesce into the native kick helper");
+         t.IsTrue(generated.find("WRITE32(ADD32(GPR_U32(ctx, 3), 0), GPR_U32(ctx, 4));") == std::string::npos,
+                  "coalesced delay-slot CHCR store should not remain as an individual WRITE32");
+@@ -1596,9 +1612,9 @@ void register_code_generator_tests()
+             // runtime->dispatchGuestBranch(..., DirectCall, "JAL")
+ 
+             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA008u);") != std::string::npos, "JAL should set RA");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, 0xB000u") != std::string::npos,
++            t.IsTrue(generated.find("ps2x_dispatchGuestBranch(runtime, rdram, ctx, 0xB000u") != std::string::npos,
+                      "JAL should dispatch through the runtime branch helper");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::DirectCall") != std::string::npos,
++            t.IsTrue(generated.find("Ps2GuestBranchKind::DirectCall") != std::string::npos,
+                      "JAL should identify itself as a direct call");
+             t.IsTrue(generated.find("0xA000u, 0xA008u") != std::string::npos,
+                      "JAL should pass call-site and fallthrough PCs to the runtime helper");
+@@ -1654,7 +1670,7 @@ void register_code_generator_tests()
+ 
+             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA108u);") != std::string::npos,
+                      "truncated trailing JAL should still set RA");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, 0xB000u") != std::string::npos,
++            t.IsTrue(generated.find("ps2x_dispatchGuestBranch(runtime, rdram, ctx, 0xB000u") != std::string::npos,
+                      "truncated trailing JAL should still emit the call dispatch");
+             t.IsTrue(generated.find("0xA100u, 0xA108u") != std::string::npos,
+                      "truncated trailing JAL should still pass the fallthrough to runtime dispatch");
+@@ -1729,8 +1745,8 @@ void register_code_generator_tests()
+ 
+             t.IsTrue(generated.find("const uint32_t jumpTarget = GPR_U32(ctx, 4);") != std::string::npos, "JALR should read target from RS");
+             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xD008u);") != std::string::npos, "JALR should set link register");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, jumpTarget") != std::string::npos, "JALR should dispatch through runtime branch helper");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectCall") != std::string::npos,
++            t.IsTrue(generated.find("ps2x_dispatchGuestBranch(runtime, rdram, ctx, jumpTarget") != std::string::npos, "JALR should dispatch through runtime branch helper");
++            t.IsTrue(generated.find("Ps2GuestBranchKind::IndirectCall") != std::string::npos,
+                      "JALR should identify itself as an indirect call");
+             t.IsTrue(generated.find("0xD000u, 0xD008u") != std::string::npos,
+                      "JALR should pass call-site and fallthrough PCs to the runtime helper");
+@@ -1776,7 +1792,7 @@ void register_code_generator_tests()
+                      "mid-function backward loop head should be re-enterable after returning to the dispatcher");
+             t.IsTrue(generated.find("ctx->pc = 0x1104u;") != std::string::npos,
+                      "backward internal branch should preserve the loop target in ctx->pc");
+-            t.IsTrue(generated.find("if (runtime->eeCheckpointDue()) {") != std::string::npos,
++            t.IsTrue(generated.find("if (ps2x_eeCheckpointDue(runtime)) {") != std::string::npos,
+                      "backward internal branch should consult the EE event checkpoint before re-entering the loop");
+             t.IsTrue(generated.find("return;") != std::string::npos,
+                      "backward internal branch should return to the dispatcher when the runtime preemption policy requests it");
+@@ -1852,7 +1868,7 @@ void register_code_generator_tests()
+                      "internal JAL return address should still be emitted as a label");
+             t.IsTrue(generated.find("        return;") != std::string::npos,
+                      "JR $31 should return to the dispatcher/runtime after setting ctx->pc");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
++            t.IsTrue(generated.find("Ps2GuestBranchKind::Return") != std::string::npos,
+                      "JR $31 should use the Return branch kind for precise diagnostics");
+             t.IsTrue(generated.find("\"JR $ra\"") != std::string::npos,
+                      "JR $31 should pass a return-specific debug name");
+@@ -1884,7 +1900,7 @@ void register_code_generator_tests()
+                      "truncated trailing JR should still include the internal return label");
+             t.IsTrue(generated.find("// JR $31 - Handled by branch logic") == std::string::npos,
+                      "truncated trailing JR must not degrade to comment-only output");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
++            t.IsTrue(generated.find("Ps2GuestBranchKind::Return") != std::string::npos,
+                      "truncated JR $31 should still use return diagnostics");
+         });
+ 
+@@ -1921,7 +1937,7 @@ void register_code_generator_tests()
+                      "owner resume switch should include internal fallback labels");
+             t.IsTrue(generated.find("ctx->pc = jumpTarget;") != std::string::npos,
+                      "unresolved JR should hand the dynamic target back through ctx->pc");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectJump") != std::string::npos,
++            t.IsTrue(generated.find("Ps2GuestBranchKind::IndirectJump") != std::string::npos,
+                      "unresolved non-RA JR should use indirect-jump diagnostics");
+         });
+ 
+@@ -2036,9 +2052,9 @@ void register_code_generator_tests()
+ 
+             t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
+                       "unresolved JALR should not emit a broad local switch over every internal label");
+-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, jumpTarget") != std::string::npos,
++            t.IsTrue(generated.find("ps2x_dispatchGuestBranch(runtime, rdram, ctx, jumpTarget") != std::string::npos,
+                      "unresolved JALR should dispatch through the runtime branch helper");
+-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectCall") != std::string::npos,
++            t.IsTrue(generated.find("Ps2GuestBranchKind::IndirectCall") != std::string::npos,
+                      "JALR should retain indirect-call dispatch kind");
+             t.IsTrue(generated.find("0x1514u, 0x151Cu") != std::string::npos,
+                      "JALR should pass call-site and fallthrough PCs to runtime dispatch");
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index e7db4e1..44b4b0b 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -22,6 +22,7 @@ void register_ps2_float_semantics_tests();
+ void register_ps2_frame_dump_tests();
+ void register_ps2_input_script_tests();
+ void register_ps2_gs_external_tests();
++void register_ps2_runtime_api_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -48,6 +49,7 @@ int main()
+     register_ps2_frame_dump_tests();
+     register_ps2_input_script_tests();
+     register_ps2_gs_external_tests();
++    register_ps2_runtime_api_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_runtime_api_support.cpp b/ps2xTest/src/ps2_runtime_api_support.cpp
+new file mode 100644
+index 0000000..6f54ec3
+--- /dev/null
++++ b/ps2xTest/src/ps2_runtime_api_support.cpp
+@@ -0,0 +1,27 @@
++// Support for ps2_runtime_api_tests.cpp: that file sees only the game-facing API, where
++// PS2Runtime is incomplete, so the runtime is created and set up here.
++#include "ps2_runtime.h"
++#include "runtime/ps2_memory.h"
++
++PS2Runtime *ps2ApiTestRuntimeCreate()
++{
++    auto *runtime = new PS2Runtime();
++    runtime->memory().initialize();
++    runtime->syncCoreSubsystems();
++    return runtime;
++}
++
++void ps2ApiTestRuntimeDestroy(PS2Runtime *runtime)
++{
++    delete runtime;
++}
++
++uint8_t *ps2ApiTestRuntimeRdram(PS2Runtime *runtime)
++{
++    return runtime->memory().getRDRAM();
++}
++
++void ps2ApiTestRegisterFunction(PS2Runtime *runtime, uint32_t address, Ps2RecompiledFunction fn)
++{
++    runtime->registerFunction(address, fn);
++}
+diff --git a/ps2xTest/src/ps2_runtime_api_tests.cpp b/ps2xTest/src/ps2_runtime_api_tests.cpp
+new file mode 100644
+index 0000000..85289df
+--- /dev/null
++++ b/ps2xTest/src/ps2_runtime_api_tests.cpp
+@@ -0,0 +1,272 @@
++// The game-facing runtime API (ps2_runtime_api.h), exercised the way generated code
++// uses it. This translation unit includes exactly what a generated source includes
++// (the API header and the macros) and nothing from the runtime's internals: with
++// ps2_runtime.h it would compile anyway, so this file is the test that the API
++// header is self-sufficient. PS2Runtime stays incomplete here; the support file
++// (ps2_runtime_api_support.cpp) creates the runtime behind a pointer.
++#include "MiniTest.h"
++#include "ps2_runtime_api.h"
++#include "ps2_runtime_macros.h"
++
++#include <cstdint>
++#include <cstring>
++#include <exception>
++#include <filesystem>
++#include <fstream>
++#include <set>
++#include <string>
++#include <vector>
++
++// ps2_runtime_api_support.cpp (sees the full runtime).
++PS2Runtime *ps2ApiTestRuntimeCreate();
++void ps2ApiTestRuntimeDestroy(PS2Runtime *runtime);
++uint8_t *ps2ApiTestRuntimeRdram(PS2Runtime *runtime);
++void ps2ApiTestRegisterFunction(PS2Runtime *runtime, uint32_t address, Ps2RecompiledFunction fn);
++
++namespace
++{
++    constexpr uint32_t kCalleeAddress = 0x00003000u;
++    constexpr uint32_t kCallerPc = 0x00002000u;
++    constexpr uint32_t kFallthroughPc = 0x00002008u;
++
++    bool g_calleeRan = false;
++
++    // A recompiled callee that returns normally: pc stays at its entry, which the
++    // dispatcher converts to the caller's fallthrough.
++    void apiTestCallee(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        (void)rdram;
++        (void)runtime;
++        g_calleeRan = true;
++        SET_GPR_U32(ctx, 2, 0x00ABCDEFu);
++    }
++
++    uint32_t exceptionCode(const R5900Context &ctx)
++    {
++        return (ctx.cop0_cause >> 2) & 0x1Fu;
++    }
++
++    // Every quoted include reachable from `header`, resolved against the include paths a
++    // generated source sees (relative to ps2xRuntime/), as paths relative to the root that
++    // resolved them ("runtime/ps2_address.h").
++    std::set<std::string> runtimeIncludeClosure(const std::vector<std::string> &headers)
++    {
++        const std::filesystem::path runtimeDir(PS2X_RUNTIME_SOURCE_DIR);
++        const std::filesystem::path roots[] = {runtimeDir / "include", runtimeDir / "src/lib", runtimeDir / "src/lib/Kernel"};
++        std::set<std::string> seen;
++        std::vector<std::string> pending(headers);
++        while (!pending.empty())
++        {
++            const std::string current = pending.back();
++            pending.pop_back();
++            if (!seen.insert(current).second)
++                continue;
++            for (const std::filesystem::path &root : roots)
++            {
++                std::ifstream in(root / current);
++                if (!in)
++                    continue;
++                std::string line;
++                while (std::getline(in, line))
++                {
++                    const size_t hash = line.find_first_not_of(" \t");
++                    if (hash == std::string::npos || line.compare(hash, 8, "#include") != 0)
++                        continue;
++                    const size_t open = line.find('"', hash);
++                    const size_t close = open == std::string::npos ? open : line.find('"', open + 1);
++                    if (close != std::string::npos)
++                        pending.push_back(line.substr(open + 1, close - open - 1));
++                }
++                break;
++            }
++        }
++        return seen;
++    }
++
++    struct ApiRuntime
++    {
++        PS2Runtime *runtime = nullptr;
++        uint8_t *rdram = nullptr;
++        R5900Context ctx{};
++
++        ApiRuntime()
++        {
++            runtime = ps2ApiTestRuntimeCreate();
++            rdram = ps2ApiTestRuntimeRdram(runtime);
++        }
++        ~ApiRuntime()
++        {
++            ps2ApiTestRuntimeDestroy(runtime);
++        }
++        ApiRuntime(const ApiRuntime &) = delete;
++        ApiRuntime &operator=(const ApiRuntime &) = delete;
++    };
++}
++
++void register_ps2_runtime_api_tests()
++{
++    MiniTest::Case("PS2RuntimeApi", [](TestCase &tc)
++    {
++        tc.Run("what generated code includes reaches no runtime-internal header", [](TestCase &t)
++        {
++            // The runtime headers function_emitter.cpp writes into every generated source.
++            const std::set<std::string> closure = runtimeIncludeClosure(
++                {"ps2_runtime_macros.h", "ps2_runtime_api.h", "ps2_syscalls.h", "ps2_stubs.h", "ps2_log.h"});
++
++            t.IsTrue(closure.count("runtime/ps2_address.h") == 1u && closure.count("Stubs/Unimplemented.h") == 1u,
++                     "the walk follows includes into runtime/ and Kernel/");
++            for (const std::string &header : closure)
++            {
++                const bool internal = header == "ps2_runtime.h" ||
++                                      (header.rfind("runtime/", 0) == 0 && header != "runtime/ps2_memory_map.h" &&
++                                       header != "runtime/ps2_address.h");
++                t.IsFalse(internal, "generated code must not include " + header);
++            }
++        });
++
++        tc.Run("dispatchGuestBranch runs a registered callee and resumes at the fallthrough", [](TestCase &t)
++        {
++            ApiRuntime r;
++            ps2ApiTestRegisterFunction(r.runtime, kCalleeAddress, &apiTestCallee);
++            g_calleeRan = false;
++            r.ctx.pc = kCallerPc;
++
++            const bool resumed = ps2x_dispatchGuestBranch(r.runtime, r.rdram, &r.ctx, kCalleeAddress, kCallerPc, kFallthroughPc,
++                                                          Ps2GuestBranchKind::DirectCall, "JAL");
++
++            t.IsTrue(g_calleeRan, "the callee runs");
++            t.IsTrue(resumed, "a call that returns resumes at the fallthrough");
++            t.Equals(r.ctx.pc, kFallthroughPc, "pc is the fallthrough");
++            const R5900Context *ctx = &r.ctx;
++            t.Equals(GPR_U32(ctx, 2), 0x00ABCDEFu, "the callee's register writes are visible");
++        });
++
++        tc.Run("eeCheckpointDue on a fresh scheduler is not due", [](TestCase &t)
++        {
++            ApiRuntime r;
++            t.IsFalse(ps2x_eeCheckpointDue(r.runtime), "default charge: nothing pending");
++            t.IsFalse(ps2x_eeCheckpointDue(r.runtime, 8u), "explicit charge: nothing pending");
++        });
++
++        tc.Run("handleSyscall refuses a delay slot", [](TestCase &t)
++        {
++            ApiRuntime r;
++            r.ctx.in_delay_slot = true;
++            bool threw = false;
++            try
++            {
++                ps2x_handleSyscall(r.runtime, r.rdram, &r.ctx, 0x3Cu);
++            }
++            catch (const std::exception &)
++            {
++                threw = true;
++            }
++            t.IsTrue(threw, "a syscall in a delay slot throws");
++        });
++
++        tc.Run("handleBreak, SignalException and handleTrap raise COP0 exceptions", [](TestCase &t)
++        {
++            ApiRuntime r;
++            r.ctx.pc = 0x00004000u;
++            r.ctx.cop0_status = 0u;
++            r.ctx.cop0_cause = 0u;
++            ps2x_handleBreak(r.runtime, r.rdram, &r.ctx);
++            t.Equals(r.ctx.cop0_epc, 0x00004000u, "BREAK: EPC is the faulting pc");
++            t.Equals(exceptionCode(r.ctx), static_cast<uint32_t>(EXCEPTION_BREAKPOINT), "BREAK: cause code 9");
++            t.IsTrue((r.ctx.cop0_status & 0x2u) != 0u, "BREAK: STATUS.EXL set");
++
++            r.ctx = R5900Context{};
++            r.ctx.pc = 0x00004010u;
++            r.ctx.cop0_status = 0u;
++            ps2x_SignalException(r.runtime, &r.ctx, EXCEPTION_ADDRESS_ERROR_LOAD);
++            t.Equals(r.ctx.cop0_epc, 0x00004010u, "SignalException: EPC is the faulting pc");
++            t.Equals(exceptionCode(r.ctx), static_cast<uint32_t>(EXCEPTION_ADDRESS_ERROR_LOAD), "SignalException: cause code 4");
++
++            r.ctx = R5900Context{};
++            r.ctx.pc = 0x00004020u;
++            r.ctx.cop0_status = 0u;
++            ps2x_handleTrap(r.runtime, r.rdram, &r.ctx);
++            t.Equals(exceptionCode(r.ctx), static_cast<uint32_t>(EXCEPTION_TRAP), "handleTrap: cause code 13");
++        });
++
++        tc.Run("clearLLBit clears the LL/SC reservation", [](TestCase &t)
++        {
++            ApiRuntime r;
++            r.ctx.llbit = 1u;
++            r.ctx.lladdr = 0x00001234u;
++            ps2x_clearLLBit(r.runtime, &r.ctx);
++            t.Equals(r.ctx.llbit, 0u, "llbit cleared");
++            t.Equals(r.ctx.lladdr, 0u, "lladdr cleared");
++        });
++
++        tc.Run("Store and Load of every width go through the runtime's memory", [](TestCase &t)
++        {
++            ApiRuntime r;
++            const uint32_t base = 0x00123450u;
++            ps2x_Store8(r.runtime, r.rdram, &r.ctx, base + 0x00u, 0xA5u);
++            ps2x_Store16(r.runtime, r.rdram, &r.ctx, base + 0x10u, 0xBEEFu);
++            ps2x_Store32(r.runtime, r.rdram, &r.ctx, base + 0x20u, 0xCAFEBABEu);
++            ps2x_Store64(r.runtime, r.rdram, &r.ctx, base + 0x30u, 0x0123456789ABCDEFull);
++            ps2x_Store128(r.runtime, r.rdram, &r.ctx, base + 0x40u, _mm_set_epi32(4, 3, 2, 1));
++
++            t.Equals(ps2x_Load8(r.runtime, r.rdram, &r.ctx, base + 0x00u), static_cast<uint8_t>(0xA5u), "8-bit round trip");
++            t.Equals(ps2x_Load16(r.runtime, r.rdram, &r.ctx, base + 0x10u), static_cast<uint16_t>(0xBEEFu), "16-bit round trip");
++            t.Equals(ps2x_Load32(r.runtime, r.rdram, &r.ctx, base + 0x20u), 0xCAFEBABEu, "32-bit round trip");
++            t.Equals(ps2x_Load64(r.runtime, r.rdram, &r.ctx, base + 0x30u), 0x0123456789ABCDEFull, "64-bit round trip");
++            alignas(16) uint32_t lanes[4] = {};
++            _mm_storeu_si128(reinterpret_cast<__m128i *>(lanes), ps2x_Load128(r.runtime, r.rdram, &r.ctx, base + 0x40u));
++            t.IsTrue(lanes[0] == 1u && lanes[1] == 2u && lanes[2] == 3u && lanes[3] == 4u, "128-bit round trip");
++
++            uint32_t raw = 0u;
++            std::memcpy(&raw, r.rdram + (base + 0x20u), sizeof(raw));
++            t.Equals(raw, 0xCAFEBABEu, "a store lands in RDRAM where generated code's fast path reads it");
++        });
++
++        tc.Run("READ/WRITE macros take the fast path in RDRAM and the runtime path for special addresses", [](TestCase &t)
++        {
++            ApiRuntime r;
++            // The macros expand against these three names, as in generated code.
++            PS2Runtime *runtime = r.runtime;
++            uint8_t *rdram = r.rdram;
++            R5900Context *ctx = &r.ctx;
++
++            WRITE32(0x00200000u, 0x11223344u);
++            t.Equals(READ32(0x00200000u), 0x11223344u, "RDRAM: fast path round trip");
++            t.Equals(FAST_READ32(0x00200000u), 0x11223344u, "RDRAM: the fast path sees the write");
++
++            const uint32_t scratch = PS2_SCRATCHPAD_BASE + 0x10u;
++            t.IsTrue(Ps2IsSpecialAddress(scratch), "the scratchpad is a special address");
++            WRITE32(scratch, 0x55667788u);
++            t.Equals(READ32(scratch), 0x55667788u, "scratchpad: runtime path round trip");
++            t.Equals(ps2x_Load32(runtime, rdram, ctx, scratch), 0x55667788u, "scratchpad: the runtime sees the macro's write");
++
++            WRITE64(0x00200010u, 0x8877665544332211ull);
++            t.Equals(READ64(0x00200010u), 0x8877665544332211ull, "RDRAM: 64-bit round trip");
++            WRITE8(0x00200020u, 0x7Fu);
++            t.Equals(static_cast<uint32_t>(READ8(0x00200020u)), 0x7Fu, "RDRAM: 8-bit round trip");
++        });
++
++        tc.Run("vu0StartMicroProgram outside VU0 code memory seeds the idle result", [](TestCase &t)
++        {
++            ApiRuntime r;
++            r.ctx.vu0_q = 5.0f;
++            r.ctx.vu0_status = 0xFFFFu;
++            ps2x_vu0StartMicroProgram(r.runtime, r.rdram, &r.ctx, PS2_VU0_CODE_SIZE);
++            t.IsTrue(r.ctx.vu0_q == 1.0f, "Q reset to 1.0");
++            t.Equals(r.ctx.vu0_status, static_cast<uint16_t>(0u), "status cleared");
++
++            r.ctx.vu0_q = 5.0f;
++            ps2x_executeVU0Microprogram(r.runtime, r.rdram, &r.ctx, PS2_VU0_CODE_SIZE);
++            t.IsTrue(r.ctx.vu0_q == 1.0f, "executeVU0Microprogram takes the same path");
++        });
++
++        tc.Run("the function table types spell the same as the runtime's", [](TestCase &t)
++        {
++            static Ps2RecompiledFunction table[2] = {};
++            table[0] = &apiTestCallee;
++            t.IsNotNull(reinterpret_cast<const void *>(table[0]), "a Ps2RecompiledFunction holds a generated function");
++            t.IsTrue(g_ps2RecompiledFunctionTableSlotCount == ((g_ps2RecompiledFunctionTableEnd - g_ps2RecompiledFunctionTableBase) >> 2),
++                     "the generated table globals are visible through the API header");
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+
