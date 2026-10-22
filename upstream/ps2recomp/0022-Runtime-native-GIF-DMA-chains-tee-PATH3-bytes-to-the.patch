@@ -1,0 +1,252 @@
+From 81bc8f82f0b218c6a2748aaef4cf2b539e966ef5 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 08:55:03 -0400
+Subject: [PATCH] Runtime: native GIF DMA chains tee PATH3 bytes to the
+ external GS; latch packed external frames
+
+---
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp |  18 +++-
+ ps2xRuntime/src/lib/ps2_memory.cpp     |  10 ++
+ ps2xRuntime/src/lib/ps2_runtime.cpp    |   9 +-
+ ps2xTest/src/ps2_gs_external_tests.cpp | 121 ++++++++++++++++++++++++-
+ 4 files changed, 144 insertions(+), 14 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 49ca23b..cbb16b7 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -532,15 +532,23 @@ void GS::latchHostPresentationFrame()
+ {
+     if (ps2ExternalGS())
+     {
+-        // An external GS presents: latch the frame it last published.
++        // An external GS presents: latch the frame it last published. Its rows are
++        // packed; the latched frame keeps the CPU backend's kHostFrameWidth row stride.
+         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+-        m_hostPresentationFrame = m_externalFrame.pixels;
+-        m_hostPresentationWidth = m_externalFrame.width;
+-        m_hostPresentationHeight = m_externalFrame.height;
++        const PresentationFrame &ext = m_externalFrame;
++        const bool hasExt = static_cast<bool>(ext) && ext.pixels.size() >= static_cast<size_t>(ext.width) * ext.height * 4u;
++        const uint32_t width = hasExt ? std::min<uint32_t>(ext.width, kHostFrameWidth) : 0u;
++        const uint32_t height = hasExt ? ext.height : 0u;
++        m_hostPresentationFrame.assign(static_cast<size_t>(kHostFrameWidth) * height * 4u, 0u);
++        for (uint32_t y = 0; y < height; ++y)
++            std::memcpy(m_hostPresentationFrame.data() + static_cast<size_t>(y) * kHostFrameWidth * 4u,
++                        ext.pixels.data() + static_cast<size_t>(y) * ext.width * 4u, static_cast<size_t>(width) * 4u);
++        m_hostPresentationWidth = width;
++        m_hostPresentationHeight = height;
+         m_hostPresentationDisplayFbp = m_externalFrame.displayFbp;
+         m_hostPresentationSourceFbp = m_externalFrame.sourceFbp;
+         m_hostPresentationUsedPreferred = m_externalFrame.usedPreferred;
+-        m_hasHostPresentationFrame = static_cast<bool>(m_externalFrame);
++        m_hasHostPresentationFrame = hasExt;
+         return;
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 4f68b47..0631803 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2198,6 +2198,13 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
+     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     m_seenGifCopy = true;
+     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
++    if (PS2ExternalGS *const externalGS = ps2ExternalGS())
++    {
++        // The GIF stream of this chain, in order: setup tag + 4 regs, IMAGE tag, image data.
++        externalGS->gifPacket(GifPathId::Path3, setupPayload, 5u * 16u);
++        externalGS->gifPacket(GifPathId::Path3, imageGifTag, 16u);
++        externalGS->gifPacket(GifPathId::Path3, imageData, imageBytes);
++    }
+     gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
+ 
+     m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
+@@ -2275,6 +2282,9 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
+         return false;
+     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
+         return false;
++    // After the CPU GS accepted it: a rejected packet falls back to the arbiter, which tees it there.
++    if (PS2ExternalGS *const externalGS = ps2ExternalGS())
++        externalGS->gifPacket(GifPathId::Path3, payload, payloadBytes);
+ 
+     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     m_seenGifCopy = true;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index e5f8516..b728659 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2310,15 +2310,14 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
+     ps2TraceGuestWrite(rdram, GIF_TADR, 4u, tadr, 0u, "WRITE32", ctx);
+     m_memory.writeIORegister(GIF_TADR, tadr);
+     ps2TraceGuestWrite(rdram, GIF_CHCR, 4u, chcr, 0u, "WRITE32", ctx);
+-    // The native chains feed the CPU GS directly, past the arbiter; an
+-    // external GS sees only arbiter packets, so they are skipped for it.
+-    const bool nativeGifChains = ps2ExternalGS() == nullptr;
+-    if (nativeGifChains && m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
++    // The native chains feed the CPU GS directly, past the arbiter; they tee
++    // their GIF bytes to an external GS themselves (PATH3).
++    if (m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
+     {
+         drainCompletedDmacHandlers(rdram);
+         return;
+     }
+-    if (nativeGifChains && m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
++    if (m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
+     {
+         drainCompletedDmacHandlers(rdram);
+         return;
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index 7b4c05b..e24affb 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -50,9 +50,9 @@ namespace
+         bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
+         {
+             events.push_back({'s', 0u, 0u, 0u, {}});
+-            rgba = {1u, 2u, 3u, 255u, 4u, 5u, 6u, 255u};
++            rgba = {1u, 2u, 3u, 255u, 4u, 5u, 6u, 255u, 7u, 8u, 9u, 255u, 10u, 11u, 12u, 255u}; // packed rows
+             width = 2u;
+-            height = 1u;
++            height = 2u;
+             return true;
+         }
+     };
+@@ -99,6 +99,81 @@ namespace
+         ctx->pc = 0u;
+         runtime->requestStop();
+     }
++
++    constexpr uint32_t kGifChcr = 0x1000A000u;
++    constexpr uint32_t kGifTadr = 0x1000A030u;
++    constexpr uint32_t kDStat = 0x1000E010u;
++    constexpr uint32_t kImageChain = 0x00028000u;
++    constexpr uint32_t kImagePixels = 0x00029000u;
++    constexpr uint32_t kImageQwc = 2u;
++    constexpr uint32_t kPackedChain = 0x00030000u;
++
++    void put64(uint8_t *rdram, uint32_t addr, uint64_t lo, uint64_t hi)
++    {
++        std::memcpy(rdram + addr, &lo, 8u);
++        std::memcpy(rdram + addr + 8u, &hi, 8u);
++    }
++
++    uint64_t dmaTag(uint32_t qwc, uint32_t id, uint32_t addr)
++    {
++        return static_cast<uint64_t>(qwc) | (static_cast<uint64_t>(id) << 28) | (static_cast<uint64_t>(addr) << 32);
++    }
++
++    // Canonical load-image chain (CNT setup, CNT IMAGE tag, REF pixels, END) and a PACKED A+D chain (END + packet).
++    void writeNativeGifChains(uint8_t *rdram)
++    {
++        uint32_t a = kImageChain;
++        put64(rdram, a, dmaTag(5u, 1u, 0u), 0u), a += 16u;
++        put64(rdram, a, 4ull | (1ull << 60), 0xEull), a += 16u;                 // NLOOP 4 PACKED A+D
++        put64(rdram, a, (1ull << 48), 0x50u), a += 16u;                          // BITBLTBUF DBW 1 CT32
++        put64(rdram, a, 0u, 0x51u), a += 16u;                                    // TRXPOS
++        put64(rdram, a, 8ull | (1ull << 32), 0x52u), a += 16u;                   // TRXREG 8x1
++        put64(rdram, a, 0u, 0x53u), a += 16u;                                    // TRXDIR host->local
++        put64(rdram, a, dmaTag(1u, 1u, 0u), 0u), a += 16u;
++        put64(rdram, a, kImageQwc | (2ull << 58), 0u), a += 16u;                 // IMAGE NLOOP 2
++        put64(rdram, a, dmaTag(kImageQwc, 3u, kImagePixels), 0u), a += 16u;     // REF
++        put64(rdram, a, dmaTag(0u, 7u, 0u), 0u);                                 // END
++        for (uint32_t i = 0; i < kImageQwc * 16u; ++i)
++            rdram[kImagePixels + i] = static_cast<uint8_t>(0x40u + i);
++
++        put64(rdram, kPackedChain, dmaTag(2u, 7u, 0u), 0u);                                   // END, 2 qwc
++        put64(rdram, kPackedChain + 16u, 1ull | (1ull << 15) | (1ull << 60), 0xEull);           // PACKED A+D, EOP
++        put64(rdram, kPackedChain + 32u, 0x0000000000100000ull, 0x4Cu);                       // FRAME_1
++    }
++
++    struct NativeChainRun
++    {
++        std::vector<ExternalGSEvent> events;
++        uint32_t imageTadr = 0u, imageChcr = 0u, imageDStat = 0u;
++        uint32_t packedTadr = 0u, packedChcr = 0u, packedDStat = 0u;
++        uint64_t imageUploads = 0u, packedPackets = 0u;
++    };
++
++    NativeChainRun runNativeGifChains(bool withHook)
++    {
++        NativeChainRun out;
++        PS2Runtime runtime;
++        if (!runtime.memory().initialize() || !runtime.syncCoreSubsystems())
++            return out;
++        uint8_t *rdram = runtime.memory().getRDRAM();
++        writeNativeGifChains(rdram);
++        RecordingExternalGS rec;
++        ExternalGSScope scope(withHook ? &rec : nullptr);
++        R5900Context ctx{};
++        PS2Memory &mem = runtime.memory();
++        runtime.kickGifDmaChainFromMMIO(rdram, &ctx, 0x4u, 0x4u, kImageChain, 0x105u);
++        out.imageTadr = mem.readIORegister(kGifTadr);
++        out.imageChcr = mem.readIORegister(kGifChcr);
++        out.imageDStat = mem.readIORegister(kDStat);
++        runtime.kickGifDmaChainFromMMIO(rdram, &ctx, 0x4u, 0x4u, kPackedChain, 0x105u);
++        out.packedTadr = mem.readIORegister(kGifTadr);
++        out.packedChcr = mem.readIORegister(kGifChcr);
++        out.packedDStat = mem.readIORegister(kDStat);
++        out.imageUploads = runtime.gs().nativeImageUploadCount();
++        out.packedPackets = runtime.gs().nativePackedGIFPacketCount();
++        out.events = rec.events;
++        return out;
++    }
+ }
+ 
+ void register_ps2_gs_external_tests()
+@@ -154,12 +229,50 @@ void register_ps2_gs_external_tests()
+             uint32_t width = 0u, height = 0u;
+             t.IsTrue(runtime.gs().copyLatchedHostPresentationFrame(pixels, width, height), "published frame is latched");
+             t.Equals(width, 2u, "latched width");
+-            t.Equals(height, 1u, "latched height");
+-            t.IsTrue(pixels == std::vector<uint8_t>{1u, 2u, 3u, 255u, 4u, 5u, 6u, 255u}, "latched pixels");
++            t.Equals(height, 2u, "latched height");
++            t.IsTrue(pixels == std::vector<uint8_t>{1u, 2u, 3u, 255u, 4u, 5u, 6u, 255u, 7u, 8u, 9u, 255u, 10u, 11u, 12u, 255u},
++                     "latched pixels (packed external rows)");
+ 
+             uint8_t readback[8] = {};
+             t.Equals(runtime.gs().consumeLocalToHostBytes(readback, 8u), 8u, "readback comes from the external GS");
+             t.Equals(readback[7], static_cast<uint8_t>(0x5Au), "readback bytes");
+         });
++
++        tc.Run("native GIF DMA chains run with an external GS hook and tee their GIF bytes in order", [](TestCase &t)
++        {
++            const NativeChainRun cpu = runNativeGifChains(false);
++            const NativeChainRun ext = runNativeGifChains(true);
++            t.Equals(cpu.imageUploads, 1ull, "control: the image chain takes the native path without a hook");
++            t.Equals(cpu.packedPackets, 1ull, "control: the packed chain takes the native path without a hook");
++            t.Equals(ext.imageUploads, 1ull, "the image chain still takes the native path with a hook");
++            t.Equals(ext.packedPackets, 1ull, "the packed chain still takes the native path with a hook");
++            t.Equals(ext.imageTadr, cpu.imageTadr, "image chain TADR as without the hook");
++            t.Equals(ext.imageChcr, cpu.imageChcr, "image chain CHCR as without the hook");
++            t.Equals(ext.imageChcr & 0x100u, 0u, "image chain clears STR");
++            t.Equals(ext.imageDStat & 0x4u, 0x4u, "image chain raises D_STAT CIS2");
++            t.Equals(ext.packedTadr, cpu.packedTadr, "packed chain TADR as without the hook");
++            t.Equals(ext.packedChcr, cpu.packedChcr, "packed chain CHCR as without the hook");
++            t.Equals(ext.packedChcr & 0x100u, 0u, "packed chain clears STR");
++            t.Equals(ext.packedDStat & 0x4u, 0x4u, "packed chain raises D_STAT CIS2");
++
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            writeNativeGifChains(rdram.data());
++            const uint8_t *r = rdram.data();
++            const std::vector<std::vector<uint8_t>> expected = {
++                {r + kImageChain + 16u, r + kImageChain + 96u},   // setup GIFtag + 4 A+D
++                {r + kImageChain + 112u, r + kImageChain + 128u}, // IMAGE GIFtag
++                {r + kImagePixels, r + kImagePixels + kImageQwc * 16u},
++                {r + kPackedChain + 16u, r + kPackedChain + 48u},
++            };
++            t.Equals(ext.events.size(), expected.size(), "the hook sees 3 image-chain packets and 1 packed packet");
++            if (ext.events.size() != expected.size())
++                return;
++            for (size_t i = 0; i < expected.size(); ++i)
++            {
++                t.Equals(ext.events[i].kind, 'p', "GIF packet");
++                t.Equals(ext.events[i].a, static_cast<uint32_t>(GifPathId::Path3), "native chains are PATH3");
++                t.IsTrue(ext.events[i].data == expected[i], "GIF bytes in stream order");
++            }
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

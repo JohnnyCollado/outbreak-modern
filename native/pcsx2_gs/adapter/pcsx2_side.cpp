@@ -11,6 +11,7 @@
 #include "ob_pcsx2_gs.h"
 #include "ob_gs_bridge.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -89,6 +90,40 @@ namespace
 	}
 
 	void Put64(u32 off, u64 v) { std::memcpy(s_basemem + off, &v, 8); }
+	u64 Get64(u32 off)
+	{
+		u64 v;
+		std::memcpy(&v, s_basemem + off, 8);
+		return v;
+	}
+
+	// Display size from the mirrored PMODE/DISPFBn/DISPLAYn, as our CPU presentation derives it
+	// (gs_cpu_backend.cpp decodeDisplaySize/hasDisplaySetup/PresentFromLocalMemory): per circuit
+	// (DW+1)/(MAGH+1) x (DH+1), 640x448 below 64, capped at 640x512; both circuits on -> the larger of each.
+	void DisplayRect(u32& w, u32& h)
+	{
+		const u64 pmode = Get64(0x00);
+		u32 cw[2], ch[2];
+		bool valid[2];
+		for (u32 i = 0; i < 2; i++)
+		{
+			const u64 fb = Get64(i ? 0x90 : 0x70), d = Get64(i ? 0xA0 : 0x80);
+			const u32 dw = (u32)((d >> 32) & 0xFFF), dh = (u32)((d >> 44) & 0x7FF), magh = (u32)((d >> 23) & 0xF);
+			valid[i] = ((pmode >> i) & 1) && (((fb >> 9) & 0x3F) != 0 || dw || dh || magh);
+			cw[i] = (dw + 1) / (magh + 1);
+			ch[i] = dh + 1;
+			if (cw[i] < 64 || ch[i] < 64)
+				cw[i] = 640, ch[i] = 448;
+			cw[i] = std::min<u32>(cw[i], 640);
+			ch[i] = std::min<u32>(ch[i], 512);
+		}
+		if (valid[0] && valid[1])
+			w = std::max(cw[0], cw[1]), h = std::max(ch[0], ch[1]);
+		else if (valid[0] || valid[1])
+			w = cw[valid[0] ? 0 : 1], h = ch[valid[0] ? 0 : 1];
+		else
+			w = 640, h = 448;
+	}
 } // namespace
 
 void ob_gs_init(ObGsRenderer renderer)
@@ -187,19 +222,26 @@ const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height)
 	s_px.clear();
 	if (!GSSaveSnapshotToMemory(0, 0, false, true, &w, &h, &s_px) || w == 0 || h == 0 || s_px.size() < (size_t)w * h)
 		return nullptr;
+	u32 dw = 0, dh = 0;
+	DisplayRect(dw, dh);
 	if (!s_logged_snap)
 	{
 		s_logged_snap = true;
-		std::fprintf(stderr, "[pcsx2-gs] first snapshot %ux%u\n", w, h);
+		std::fprintf(stderr, "[pcsx2-gs] first snapshot %ux%u, display rect %ux%u\n", w, h, dw, dh);
 		std::fflush(stderr);
 	}
-	s_rgba.resize((size_t)w * h * 4);
-	for (size_t i = 0; i < (size_t)w * h; i++)
+	// Nearest-neighbour scale of the snapshot (the whole current texture) to the display rect.
+	s_rgba.resize((size_t)dw * dh * 4);
+	for (u32 y = 0; y < dh; y++)
 	{
-		const u32 p = s_px[i] | 0xFF000000u;
-		std::memcpy(&s_rgba[i * 4], &p, 4);
+		const u32* src = s_px.data() + (size_t)((u64)y * h / dh) * w;
+		for (u32 x = 0; x < dw; x++)
+		{
+			const u32 p = src[(u64)x * w / dw] | 0xFF000000u;
+			std::memcpy(&s_rgba[((size_t)y * dw + x) * 4], &p, 4);
+		}
 	}
-	*width = w;
-	*height = h;
+	*width = dw;
+	*height = dh;
 	return s_rgba.data();
 }
