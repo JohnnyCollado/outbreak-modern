@@ -152,6 +152,21 @@ static u32 WholeUnitsQwc(const u8* p, u32 qwc)
 	return at;
 }
 
+// The runtime's VIF1 interpreter resubmits the rest of a PATH2 IMAGE cut at a VIF packet boundary behind a
+// synthesized IMAGE GIFtag (ps2_vif1_interpreter.cpp:307-323: NLOOP = the chunk's qwc, EOP on the last chunk,
+// every other bit zero). The CPU GS needs that tag; PCSX2 still has the original tag's IMAGE open, so the extra
+// qword would shift the stream. True when carry holds an open IMAGE unit and data starts with such a tag.
+static bool IsSynthImageContinuation(const std::vector<u8>& carry, const u8* data, u32 n)
+{
+	if (carry.size() < 16 || n < 32)
+		return false;
+	u64 open, tag[2];
+	std::memcpy(&open, carry.data(), 8);
+	std::memcpy(tag, data, 16);
+	return ((open >> 58) & 3) == 2 && tag[1] == 0 && (tag[0] & ~0x7FFFull & ~(1ull << 15)) == (2ull << 58) &&
+		(tag[0] & 0x7FFF) == n / 16 - 1;
+}
+
 void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes)
 {
 	static std::vector<u8> s_carry[4];
@@ -159,20 +174,37 @@ void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes)
 	if (!EnsureOpen() || size_bytes < 16)
 		return;
 	std::vector<u8>& c = s_carry[path & 3];
-	const u32 n = size_bytes & ~15u;
+	u32 n = size_bytes & ~15u;
+	if (path == 2 && IsSynthImageContinuation(c, data, n))
+	{
+		data += 16;
+		n -= 16;
+	}
 	if (c.empty())
 	{
 		const u32 q = WholeUnitsQwc(data, n / 16);
 		if (q)
 			GSgifTransfer(data, q);
 		c.assign(data + (size_t)q * 16, data + n);
-		return;
 	}
-	c.insert(c.end(), data, data + n);
-	const u32 q = WholeUnitsQwc(c.data(), (u32)(c.size() / 16));
-	if (q)
-		GSgifTransfer(c.data(), q);
-	c.erase(c.begin(), c.begin() + (size_t)q * 16);
+	else
+	{
+		c.insert(c.end(), data, data + n);
+		const u32 q = WholeUnitsQwc(c.data(), (u32)(c.size() / 16));
+		if (q)
+			GSgifTransfer(c.data(), q);
+		c.erase(c.begin(), c.begin() + (size_t)q * 16);
+	}
+	// Only an open IMAGE unit carries into the next packet (its data follows as raw bytes or behind a
+	// synthesized tag). Any other cut unit is dropped, as the CPU GS drops it (gs_frontend.cpp processGIFPacket
+	// keeps no GIF state across packets): carried, one malformed packet would swallow the path's later packets.
+	if (!c.empty())
+	{
+		u64 open;
+		std::memcpy(&open, c.data(), 8);
+		if (((open >> 58) & 3) != 2)
+			c.clear();
+	}
 }
 
 void ob_gs_priv_write(uint32_t offset, uint64_t value)

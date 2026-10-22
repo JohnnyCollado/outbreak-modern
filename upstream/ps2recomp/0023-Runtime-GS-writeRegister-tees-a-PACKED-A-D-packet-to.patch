@@ -1,0 +1,68 @@
+From e5b86e516fc67d192324fbe105ec4c02fef32ac3 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 11:27:33 -0400
+Subject: [PATCH] Runtime: GS::writeRegister tees a PACKED A+D packet to the
+ external GS
+
+---
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp |  7 +++++++
+ ps2xTest/src/ps2_gs_external_tests.cpp | 26 ++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index cbb16b7..0e1c990 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1088,6 +1088,13 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
+ void GS::writeRegister(uint8_t regAddr, uint64_t value)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    if (PS2ExternalGS *externalGS = ps2ExternalGS())
++    {
++        // HLE stubs write GS registers directly, outside any GIF path; give the
++        // external GS the same write as one PACKED A+D packet (NLOOP 1, EOP, NREG 1).
++        const uint64_t packet[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, value, regAddr};
++        externalGS->gifPacket(GifPathId::Path3, reinterpret_cast<const uint8_t *>(packet), sizeof(packet));
++    }
+     writeRegisterUnlocked(regAddr, value);
+ }
+ 
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index e24affb..92228ff 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -274,5 +274,31 @@ void register_ps2_gs_external_tests()
+                 t.IsTrue(ext.events[i].data == expected[i], "GIF bytes in stream order");
+             }
+         });
++
++        tc.Run("GS::writeRegister tees one PACKED A+D packet per register to the external GS", [](TestCase &t)
++        {
++            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
++            GS gs;
++            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
++            RecordingExternalGS rec;
++            ExternalGSScope scope(&rec);
++            const uint8_t regs[3] = {GS_REG_FRAME_1, GS_REG_TEST_1, GS_REG_PRIM};
++            const uint64_t values[3] = {0x0000000100010000ull, 0x0000000000030000ull, 0x6ull};
++            for (uint32_t i = 0; i < 3u; ++i)
++                gs.writeRegister(regs[i], values[i]);
++
++            t.Equals(rec.events.size(), static_cast<size_t>(3u), "one packet per register write");
++            if (rec.events.size() != 3u)
++                return;
++            for (uint32_t i = 0; i < 3u; ++i)
++            {
++                const uint64_t q[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, values[i], regs[i]};
++                std::vector<uint8_t> expected(sizeof(q));
++                std::memcpy(expected.data(), q, sizeof(q));
++                t.Equals(rec.events[i].kind, 'p', "GIF packet");
++                t.Equals(rec.events[i].a, static_cast<uint32_t>(GifPathId::Path3), "register packets are PATH3");
++                t.IsTrue(rec.events[i].data == expected, "NLOOP 1 EOP PACKED NREG 1 A+D tag, then {value, reg}, in order");
++            }
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+
