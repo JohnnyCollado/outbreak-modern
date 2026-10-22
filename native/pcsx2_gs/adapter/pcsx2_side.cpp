@@ -1,6 +1,7 @@
 // pcsx2_side: the PCSX2 half of the runner's external GS (ob_gs_bridge.h). Compiled with ob_pcsx2_gs's
 // PUBLIC defines/options; never sees PS2Recomp headers. One mutex serialises every PCSX2 call.
 #include "common/RedtapeWindows.h"
+#include "common/Console.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
 #include "common/WindowInfo.h"
@@ -66,13 +67,15 @@ namespace
 		return true;
 	}
 
-	// Same settings as smoke/main.cpp MakeOptions (reference manifest, plan ## Interfaces).
-	Pcsx2Config::GSOptions MakeOptions(GSRendererType r)
+	// Same settings as smoke/main.cpp MakeOptions (reference manifest, plan ## Interfaces), except a visible window
+	// deinterlaces: Outbreak runs SMODE2 INT=1 FFMD=0 with both circuits merged one line apart (PMODE 0x7f27), and
+	// Off shows that as a per-field one-line shake. Snapshots read local memory, so the gate is unaffected.
+	Pcsx2Config::GSOptions MakeOptions(GSRendererType r, bool visible)
 	{
 		Pcsx2Config::GSOptions o;
 		o.Renderer = r;
 		o.UpscaleMultiplier = 1.0f;
-		o.InterlaceMode = GSInterlaceMode::Off;
+		o.InterlaceMode = visible ? GSInterlaceMode::Automatic : GSInterlaceMode::Off; // was Off for every window
 		o.LinearPresent = GSPostBilinearMode::Off;
 		o.Dithering = 2;
 		o.PCRTCAntiBlur = true;
@@ -95,10 +98,14 @@ namespace
 		EmuFolders::AppRoot = std::string(Path::GetDirectory(FileSystem::GetProgramPath()));
 		EmuFolders::Resources = Path::Combine(EmuFolders::AppRoot, "resources");
 		const GSRendererType t = ToType(s_renderer);
+		// PCSX2's own log (swap chain present mode, fallbacks, resize errors) -> pcsx2-gs.log in the working dir.
+		Log::SetFileOutputLevel(LOGLEVEL_DEV, "pcsx2-gs.log");
 		const GSVSyncMode vsync = (s_child && s_visible) ? GSVSyncMode::Mailbox : GSVSyncMode::Disabled;
-		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t), t, s_basemem, vsync, false);
-		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d\n", static_cast<int>(t),
-			s_open ? "ok" : "FAILED", s_child ? "child" : "hidden", static_cast<int>(vsync));
+		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t, s_child && s_visible), t, s_basemem, vsync, false);
+		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d\n",
+			static_cast<int>(t), s_open ? "ok" : "FAILED", s_child ? "child" : "hidden", static_cast<int>(vsync),
+			s_open && g_gs_device ? static_cast<int>(g_gs_device->GetVSyncMode()) : -1,
+			s_open && g_gs_device ? g_gs_device->GetWindowWidth() : 0, s_open && g_gs_device ? g_gs_device->GetWindowHeight() : 0);
 		std::fflush(stderr);
 		return s_open;
 	}
@@ -239,8 +246,25 @@ void ob_gs_vsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint64_t b
 	Put64(0x1010, imr);
 	Put64(0x1040, busdir);
 	Put64(0x1080, siglblid);
+	static u64 s_last_mode[4] = {~0ull, ~0ull, ~0ull, ~0ull};
+	static u32 s_mode_logs = 0;
+	const u64 mode[4] = {priv[0], priv[2], priv[8], priv[10]}; // PMODE, SMODE2, DISPLAY1, DISPLAY2
+	if (std::memcmp(mode, s_last_mode, sizeof(mode)) != 0 && s_mode_logs < 64)
+	{
+		s_mode_logs++;
+		std::memcpy(s_last_mode, mode, sizeof(mode));
+		std::fprintf(stderr, "[pcsx2-gs] display mode pmode=0x%llx smode2 int=%u ffmd=%u display1=0x%llx display2=0x%llx "
+			"dispfb1=0x%llx dispfb2=0x%llx\n", (unsigned long long)priv[0], (u32)(priv[2] & 1), (u32)((priv[2] >> 1) & 1),
+			(unsigned long long)priv[8], (unsigned long long)priv[10], (unsigned long long)priv[7], (unsigned long long)priv[9]);
+		std::fflush(stderr);
+	}
 	if (const u64 size = s_pending_size.exchange(0))
+	{
 		GSResizeDisplayWindow(static_cast<u32>(size >> 32), static_cast<u32>(size), 1.0f);
+		std::fprintf(stderr, "[pcsx2-gs] resize applied %ux%u surface=%dx%d\n", static_cast<u32>(size >> 32),
+			static_cast<u32>(size), g_gs_device ? g_gs_device->GetWindowWidth() : 0, g_gs_device ? g_gs_device->GetWindowHeight() : 0);
+		std::fflush(stderr);
+	}
 	GSvsync((csr & 0x2000) ? 1 : 0, true);
 }
 
@@ -269,7 +293,9 @@ void ob_gs_attach_window(void* hwnd, uint32_t w, uint32_t h, bool visible)
 	wi.surface_height = h;
 	wi.surface_scale = 1.0f;
 	ObPcsx2GS::SetRenderWindow(wi);
-	std::fprintf(stderr, "[pcsx2-gs] attach child %ux%u visible=%d\n", w, h, visible ? 1 : 0);
+	const LONG_PTR ps = GetWindowLongPtrW(static_cast<HWND>(hwnd), GWL_STYLE);
+	std::fprintf(stderr, "[pcsx2-gs] attach child %ux%u visible=%d parent clipchildren=%d clipsiblings=%d\n", w, h,
+		visible ? 1 : 0, (ps & WS_CLIPCHILDREN) ? 1 : 0, (ps & WS_CLIPSIBLINGS) ? 1 : 0);
 	std::fflush(stderr);
 }
 
@@ -279,6 +305,10 @@ void ob_gs_window_resized(uint32_t w, uint32_t h)
 		return;
 	SetWindowPos(s_child, nullptr, 0, 0, static_cast<int>(w), static_cast<int>(h), SWP_NOZORDER | SWP_NOACTIVATE);
 	s_pending_size.store((static_cast<u64>(w) << 32) | h);
+	RECT rc = {};
+	GetClientRect(s_child, &rc);
+	std::fprintf(stderr, "[pcsx2-gs] resize request %ux%u child=%ldx%ld\n", w, h, rc.right, rc.bottom);
+	std::fflush(stderr);
 }
 
 uint32_t ob_gs_read_local(uint8_t* dst, uint32_t max_bytes)
