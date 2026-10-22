@@ -63,8 +63,8 @@ ARMSX2-mod legacy (f1_*, phase2_check, push_patch, pine_diag): device actions, a
 
 ## Build / run / test <!-- roles: claude expert coder planner review auditor curator -->
 - Build: `bash tools/run.sh ob-tools -- bash tools/ob.sh tools` (-> C:\ob\t); `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` (main ELF + 3 overlays, runner -> C:\ob\r). Long: background shell.
-- Run: `bash tools/ob.sh boot --script gate/boot.script --tag T` (patch 0020: hidden, scripted pad, captures to C:\ob\frames-<T>, log C:\ob\logs\boot-<T>.log, ends by itself; `docs/ops/boot.md`). Plain `boot [--secs N]`: VISIBLE window, every frame dumped: a developer proceed each.
-- Test / the gate (until 1.2): `bash tools/run.sh ob-test -- bash tools/ob.sh test`; green = all three suites pass (ps2x_tests 471/471, IOP 4/4, gs_cache 45/45).
+- Run: `bash tools/ob.sh boot --script gate/boot.script --tag T` (hidden, ends by itself; `docs/ops/boot.md`). Plain `boot`: VISIBLE window, a developer proceed each.
+- Test: `bash tools/run.sh ob-test -- bash tools/ob.sh test` (green: 471/471, 4/4, 45/45). Gate: `bash tools/ob.sh gate` (`docs/ops/gate.md`).
 - Modes: OB_* env vars override the C:\ob paths (`docs/ops/workspace.md`); MSVC steps via tools/ob/vc.bat.
 Long gates go through `tools/run.sh` with a raised timeout, never a poll loop.
 
@@ -82,8 +82,9 @@ Long gates go through `tools/run.sh` with a raised timeout, never a poll loop.
 
 ## Decisions <!-- roles: claude expert coder planner review auditor curator -->
 - M0 = PS2Recomp option B; game data never in git; runner `-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF` (ON halves boot speed).
+- PS2Recomp tracks upstream HEAD: check `git ls-remote` at each phase start, rebase our patches when it moves; pin only for a bug that breaks it.
 - This generation: standing proceed for C:\ob work + hidden scripted boots (PCSX2, visible windows, Odin: per action);
-  Clang/Linux re-run deferred to the Linux/Android generation.
+  Clang/Linux re-run deferred to the Linux/Android gen.
 
 ## Docs map <!-- roles: expert coder planner review auditor curator -->
 - `docs/ops/INDEX.md` — workspace, boot, pins, gotchas, tools
