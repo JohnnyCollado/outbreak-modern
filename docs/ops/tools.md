@@ -6,6 +6,8 @@ Source: R0-003 (8), phase 1.1 T2/T4. Harness tools (card.py, plan_edit.py, run.s
 - `bash tools/ob.sh tools|test|recompile|boot` — the Windows driver (card Build/Run/Test); MSVC steps via `tools/ob/vc.bat`.
 - `PY -I tools/splat_functions.py <splat>/asm/SLPM_654.28/en/main <work>/main-functions.csv` — function map for the
   recompiler (0 errors over 5,358 functions with it; 8,261 with the fallback analyzer). Test: tools/test_splat_functions.py.
+- `PY tools/ob/sync_changed.py` — copies generated sources/headers into `$OB_SRC` only when their content changed,
+  pruning stale `.cpp` (used by `ob.sh recompile`): identical files keep their mtime, so ninja skips them.
 - `PY tools/mwo3_to_elf.py` — wraps overlay `PROG/*.BIN` (MWo3) as ELFs for the recompiler (used by `ob.sh recompile`).
   Test: tools/test_mwo3_to_elf.py.
 - `PY tools/q_scan.py` — read-only VU0 Q-register check. Test: tools/test_q_scan.py.

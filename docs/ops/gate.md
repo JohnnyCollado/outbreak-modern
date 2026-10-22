@@ -43,6 +43,8 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
   identical), boot-*.log, `tol-advisory.json` {d:8,p:0.001,advisory:["title"]}, `tol-none.json` {d:8,p:0.001}
   (tests only, `.run/1.2/`).
 - Wall time (T2, 2026-10-22): stale stamp 346 s (recompile 297 s, runner build 273 s); fresh stamp 47.8 s (boot + gate).
+  Since `tools/ob/sync_changed.py` (2026-10-22, partner): a stale stamp with unchanged generated code is 70 s
+  (recompile 16 s, runner build 3 s); only changed generated files and changed runtime/adapter files rebuild.
 
 ## Display-mode probe (T1, 2026-10-22)
 GS privileged registers (PMODE, SMODE2, DISPFB1/2, DISPLAY1/2) are not readable without a patch: the script's

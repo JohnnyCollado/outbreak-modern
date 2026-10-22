@@ -93,12 +93,10 @@ cmd_recompile() {
     echo "main: errors=$e warnings=$(grep -c '\[warn' recomp.log) files=$(ls output | wc -l)"
     [ "$e" = 0 ] || bad=1
     grep -c "scePad2\|sceDbc" decomp.toml | sed 's/^/pad2 stubs in config: /'
-    cd "$OB_SRC" || return 1
-    mkdir -p ps2xRuntime/src/runner
-    rm -f ps2xRuntime/src/runner/*.cpp
-    cp "$OB_WORK"/output/*.cpp ps2xRuntime/src/runner/
-    cp "$OB_WORK"/output/ps2_recompiled_functions.h "$OB_WORK"/output/ps2_recompiled_stubs.h ps2xRuntime/include/
-    echo "copied $(ls ps2xRuntime/src/runner/*.cpp | wc -l) sources"
+    # Generated files reach the runner tree after the overlays, content-compared (tools/ob/sync_changed.py):
+    # an identical file keeps its mtime, so ninja rebuilds only what changed.
+    local w; w=$(cygpath -w "$OB_WORK/output")
+    local srcs=("$w\\*.cpp") hdrs=("$w\\ps2_recompiled_functions.h" "$w\\ps2_recompiled_stubs.h") out
     # Overlays (ovl-cycle.sh demo submain netdnas).
     cd "$OB_OVL" || return 1
     for o in demo submain netdnas; do
@@ -112,9 +110,14 @@ cmd_recompile() {
         e=$(grep -c '\[error\]' "recomp-$o.log")
         echo "$o: errors=$e warnings=$(grep -c '\[warn' "recomp-$o.log") files=$(ls "output-$o" | wc -l)"
         [ "$e" = 0 ] || bad=1
-        cp "output-$o"/*.cpp "$OB_SRC/ps2xRuntime/src/runner/"
-        cp "output-$o/${o}_recompiled_functions.h" "output-$o/${o}_recompiled_stubs.h" "$OB_SRC/ps2xRuntime/include/"
+        w=$(cygpath -w "$OB_OVL/output-$o")
+        srcs+=("$w\\*.cpp")
+        hdrs+=("$w\\${o}_recompiled_functions.h" "$w\\${o}_recompiled_stubs.h")
     done
+    out=$("$PY" -I "$REPO/tools/ob/sync_changed.py" "$(cygpath -w "$OB_SRC/ps2xRuntime/src/runner")" --prune "${srcs[@]}") || { echo "sources: sync failed: $out"; return 1; }
+    echo "sources: $out"
+    out=$("$PY" -I "$REPO/tools/ob/sync_changed.py" "$(cygpath -w "$OB_SRC/ps2xRuntime/include")" "${hdrs[@]}") || { echo "headers: sync failed: $out"; return 1; }
+    echo "headers: $out"
     # Runner (build-runner.bat), with the PCSX2 external GS (native/pcsx2_gs; deps from ob.sh pcsx2-gs).
     local log="$OB_LOGS/ob-runner-build.log" start rc
     local px="${OB_PCSX2:-$OB_ROOT/pcsx2}" pxd="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}" egs="$REPO/native/pcsx2_gs"
