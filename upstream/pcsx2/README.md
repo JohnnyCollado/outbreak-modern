@@ -1,0 +1,12 @@
+# Changes for PCSX2
+
+Our edits to [PCSX2](https://github.com/PCSX2/pcsx2) (GPL-3.0), used only for its GS, built in-process as the
+static library `ob_pcsx2_gs` (`native/pcsx2_gs/`, docs/ops/gs.md). Base: tag `v2.9.134` =
+`a81f1aa39fc56ef60dbc913637c74c49c1792033`, pinned (the gate refs were made by this GS; moving it means moving the
+refs). Clone at `C:\ob\pcsx2` (`bash tools/ob.sh pcsx2-gs` clones it when missing). Apply in order with `git am` on
+a81f1aa. Procedure as for PS2Recomp (docs/ops/workspace.md:31-37): commit on a local branch in `C:\ob\pcsx2`,
+`git format-patch` here, add a row. A stub in our code is preferred over an edit here.
+
+| Patch | What | Why it could not be a stub |
+|---|---|---|
+| (none yet) | | |

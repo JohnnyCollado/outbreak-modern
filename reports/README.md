@@ -32,3 +32,4 @@ lessons learned.
 | 2026-10-21 | [Windows bring-up: to the main menu](2026-10-21-windows-port-bank-wall.md) | Patches 0010-0018, the sound bank wall, overlays as guest modules; the boot reaches the main menu |
 | 2026-10-21 | [Project Architect groundwork and boot speed](2026-10-21-pa3-groundwork-and-boot-speed.md) | First PA3 plan, `tools/ob.sh`, patch 0019, the profiler deadlock, aggressive logs halving the boot speed |
 | 2026-10-22 | [The gate: reference captures and a pixel tolerance](2026-10-22-gate.md) | Phase 1.2: PCSX2 reference capture kit, display-register probe, tolerance and baseline |
+| 2026-10-22 | [Phase 1.3: PCSX2 GS renderer](2026-10-22-pcsx2-gs.md) | PCSX2 2.9.134 GS in-process as a static library (SW, Vulkan), the PS2Recomp seam, the PS2X_GS selector |
