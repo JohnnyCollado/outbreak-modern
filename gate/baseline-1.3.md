@@ -48,8 +48,8 @@ scheduler's idle wait. Budget 16.68 ms (59.94 Hz). CSVs: `C:\ob\logs\ft29-<gs>[-
 - PCSX2 Vulkan does about half the work per frame of the CPU GS and goes over budget about a tenth as often.
 - The Vulkan max is one frame per boot, tick 2: PCSX2's GS opening and compiling its shaders on first use
   (`native/pcsx2_gs/adapter/pcsx2_side.cpp:88`, `DisableShaderCache = true`). It varied 1.0-3.1 s between runs.
-  Start-up cost, not a stall. Since 2026-10-23 the shader cache is on (`C:\ob\ps2xRuntime\cache`): tick 2
-  drops from 1,083 ms (cold) to 325 ms (warm) (`C:\ob\logstsc-*.csv`).
+  Start-up cost, not a stall. Since 2026-10-23 the shader cache is on (`C:\ob\r\ps2xRuntime\cache`): tick 2
+  drops from 1,083 ms (cold) to 325 ms (warm) (`C:\ob\logs\ftsc-*.csv`).
 - Since patch 0026, the CPU GS does no drawing when PCSX2 is selected (decode only), so these numbers are PCSX2's
   real cost, not both renderers added together.
 
