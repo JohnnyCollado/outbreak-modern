@@ -9,6 +9,7 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | Build the tools | `bash tools/run.sh ob-tools -- bash tools/ob.sh tools` | Analyzer + recompiler into `C:\ob\t` |
 | PCSX2 GS library + smoke test | `bash tools/run.sh pcsx2-gs -- bash tools/ob.sh pcsx2-gs` | Clones/builds deps if missing (`gs.md`) |
 | Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`. ~16 s when generated code is unchanged; ~30 s after a runtime-internal change (patch 0028: game code sees only `ps2_runtime_api.h`); a full rebuild (~6 min) only when the recompiler output or the game-facing headers change |
+| VU1 interpreter vs microVU | `bash tools/ob.sh vucompare [DIR\|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]` | Builds `native/pcsx2_vu` + `ob_pcsx2_vu_compare.exe` into `C:\ob\pcsx2-vu-build` (first build ~55 s incl. its own copy of `ob_pcsx2_gs`; then 5-8 s), runs it on `C:\ob\vu1-captures`. Needs `ob.sh recompile` first (links the runner's `ps2_runtime.lib`). See "VU1 capture" below |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
 | Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest |
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`) |
@@ -29,7 +30,37 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
 - `PS2X_PC_SAMPLE=<path.csv>` (patch 0030): guest PC sampling profiler (~550 Hz measured: 1 ms sleeps); CSV `tick,tid,pc,count,vu1,iop,gs,gsvsync`
   per 64-vsync bucket (pc 0 = outside guest code). `PS2X_FRAME_TIME=<path.csv>` (0027/0029): per-vsync `tick,wall_us,busy_us`.
   Summarize: `python -I tools/ob/pc_profile.py <csv> --from T --to T` (maps pcs to functions).
+- `PS2X_VU1_CAPTURE=<dir>[,N[,K]]` (patch 0031): VU1 program capture, see below.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
+
+## VU1 capture (patch 0031) and `vucompare`
+
+- Capture: `PS2X_GS=pcsx2-vk PS2X_VU1_CAPTURE='C:\ob\vu1-captures,400,4' bash tools/ob.sh boot --secs 420 --script gate/play.script --tag vucap`.
+  Every VU1 run started by VIF1 MSCAL/MSCALF/MSCNT is offered to the recorder; a file is written when fewer than N
+  (default 200) exist, its key (kind, start pc, hash of the 16 KB micro memory) has fewer than K (default 4), and no
+  run with the same inputs was written. Captures are game-derived: keep them under `C:\ob`, never in git.
+- File `vu1-<index6>-<pc4>.cap`, little-endian, layout in `C:\ob\up\ps2xRuntime\include\runtime\ps2_vu1_capture.h`:
+  `FileHeader` (104 B: magic `OBVU1CAP`, version 1, header size, kind 0 = MSCAL / 1 = MSCNT, flags bit 0 = cycle
+  budget hit, run index, start pc in bytes (MSCNT: state pc on entry), TOP, ITOP, EE-side FBRST, VPU_STAT before and
+  after, cycle budget, interpreter cycles of the run, code generation, code hash, input hash, code/data/state sizes,
+  packet count) | micro memory (16 KB) | data memory before (16 KB) | `StateRecord` before (656 B: VF as raw bits,
+  VI, ACC, Q/P/I/R, pc, MAC, CLIP, STATUS, cycles, E/halt/D/T/branch bits, TOP/ITOP, branch target/delay) | data
+  after | `StateRecord` after | per PATH1 (XGKICK) packet: u32 size + bytes.
+- `summary.txt` in the same directory: `runs`, `files`, `bytes`, `keys`, `budget_hits`, then one line per key
+  `kind pc code_hash first_gen runs cycles files` for every run seen (written or not). `vucompare` weights its
+  timings by these cycles.
+- `vucompare` per capture: (0) replays it through PS2Recomp's `VU1Interpreter` (the runner's own `ps2_runtime.lib`)
+  and checks the replay reproduces the recorded outputs (column `replay`), (a) times the interpreter, (b) runs and
+  times microVU (`native/pcsx2_vu`), and compares microVU against the interpreter bit for bit: data memory, VF, VI
+  (16 bits), ACC, Q, P, I, R, STATUS, MAC, CLIP, PATH1 packets. Prints the first differing field per capture,
+  per-field counts, known patterns (STATUS/MAC left at their input value by microVU's flag elimination; P equal to
+  the final Q), and ns per interpreter cycle (median of `--repeat` warm runs; only the run call is timed).
+  `--synthetic` runs a few built-in programs instead. Exit 0 = all bit-exact, 1 = some differ, 2 = usage.
+- `native/pcsx2_vu` caveats handled in code: the 64 MB code cache is allocated within 1 GB of the VU1 data and the
+  disp32 reach (cache to data, globals to the rbx text pointer) is checked at `Init` in every build (failure =
+  error, no run); MXCSR is set to `EmuConfig.Cpu.VU1FPCR` around each run; microVU's program cache is cleared when
+  the code generation changes; PCSX2 config defaults are the verbatim `Pcsx2Config.cpp` constructor bodies
+  (`src/config_defaults.cpp`, re-copy on a PCSX2 bump). No PCSX2 source edit.
 
 ## Paths
 

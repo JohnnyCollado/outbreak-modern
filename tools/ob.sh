@@ -11,10 +11,14 @@
 #                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
 #   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
 #   tools/ob.sh pcsx2-gs                     PCSX2 GS static lib (native/pcsx2_gs): clone/deps if missing, build, smoke
+#   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
+#                                            build native/pcsx2_vu + compare tool, diff interpreter vs microVU on
+#                                            PS2X_VU1_CAPTURE files (default $OB_ROOT/vu1-captures)
 #
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
 # OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat;
-# OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build.
+# OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build,
+# OB_PCSX2_VU_BUILD=C:/ob/pcsx2-vu-build.
 # Writes nothing inside the repo; logs go to $OB_LOGS. cmake/ctest/MSVC steps run via tools/ob/vc.bat
 # (its path must contain no spaces: cmd /c quoting).
 set -u
@@ -247,6 +251,29 @@ cmd_pcsx2_gs() {
     echo "pcsx2-gs: smoke exit $rc"; return $rc
 }
 
+# vucompare: configure (once) + build native/pcsx2_vu and ob_pcsx2_vu_compare.exe into $OB_PCSX2_VU_BUILD, then run
+# it. The compare tool links the runner's own ps2_runtime.lib ($OB_R, so ob.sh recompile first) for the interpreter.
+# Exit: the tool's (0 = every capture bit-exact, 1 = some differ, 2 = usage / no captures).
+cmd_vucompare() {
+    local src="${OB_PCSX2:-$OB_ROOT/pcsx2}" deps="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}"
+    local b="${OB_PCSX2_VU_BUILD:-$OB_ROOT/pcsx2-vu-build}" log="$OB_LOGS/ob-pcsx2-vu.log" rc start
+    local dir="$OB_ROOT/vu1-captures"
+    if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then dir=$1; shift; fi
+    if [ $# -gt 0 ] && [ "$1" = --synthetic ]; then dir=--synthetic; shift; fi
+    [ -f "$OB_R/ps2xRuntime/ps2_runtime.lib" ] || { echo "vucompare: $OB_R/ps2xRuntime/ps2_runtime.lib missing; run ob.sh recompile first"; return 1; }
+    start=$(date +%s)
+    mkdir -p "$b"
+    { { [ -f "$b/build.ninja" ] ||
+          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src" \
+              -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T"; } &&
+      vc cmake --build "$b" -j $JOBS; } > "$log" 2>&1
+    rc=$?
+    echo "vucompare: build exit $rc in $(( $(date +%s) - start )) s ($log)"
+    [ $rc = 0 ] || { tail -5 "$log"; return $rc; }
+    [ "$dir" = --synthetic ] || dir=$(cygpath -w "$dir")
+    "$b/ob_pcsx2_vu_compare.exe" "$dir" "$@"
+}
+
 case ${1:-} in
     tools) cmd_tools ;;
     test) cmd_test ;;
@@ -254,5 +281,6 @@ case ${1:-} in
     boot) shift; cmd_boot "$@" ;;
     gate) shift; cmd_gate "$@" ;;
     pcsx2-gs) cmd_pcsx2_gs ;;
-    *) sed -n '6,13p' "$0"; exit 2 ;;
+    vucompare) shift; cmd_vucompare "$@" ;;
+    *) sed -n '6,16p' "$0"; exit 2 ;;
 esac

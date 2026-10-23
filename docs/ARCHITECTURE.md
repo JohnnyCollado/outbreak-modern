@@ -55,6 +55,7 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `upstream/ps2recomp/` | **Our PS2Recomp changes**: numbered patches 0001-00NN, each with a test, plus a README table | The real source of runtime changes; applied as commits in `C:\ob\up` |
 | `upstream/pcsx2/` | Our PCSX2 changes (none so far) | PCSX2 pinned at v2.9.134 (`docs/ops/pins.md`) |
 | `native/pcsx2_gs/` | PCSX2's GS built as a static library, host stubs, D3D shims, smoke test, and the adapter that connects it to PS2Recomp's hook | `docs/ops/gs.md` |
+| `native/pcsx2_vu/` | PCSX2's microVU (VU1 recompiler) built as a static library (wrapper TU, fakes, config defaults, link-only stubs) and `ob_pcsx2_vu_compare`, the offline interpreter-vs-microVU diff on VU1 captures; not wired into the runner yet | `docs/ops/build.md` (VU1 capture, vucompare), `research/2026-10-23-microvu-feasibility.md` |
 | `gate/` | The correctness judge: scripted boot, frozen tolerance, reference hashes, baselines, evidence | `docs/ops/gate.md` |
 | `tools/ob.sh` (+ `tools/ob/`) | Windows driver: build tools, recompile, boot, test, gate, pcsx2-gs | `tools/ob/sync_changed.py` keeps rebuilds incremental |
 | `tools/gate/` | Gate scoring (`gate.py`) and reference handling (`refs.py`) | |

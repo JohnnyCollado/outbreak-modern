@@ -1,0 +1,738 @@
+From 8ce744a69b8c7ad056b4c5a9bc60525de339c0a5 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 03:29:21 -0400
+Subject: [PATCH] Runtime: VU1 program capture (PS2X_VU1_CAPTURE)
+
+When PS2X_VU1_CAPTURE=<dir>[,N[,K]] names a directory, the VIF1 MSCAL and MSCNT callbacks hand every VU1 run to a Recorder (runtime/ps2_vu1_capture.h, read when syncCoreSubsystems binds the callbacks). A run is written as <dir>/vu1-<index>-<pc>.cap when fewer than N files exist (default 200), its key (kind, start pc, hash of the 16 KB micro memory) has fewer than K files (default 4), and no run with identical inputs (key, data memory, VU1 state without the cycle counter, TOP/ITOP/FBRST) was written. File: a 104-byte header (magic OBVU1CAP, version 1, kind, flags with budget hit, run index, start pc, TOP, ITOP, FBRST, VPU_STAT before/after, cycle budget, interpreter cycles run, code generation, code hash, input hash, section sizes, packet count), micro memory, data memory before, a fixed-layout VU1 state record before, data memory after, state after, then every PATH1 (XGKICK) packet the run sent as u32 size + bytes. The packets come from a PATH1 tap that VU1Interpreter::finishXgkick calls before submitting; offline tools use the same tap. <dir>/summary.txt (every 4096 runs and at each file) lists totals and per key the runs and interpreter cycles. Unset: the callbacks cost one null check and the tap one atomic load per XGKICK.
+---
+ ps2xRuntime/CMakeLists.txt                    |   1 +
+ ps2xRuntime/include/runtime/ps2_vu1_capture.h | 185 +++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  25 +-
+ ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp    | 305 ++++++++++++++++++
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp       |   2 +
+ ps2xTest/src/ps2_vu1_tests.cpp                |  94 ++++++
+ 6 files changed, 608 insertions(+), 4 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_vu1_capture.h
+ create mode 100644 ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index d26e440..53835dc 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -401,6 +401,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_vfs.cpp
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
++    src/lib/vu/ps2_vu1_capture.cpp
+     src/lib/vu/ps2_vu1_core.cpp
+     src/lib/vu/ps2_vu1_upper.cpp
+     src/lib/vu/ps2_vu1_lower.cpp
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1_capture.h b/ps2xRuntime/include/runtime/ps2_vu1_capture.h
+new file mode 100644
+index 0000000..edbf8b9
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_vu1_capture.h
+@@ -0,0 +1,185 @@
++#pragma once
++
++// PS2X_VU1_CAPTURE=<dir>[,N[,K]]: VU1 microprogram capture.
++//
++// When the variable names a directory, every VU1 run started by VIF1 MSCAL/MSCALF/MSCNT
++// (PS2Runtime's two callbacks) is offered to a Recorder. A run is written when
++//   - fewer than N files were written so far (default 200),
++//   - its key (kind, start pc, hash of the 16 KB micro memory) has fewer than K files (default 4),
++//   - no run with the same inputs (key + data memory + VU1 state + TOP/ITOP/FBRST) was written.
++// One file per written run, "<dir>/vu1-<index6>-<pc4>.cap", little-endian:
++//   FileHeader | code[codeBytes] | dataBefore[dataBytes] | StateRecord before |
++//   dataAfter[dataBytes] | StateRecord after | packetCount x { u32 size, size bytes }
++// The packets are every PATH1 packet (XGKICK) the run sent, in order. "<dir>/summary.txt" is
++// rewritten every 4096 runs and at each written file: totals plus one line per key seen
++// (pc, code hash, code generation first seen, runs, interpreter cycles), so the stream of
++// unwritten runs is still accounted for. Unset: no Recorder, the callbacks cost one null check.
++//
++// The PATH1 tap below is also how an offline tool collects the interpreter's packets.
++
++#include <cstdint>
++#include <cstring>
++#include <memory>
++#include <string>
++
++#include "runtime/ps2_vu1.h"
++
++namespace ps2x::vu1capture
++{
++    constexpr char kMagic[8] = {'O', 'B', 'V', 'U', '1', 'C', 'A', 'P'};
++    constexpr uint32_t kVersion = 1u;
++
++    enum Kind : uint32_t
++    {
++        Mscal = 0, // MSCAL / MSCALF: VU1Interpreter::execute(startPC)
++        Mscnt = 1  // MSCNT: VU1Interpreter::resume (continues at state.pc)
++    };
++
++    enum HeaderFlags : uint32_t
++    {
++        FlagBudgetHit = 1u << 0 // the run used its whole cycle budget (program not ended)
++    };
++
++    // VU1State with floats as raw bits and a fixed layout.
++    struct StateRecord
++    {
++        uint32_t vf[32][4];
++        int32_t vi[16];
++        uint32_t acc[4];
++        uint32_t q, p, i, r;
++        uint32_t pc, mac, clip, status;
++        uint64_t cycles;
++        uint8_t ebit, haltAfterDelaySlot, dBitEnabled, tBitEnabled;
++        uint8_t stoppedByD, stoppedByT, branchPending, reserved0;
++        uint32_t top, itop, branchTarget, branchDelay;
++    };
++    static_assert(sizeof(StateRecord) == 512 + 64 + 16 + 16 + 16 + 8 + 8 + 16, "StateRecord layout");
++
++    struct FileHeader
++    {
++        char magic[8];
++        uint32_t version;
++        uint32_t headerBytes;   // sizeof(FileHeader)
++        uint32_t kind;          // Kind
++        uint32_t flags;         // HeaderFlags
++        uint32_t runIndex;      // 0-based count of VU1 runs seen before this one
++        uint32_t startPC;       // MSCAL: byte address passed to execute; MSCNT: state.pc on entry
++        uint32_t top, itop;     // VIF1 TOP/ITOP passed to the run
++        uint32_t fbrst;         // EE-side VU0 FBRST (D enable bit 10, T enable bit 11)
++        uint32_t vpuStatBefore; // EE-side VPU_STAT before / after the callback
++        uint32_t vpuStatAfter;
++        uint32_t maxCycles;     // cycle budget passed to the run
++        uint64_t cyclesRun;     // interpreter cycles the run took (state.cycles after - before)
++        uint64_t codeGeneration;// PS2Memory::getVU1CodeGeneration() at the run
++        uint64_t codeHash;      // hash64 of the 16 KB micro memory
++        uint64_t inputHash;     // dedupe hash of all inputs
++        uint32_t codeBytes, dataBytes, stateBytes, packetCount;
++    };
++    static_assert(sizeof(FileHeader) == 104, "FileHeader layout");
++
++    inline uint32_t floatBits(float f)
++    {
++        uint32_t u;
++        std::memcpy(&u, &f, 4);
++        return u;
++    }
++    inline float bitsFloat(uint32_t u)
++    {
++        float f;
++        std::memcpy(&f, &u, 4);
++        return f;
++    }
++
++    inline StateRecord toRecord(const VU1State &s)
++    {
++        StateRecord r{};
++        for (int reg = 0; reg < 32; ++reg)
++            for (int lane = 0; lane < 4; ++lane)
++                r.vf[reg][lane] = floatBits(s.vf[reg][lane]);
++        for (int k = 0; k < 16; ++k)
++            r.vi[k] = s.vi[k];
++        for (int lane = 0; lane < 4; ++lane)
++            r.acc[lane] = floatBits(s.acc[lane]);
++        r.q = floatBits(s.q);
++        r.p = floatBits(s.p);
++        r.i = floatBits(s.i);
++        r.r = s.r;
++        r.pc = s.pc;
++        r.mac = s.mac;
++        r.clip = s.clip;
++        r.status = s.status;
++        r.cycles = s.cycles;
++        r.ebit = s.ebit;
++        r.haltAfterDelaySlot = s.haltAfterDelaySlot;
++        r.dBitEnabled = s.dBitEnabled;
++        r.tBitEnabled = s.tBitEnabled;
++        r.stoppedByD = s.stoppedByD;
++        r.stoppedByT = s.stoppedByT;
++        r.branchPending = s.branchPending;
++        r.top = s.top;
++        r.itop = s.itop;
++        r.branchTarget = s.branchTarget;
++        r.branchDelay = s.branchDelay;
++        return r;
++    }
++
++    inline void fromRecord(const StateRecord &r, VU1State &s)
++    {
++        for (int reg = 0; reg < 32; ++reg)
++            for (int lane = 0; lane < 4; ++lane)
++                s.vf[reg][lane] = bitsFloat(r.vf[reg][lane]);
++        for (int k = 0; k < 16; ++k)
++            s.vi[k] = r.vi[k];
++        for (int lane = 0; lane < 4; ++lane)
++            s.acc[lane] = bitsFloat(r.acc[lane]);
++        s.q = bitsFloat(r.q);
++        s.p = bitsFloat(r.p);
++        s.i = bitsFloat(r.i);
++        s.r = r.r;
++        s.pc = r.pc;
++        s.mac = r.mac;
++        s.clip = r.clip;
++        s.status = r.status;
++        s.cycles = r.cycles;
++        s.ebit = r.ebit != 0;
++        s.haltAfterDelaySlot = r.haltAfterDelaySlot != 0;
++        s.dBitEnabled = r.dBitEnabled != 0;
++        s.tBitEnabled = r.tBitEnabled != 0;
++        s.stoppedByD = r.stoppedByD != 0;
++        s.stoppedByT = r.stoppedByT != 0;
++        s.branchPending = r.branchPending != 0;
++        s.top = r.top;
++        s.itop = r.itop;
++        s.branchTarget = r.branchTarget;
++        s.branchDelay = r.branchDelay;
++    }
++
++    uint64_t hash64(const void *data, size_t bytes, uint64_t seed = 0x9E3779B97F4A7C15ull);
++
++    // PATH1 tap: VU1Interpreter::finishXgkick calls notifyPath1 for every XGKICK packet it sends.
++    using Path1TapFn = void (*)(void *ctx, const uint8_t *data, uint32_t size);
++    void setPath1Tap(Path1TapFn fn, void *ctx);
++    void notifyPath1(const uint8_t *data, uint32_t size);
++
++    class Recorder
++    {
++    public:
++        // Null unless PS2X_VU1_CAPTURE names a directory (created if missing).
++        static std::shared_ptr<Recorder> fromEnv();
++        Recorder(std::string dir, uint32_t maxFiles, uint32_t maxPerKey);
++        ~Recorder();
++
++        // Around one VU1 run. begin() decides whether the run is written; end() writes it.
++        void begin(Kind kind, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst,
++                   uint32_t vpuStat, uint32_t maxCycles, uint64_t codeGeneration,
++                   const uint8_t *code, const uint8_t *data, const VU1State &state);
++        void end(const uint8_t *data, const VU1State &state, uint32_t vpuStat);
++
++        uint32_t filesWritten() const;
++        uint64_t runsSeen() const;
++
++    private:
++        struct Impl;
++        std::unique_ptr<Impl> m_impl;
++    };
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 315e5ad..64dc019 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,6 +1,7 @@
+ #include "ps2_runtime.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_pc_sampler.h"
++#include "runtime/ps2_vu1_capture.h"
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+ #include "game_overrides.h"
+@@ -714,7 +715,9 @@ bool PS2Runtime::syncCoreSubsystems()
+     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                     { m_gs.processGIFPacket(data, size); });
+     m_memory.setGifArbiter(&m_gifArbiter);
+-    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
++    // PS2X_VU1_CAPTURE (runtime/ps2_vu1_capture.h): null unless set; read when the callbacks bind.
++    std::shared_ptr<ps2x::vu1capture::Recorder> vu1Capture = ps2x::vu1capture::Recorder::fromEnv();
++    m_memory.setVu1MscalCallback([this, vu1Capture](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                      if (!cpuContext)
+@@ -725,14 +728,21 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
+                                      m_vu1.state().tBitEnabled =
+                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
++                                     if (vu1Capture)
++                                         vu1Capture->begin(ps2x::vu1capture::Mscal, startPC, top, itop,
++                                                           cpuContext->vu0_fbrst, cpuContext->vu0_vpu_stat, 65536,
++                                                           m_memory.getVU1CodeGeneration(), m_memory.getVU1Code(),
++                                                           m_memory.getVU1Data(), m_vu1.state());
+                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                    m_gs, &m_memory, startPC, top, itop, 65536);
+                                      cpuContext->vu0_vpu_stat =
+                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+-                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
+-    m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
++                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u);
++                                     if (vu1Capture)
++                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
++    m_memory.setVu1MscntCallback([this, vu1Capture](uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                      if (!cpuContext)
+@@ -743,13 +753,20 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
+                                      m_vu1.state().tBitEnabled =
+                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
++                                     if (vu1Capture)
++                                         vu1Capture->begin(ps2x::vu1capture::Mscnt, m_vu1.state().pc, top, itop,
++                                                           cpuContext->vu0_fbrst, cpuContext->vu0_vpu_stat, 65536,
++                                                           m_memory.getVU1CodeGeneration(), m_memory.getVU1Code(),
++                                                           m_memory.getVU1Data(), m_vu1.state());
+                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                   m_gs, &m_memory, top, itop, 65536);
+                                      cpuContext->vu0_vpu_stat =
+                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+-                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
++                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u);
++                                     if (vu1Capture)
++                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
+     resetIop();
+     m_vu0.reset();
+     m_vu1.reset();
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp
+new file mode 100644
+index 0000000..12d3486
+--- /dev/null
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp
+@@ -0,0 +1,305 @@
++#include "runtime/ps2_vu1_capture.h"
++#include "runtime/ps2_memory.h"
++
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <filesystem>
++#include <iostream>
++#include <map>
++#include <mutex>
++#include <tuple>
++#include <unordered_set>
++#include <vector>
++
++namespace ps2x::vu1capture
++{
++    namespace
++    {
++        std::atomic<Path1TapFn> g_tapFn{nullptr};
++        std::atomic<void *> g_tapCtx{nullptr};
++
++        constexpr uint32_t kSummaryEvery = 4096u;
++    }
++
++    uint64_t hash64(const void *data, size_t bytes, uint64_t seed)
++    {
++        // 8 bytes per step multiply-xorshift; not cryptographic, only for dedupe/keys.
++        const uint8_t *p = static_cast<const uint8_t *>(data);
++        uint64_t h = seed ^ (bytes * 0xFF51AFD7ED558CCDull);
++        size_t i = 0;
++        for (; i + 8 <= bytes; i += 8)
++        {
++            uint64_t v;
++            std::memcpy(&v, p + i, 8);
++            h ^= v;
++            h *= 0x9FB21C651E98DF25ull;
++            h ^= h >> 29;
++        }
++        for (; i < bytes; ++i)
++        {
++            h ^= p[i];
++            h *= 0x100000001B3ull;
++        }
++        h ^= h >> 32;
++        return h;
++    }
++
++    void setPath1Tap(Path1TapFn fn, void *ctx)
++    {
++        g_tapCtx.store(ctx, std::memory_order_relaxed);
++        g_tapFn.store(fn, std::memory_order_release);
++    }
++
++    void notifyPath1(const uint8_t *data, uint32_t size)
++    {
++        if (Path1TapFn fn = g_tapFn.load(std::memory_order_acquire))
++            fn(g_tapCtx.load(std::memory_order_relaxed), data, size);
++    }
++
++    struct Recorder::Impl
++    {
++        std::string dir;
++        uint32_t maxFiles = 200;
++        uint32_t maxPerKey = 4;
++
++        struct KeyStats
++        {
++            uint64_t firstGeneration = 0;
++            uint64_t runs = 0;
++            uint64_t cycles = 0;
++            uint32_t files = 0;
++        };
++        using Key = std::tuple<uint32_t, uint32_t, uint64_t>; // kind, startPC, codeHash
++        std::map<Key, KeyStats> keys;
++        std::unordered_set<uint64_t> inputs;
++
++        uint64_t runsSeen = 0;
++        uint64_t budgetHits = 0;
++        uint64_t bytesWritten = 0;
++        uint32_t filesWritten = 0;
++        uint32_t lastSummaryFiles = 0;
++
++        uint64_t cachedGeneration = ~0ull;
++        const uint8_t *cachedCode = nullptr;
++        uint64_t cachedCodeHash = 0;
++
++        // The run in flight.
++        bool active = false;
++        bool recording = false;
++        Key key{};
++        FileHeader header{};
++        std::vector<uint8_t> code, dataBefore;
++        StateRecord before{};
++        std::vector<std::vector<uint8_t>> packets;
++
++        static void tap(void *ctx, const uint8_t *data, uint32_t size)
++        {
++            Impl *self = static_cast<Impl *>(ctx);
++            if (self->recording)
++                self->packets.emplace_back(data, data + size);
++        }
++
++        void writeSummary()
++        {
++            const std::string path = dir + "/summary.txt";
++            const std::string tmp = path + ".tmp";
++            FILE *f = std::fopen(tmp.c_str(), "wb");
++            if (!f)
++                return;
++            std::fprintf(f, "runs %llu\nfiles %u\nbytes %llu\nkeys %zu\nbudget_hits %llu\n",
++                         static_cast<unsigned long long>(runsSeen), filesWritten,
++                         static_cast<unsigned long long>(bytesWritten), keys.size(),
++                         static_cast<unsigned long long>(budgetHits));
++            std::fprintf(f, "kind pc code_hash first_gen runs cycles files\n");
++            for (const auto &[k, s] : keys)
++                std::fprintf(f, "%s 0x%04x %016llx %llu %llu %llu %u\n",
++                             std::get<0>(k) == Mscal ? "mscal" : "mscnt", std::get<1>(k),
++                             static_cast<unsigned long long>(std::get<2>(k)),
++                             static_cast<unsigned long long>(s.firstGeneration),
++                             static_cast<unsigned long long>(s.runs),
++                             static_cast<unsigned long long>(s.cycles), s.files);
++            std::fclose(f);
++            std::error_code ec;
++            std::filesystem::rename(tmp, path, ec);
++            if (ec)
++            {
++                std::filesystem::remove(path, ec);
++                std::filesystem::rename(tmp, path, ec);
++            }
++        }
++    };
++
++    std::shared_ptr<Recorder> Recorder::fromEnv()
++    {
++        const char *env = std::getenv("PS2X_VU1_CAPTURE");
++        if (!env || !*env)
++            return nullptr;
++        std::string spec(env);
++        uint32_t maxFiles = 200u, maxPerKey = 4u;
++        const size_t c1 = spec.find(',');
++        std::string dir = spec.substr(0, c1);
++        if (c1 != std::string::npos)
++        {
++            const std::string rest = spec.substr(c1 + 1);
++            const size_t c2 = rest.find(',');
++            maxFiles = static_cast<uint32_t>(std::strtoul(rest.substr(0, c2).c_str(), nullptr, 10));
++            if (c2 != std::string::npos)
++                maxPerKey = static_cast<uint32_t>(std::strtoul(rest.substr(c2 + 1).c_str(), nullptr, 10));
++        }
++        std::error_code ec;
++        std::filesystem::create_directories(dir, ec);
++        if (!std::filesystem::is_directory(dir, ec))
++        {
++            std::cerr << "[vu1-capture] not a directory: " << dir << std::endl;
++            return nullptr;
++        }
++        std::cerr << "[vu1-capture] dir=" << dir << " max_files=" << maxFiles
++                  << " max_per_key=" << maxPerKey << std::endl;
++        return std::make_shared<Recorder>(dir, maxFiles, maxPerKey);
++    }
++
++    Recorder::Recorder(std::string dir, uint32_t maxFiles, uint32_t maxPerKey)
++        : m_impl(std::make_unique<Impl>())
++    {
++        m_impl->dir = std::move(dir);
++        m_impl->maxFiles = maxFiles;
++        m_impl->maxPerKey = maxPerKey;
++        setPath1Tap(&Impl::tap, m_impl.get());
++    }
++
++    Recorder::~Recorder()
++    {
++        if (g_tapCtx.load(std::memory_order_relaxed) == m_impl.get())
++            setPath1Tap(nullptr, nullptr);
++        m_impl->writeSummary();
++    }
++
++    uint32_t Recorder::filesWritten() const { return m_impl->filesWritten; }
++    uint64_t Recorder::runsSeen() const { return m_impl->runsSeen; }
++
++    void Recorder::begin(Kind kind, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst,
++                         uint32_t vpuStat, uint32_t maxCycles, uint64_t codeGeneration,
++                         const uint8_t *code, const uint8_t *data, const VU1State &state)
++    {
++        Impl &m = *m_impl;
++        if (m.cachedCode != code || m.cachedGeneration != codeGeneration)
++        {
++            m.cachedCodeHash = hash64(code, PS2_VU1_CODE_SIZE);
++            m.cachedCode = code;
++            m.cachedGeneration = codeGeneration;
++        }
++        m.active = true;
++        m.recording = false;
++        m.key = Impl::Key{kind, startPC, m.cachedCodeHash};
++        Impl::KeyStats &ks = m.keys[m.key];
++        if (ks.runs == 0)
++            ks.firstGeneration = codeGeneration;
++
++        FileHeader &h = m.header;
++        h = FileHeader{};
++        std::memcpy(h.magic, kMagic, sizeof(kMagic));
++        h.version = kVersion;
++        h.headerBytes = sizeof(FileHeader);
++        h.kind = kind;
++        h.runIndex = static_cast<uint32_t>(m.runsSeen);
++        h.startPC = startPC;
++        h.top = top;
++        h.itop = itop;
++        h.fbrst = fbrst;
++        h.vpuStatBefore = vpuStat;
++        h.maxCycles = maxCycles;
++        h.codeGeneration = codeGeneration;
++        h.codeHash = m.cachedCodeHash;
++        h.codeBytes = PS2_VU1_CODE_SIZE;
++        h.dataBytes = PS2_VU1_DATA_SIZE;
++        h.stateBytes = sizeof(StateRecord);
++        m.before = toRecord(state);
++
++        if (m.filesWritten >= m.maxFiles || ks.files >= m.maxPerKey)
++            return;
++        const uint32_t params[5] = {kind, startPC, top, itop, fbrst};
++        uint64_t in = hash64(params, sizeof(params), m.cachedCodeHash);
++        in = hash64(data, PS2_VU1_DATA_SIZE, in);
++        // The cycle counter always differs; MSCAL also overwrites pc/branch/stop state (execute()).
++        StateRecord inputState = m.before;
++        inputState.cycles = 0;
++        if (kind == Mscal)
++        {
++            inputState.pc = inputState.branchTarget = inputState.branchDelay = 0;
++            inputState.ebit = inputState.haltAfterDelaySlot = inputState.branchPending = 0;
++            inputState.stoppedByD = inputState.stoppedByT = 0;
++            inputState.top = inputState.itop = 0;
++        }
++        in = hash64(&inputState, sizeof(inputState), in);
++        if (!m.inputs.insert(in).second)
++            return;
++        h.inputHash = in;
++        m.code.assign(code, code + PS2_VU1_CODE_SIZE);
++        m.dataBefore.assign(data, data + PS2_VU1_DATA_SIZE);
++        m.packets.clear();
++        m.recording = true;
++    }
++
++    void Recorder::end(const uint8_t *data, const VU1State &state, uint32_t vpuStat)
++    {
++        Impl &m = *m_impl;
++        if (!m.active)
++            return;
++        m.active = false;
++        FileHeader &h = m.header;
++        h.cyclesRun = state.cycles - m.before.cycles;
++        if (h.cyclesRun >= h.maxCycles)
++        {
++            h.flags |= FlagBudgetHit;
++            ++m.budgetHits;
++        }
++        h.vpuStatAfter = vpuStat;
++        Impl::KeyStats &ks = m.keys[m.key];
++        ++ks.runs;
++        ks.cycles += h.cyclesRun;
++        ++m.runsSeen;
++
++        if (m.recording)
++        {
++            m.recording = false;
++            h.packetCount = static_cast<uint32_t>(m.packets.size());
++            const StateRecord after = toRecord(state);
++            char name[64];
++            std::snprintf(name, sizeof(name), "/vu1-%06u-%04x.cap", m.filesWritten, h.startPC);
++            const std::string path = m.dir + name;
++            FILE *f = std::fopen(path.c_str(), "wb");
++            if (f)
++            {
++                uint64_t bytes = 0;
++                auto put = [&](const void *p, size_t n)
++                {
++                    std::fwrite(p, 1, n, f);
++                    bytes += n;
++                };
++                put(&h, sizeof(h));
++                put(m.code.data(), m.code.size());
++                put(m.dataBefore.data(), m.dataBefore.size());
++                put(&m.before, sizeof(m.before));
++                put(data, PS2_VU1_DATA_SIZE);
++                put(&after, sizeof(after));
++                for (const auto &pk : m.packets)
++                {
++                    const uint32_t size = static_cast<uint32_t>(pk.size());
++                    put(&size, sizeof(size));
++                    put(pk.data(), pk.size());
++                }
++                std::fclose(f);
++                ++m.filesWritten;
++                ++ks.files;
++                m.bytesWritten += bytes;
++            }
++            m.packets.clear();
++        }
++        if (m.filesWritten != m.lastSummaryFiles || (m.runsSeen % kSummaryEvery) == 0)
++        {
++            m.lastSummaryFiles = m.filesWritten;
++            m.writeSummary();
++        }
++    }
++}
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 9188878..590237e 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -2,6 +2,7 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_pc_sampler.h"
++#include "runtime/ps2_vu1_capture.h"
+ #include "runtime/ps2_memory.h"
+ #include "ps2_vu1_detail.h"
+ 
+@@ -920,6 +921,7 @@ void VU1Interpreter::finishXgkick()
+     if (!m_xgkick.active)
+         return;
+ 
++    ps2x::vu1capture::notifyPath1(m_xgkick.packet.data(), m_xgkick.totalBytes);
+     if (m_activeMemory)
+         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
+     else if (m_activeGs)
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 0754b69..3576492 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -4,10 +4,17 @@
+ #include "runtime/gs/ps2_gs_psmct32.h"
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_vu1.h"
++#include "runtime/ps2_vu1_capture.h"
++#include "ps2_runtime.h"
+ 
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
++#include <cstdlib>
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <iterator>
+ #include <limits>
+ #include <vector>
+ 
+@@ -1712,5 +1719,92 @@ void register_ps2_vu1_tests()
+             t.Equals(vu1.state().vi[1], 0,
+                      "instruction following a reserved opcode must not execute");
+         });
++        tc.Run("PS2X_VU1_CAPTURE writes inputs, outputs and the PATH1 packet of an MSCAL run", [](TestCase &t)
++        {
++            namespace cap = ps2x::vu1capture;
++            const std::filesystem::path dir =
++                std::filesystem::temp_directory_path() /
++                ("ps2x-vu1-capture-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
++            std::error_code ec;
++            std::filesystem::remove_all(dir, ec);
++            const std::string spec = dir.string() + ",8,2";
++#ifdef _MSC_VER
++            _putenv_s("PS2X_VU1_CAPTURE", spec.c_str());
++#else
++            setenv("PS2X_VU1_CAPTURE", spec.c_str(), 1);
++#endif
++            std::vector<uint8_t> packet(32u, 0u);
++            {
++                PS2Runtime runtime;
++                t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++                t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
++#ifdef _MSC_VER
++                _putenv_s("PS2X_VU1_CAPTURE", "");
++#else
++                unsetenv("PS2X_VU1_CAPTURE");
++#endif
++                uint8_t *code = runtime.memory().getVU1Code();
++                uint8_t *data = runtime.memory().getVU1Data();
++                std::memset(code, 0, PS2_VU1_CODE_SIZE);
++                std::memset(data, 0, PS2_VU1_DATA_SIZE);
++                // 0x40: XGKICK vi0 ; 0x48: IADDIU vi1, vi0, 5 with E bit ; 0x50: delay slot.
++                writeVuInstructionPair(code, 0x40u, makeVuLowerSpecial(0x6Cu, 0u), kVuUpperNop);
++                writeVuInstructionPair(code, 0x48u, makeVuIaddiu(1u, 0u, 5), kVuUpperNop | 0x40000000u);
++                writeVuInstructionPair(code, 0x50u, 0u, kVuUpperNop);
++                const uint64_t gifTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
++                std::memcpy(data, &gifTag, sizeof(gifTag));
++                for (uint32_t i = 0; i < 16u; ++i)
++                    data[16u + i] = static_cast<uint8_t>(0xA0u + i);
++                std::memcpy(packet.data(), data, packet.size());
++
++                // Same inputs twice: the second run is a duplicate and must not be written.
++                for (int run = 0; run < 2; ++run)
++                {
++                    runtime.vu1().state().vi[1] = 0;
++                    const uint32_t mscal = makeVifCmd(0x14u, 0u, 0x40u / 8u);
++                    runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
++                }
++                t.Equals(runtime.vu1().state().vi[1], 5, "the program ran");
++            }
++
++            std::vector<std::filesystem::path> files;
++            for (const auto &e : std::filesystem::directory_iterator(dir, ec))
++                if (e.path().extension() == ".cap")
++                    files.push_back(e.path());
++            t.Equals(files.size(), static_cast<size_t>(1u), "one capture file (the duplicate run is not written)");
++            t.IsTrue(std::filesystem::exists(dir / "summary.txt"), "summary.txt is written");
++            if (files.size() != 1u)
++                return;
++            std::ifstream in(files[0], std::ios::binary);
++            const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++            cap::FileHeader h{};
++            t.IsTrue(bytes.size() >= sizeof(h), "file holds a header");
++            if (bytes.size() < sizeof(h))
++                return;
++            std::memcpy(&h, bytes.data(), sizeof(h));
++            t.IsTrue(std::memcmp(h.magic, cap::kMagic, 8) == 0, "magic");
++            t.Equals(h.version, cap::kVersion, "version");
++            t.Equals(h.kind, static_cast<uint32_t>(cap::Mscal), "kind = MSCAL");
++            t.Equals(h.startPC, 0x40u, "start pc in bytes");
++            t.Equals(h.packetCount, 1u, "one PATH1 packet");
++            t.IsTrue(h.cyclesRun > 0u && (h.flags & cap::FlagBudgetHit) == 0u, "cycles counted, budget not hit");
++            const size_t base = sizeof(h) + h.codeBytes + 2u * h.dataBytes + 2u * h.stateBytes;
++            t.Equals(bytes.size(), base + 4u + 32u, "file size = sections + one 32-byte packet");
++            if (bytes.size() != base + 4u + 32u)
++                return;
++            cap::StateRecord before{}, after{};
++            std::memcpy(&before, bytes.data() + sizeof(h) + h.codeBytes + h.dataBytes, sizeof(before));
++            std::memcpy(&after, bytes.data() + sizeof(h) + h.codeBytes + 2u * h.dataBytes + h.stateBytes, sizeof(after));
++            t.Equals(before.vi[1], 0, "state before: vi1 = 0");
++            t.Equals(after.vi[1], 5, "state after: vi1 = 5");
++            uint32_t lower = 0;
++            std::memcpy(&lower, bytes.data() + sizeof(h) + 0x40u, 4u);
++            t.Equals(lower, makeVuLowerSpecial(0x6Cu, 0u), "code section holds micro memory");
++            uint32_t size = 0;
++            std::memcpy(&size, bytes.data() + base, 4u);
++            t.Equals(size, 32u, "packet size");
++            t.IsTrue(std::memcmp(bytes.data() + base + 4u, packet.data(), 32u) == 0, "packet bytes = GIFtag + IMAGE qword");
++            std::filesystem::remove_all(dir, ec);
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+
