@@ -100,7 +100,7 @@ cmd_recompile() {
     local srcs=("$w\\*.cpp") hdrs=("$w\\ps2_recompiled_functions.h" "$w\\ps2_recompiled_stubs.h") out
     # Overlays (ovl-cycle.sh demo submain netdnas).
     cd "$OB_OVL" || return 1
-    for o in demo submain netdnas; do
+    for o in demo submain netdnas game single; do
         up=$(echo "$o" | tr a-z A-Z)
         asm="$OB_SPLAT/en/$o"; [ -d "$asm" ] || asm="$OB_SPLAT/$o"
         "$PY" -I "$REPO/tools/mwo3_to_elf.py" "$OB_RUN/PROG/$up.BIN" "$o.elf" || return 1

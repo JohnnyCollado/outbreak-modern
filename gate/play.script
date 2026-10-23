@@ -85,4 +85,15 @@ wait vsync 600
 capture load15s 2
 wait vsync 900
 capture load30s 2
+log scenario loading: sample every 30 s up to ~4 min (first room not yet identified)
+wait vsync 1800
+capture load60s 2
+wait vsync 1800
+capture load90s 2
+wait vsync 1800
+capture load120s 2
+wait vsync 3600
+capture load180s 2
+wait vsync 3600
+capture load240s 2
 quit
