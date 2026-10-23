@@ -26,6 +26,9 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   (override with `OB_PY`).
 - Pins (`pins.md`): MSVC 19.44 / VS 2022, CMake 3.30, PS2Recomp `eb8688b` + `upstream/ps2recomp/` patches,
   PCSX2 v2.9.134, game SLPM-65428 v1.04 + English patch v2.1.
+- `PS2X_PC_SAMPLE=<path.csv>` (patch 0030): guest PC sampling profiler (~550 Hz measured: 1 ms sleeps); CSV `tick,tid,pc,count,vu1,iop,gs,gsvsync`
+  per 64-vsync bucket (pc 0 = outside guest code). `PS2X_FRAME_TIME=<path.csv>` (0027/0029): per-vsync `tick,wall_us,busy_us`.
+  Summarize: `python -I tools/ob/pc_profile.py <csv> --from T --to T` (maps pcs to functions).
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
 ## Paths

@@ -1,0 +1,556 @@
+From a6fadcf93939c6c0a2b27542bb2245f327eace65 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 02:30:34 -0400
+Subject: [PATCH] Runtime: guest PC sampling profiler (PS2X_PC_SAMPLE)
+
+When PS2X_PC_SAMPLE=<path.csv> is set, EeScheduler::reset starts a host thread that samples at ~1 kHz the pc of the guest context the EE executor is running (std::atomic_ref relaxed read of ctx->pc, racy by design), the guest thread id, the vsync tick, and four section flags: vu1 (VU1Interpreter::run), iop (IOP RPC, SIF transfer, runEeCycles), gs (PCSX2 gifPacket from the GIF arbiter), gsvsync (PCSX2 vsync + snapshot at VBlankStart). The CSV "tick,tid,pc,count,vu1,iop,gs,gsvsync" has one row per (64-tick bucket, thread, pc); pc 0 = executor outside guest code. Rewritten every ~2 s (tmp + rename) and at the end of run(), so a killed run loses at most 2 s. Unset: no thread, one bool load per flag site.
+---
+ ps2xRuntime/CMakeLists.txt                   |   1 +
+ ps2xRuntime/include/runtime/ee_scheduler.h   |   4 +
+ ps2xRuntime/include/runtime/ps2_pc_sampler.h |  92 ++++++++++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp   |  19 +++
+ ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp   |   4 +
+ ps2xRuntime/src/lib/ps2_pc_sampler.cpp       | 142 +++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          |   4 +
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp      |   2 +
+ ps2xTest/src/ps2_gs_external_tests.cpp       |  86 +++++++++++
+ 9 files changed, 354 insertions(+)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_pc_sampler.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_pc_sampler.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 8b2991b..d26e440 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -388,6 +388,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
+     src/lib/ps2_frame_dump.cpp
++    src/lib/ps2_pc_sampler.cpp
+     src/lib/ps2_input_script.cpp
+     src/lib/gs/ps2_gs_memory.cpp
+     src/lib/gs/gs_frontend.cpp
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index d58b6a6..5cc4208 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "ps2_runtime.h"
++#include "runtime/ps2_pc_sampler.h"
+ 
+ #include <array>
+ #include <atomic>
+@@ -465,4 +466,7 @@ private:
+     uint64_t m_frameTimePrevWaitNs = 0;
+     std::chrono::steady_clock::time_point m_frameTimePrevVBlank{};
+     bool m_frameTimeHavePrev = false;
++
++    // PS2X_PC_SAMPLE=<path> (read once in reset): guest PC sampler, null when unset.
++    std::unique_ptr<ps2x::pcsample::Sampler> m_pcSampler;
+ };
+diff --git a/ps2xRuntime/include/runtime/ps2_pc_sampler.h b/ps2xRuntime/include/runtime/ps2_pc_sampler.h
+new file mode 100644
+index 0000000..a6e45c1
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_pc_sampler.h
+@@ -0,0 +1,92 @@
++#pragma once
++
++// PS2X_PC_SAMPLE=<path.csv>: guest PC sampling profiler.
++//
++// When the variable is set, EeScheduler::reset starts a host thread that samples, at ~1 kHz
++// (the host sleep granularity: 1 ms once the process runs with a 1 ms timer, as raylib sets),
++// the pc of the guest context the EE executor is running, the guest thread id, the vsync tick,
++// and which of a few runtime sections the executor is inside (flags below). The aggregate is
++// written as CSV "tick,tid,pc,count,vu1,iop,gs,gsvsync": one row per (tick bucket, thread, pc),
++// tick = first vsync of a kTickBucket-wide bucket, count = samples, the flag columns = how
++// many of those samples had the flag set. pc 0 / tid 0 = the executor was not inside guest
++// code (scheduler, event processing, idle wait). The file is rewritten every ~2 s (via
++// <path>.tmp + rename) and at stop, so a killed run loses at most the last two seconds.
++//
++// Reads of ctx->pc race with the generated code's plain stores; that is accepted for a
++// profiler (a sample may see a stale pc). The read itself goes through std::atomic_ref so it is
++// a real load each time. Unset: no thread; each flag site costs one relaxed bool load.
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <string>
++
++struct R5900Context;
++
++namespace ps2x::pcsample
++{
++    enum Flag : uint32_t
++    {
++        Vu1 = 0,     // VU1Interpreter::run (VU1 microcode)
++        Iop = 1,     // IOP subsystem calls on the EE executor (RPC, SIF transfer, runEeCycles)
++        Gs = 2,      // PS2ExternalGS::gifPacket from the GIF arbiter (PCSX2 GS)
++        GsVsync = 3, // PS2ExternalGS::vsync + snapshot from the scheduler's VBlankStart (PCSX2 GS)
++        kFlagCount = 4
++    };
++
++    constexpr uint64_t kTickBucket = 64u;
++
++    struct State
++    {
++        std::atomic<bool> enabled{false};
++        std::atomic<R5900Context *> context{nullptr}; // guest context being executed, or null
++        std::atomic<int32_t> threadId{0};
++        std::atomic<const std::atomic<uint64_t> *> tick{nullptr};
++        std::atomic<int32_t> depth[kFlagCount]{};
++    };
++
++    State &state() noexcept;
++
++    // RAII flag: counts nesting, so overlapping scopes of one flag are fine.
++    class Scope
++    {
++    public:
++        explicit Scope(Flag flag) noexcept
++            : m_flag(flag), m_on(state().enabled.load(std::memory_order_relaxed))
++        {
++            if (m_on)
++                state().depth[m_flag].fetch_add(1, std::memory_order_relaxed);
++        }
++        ~Scope()
++        {
++            if (m_on)
++                state().depth[m_flag].fetch_sub(1, std::memory_order_relaxed);
++        }
++        Scope(const Scope &) = delete;
++        Scope &operator=(const Scope &) = delete;
++
++    private:
++        Flag m_flag;
++        bool m_on;
++    };
++
++    class Sampler
++    {
++    public:
++        // Starts the sampling thread writing to path; tickSource is read for the vsync tick.
++        Sampler(std::string path, const std::atomic<uint64_t> *tickSource);
++        ~Sampler(); // stop()
++        void stop(); // joins the thread and writes the final CSV; idempotent
++
++        Sampler(const Sampler &) = delete;
++        Sampler &operator=(const Sampler &) = delete;
++
++        struct Impl;
++
++    private:
++        std::unique_ptr<Impl> m_impl;
++    };
++
++    // Reads PS2X_PC_SAMPLE; returns a running sampler or null when unset/empty.
++    std::unique_ptr<Sampler> startFromEnvironment(const std::atomic<uint64_t> *tickSource);
++}
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index e5c7488..71c10a5 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -4,6 +4,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_input_script.h"
++#include "runtime/ps2_pc_sampler.h"
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -158,6 +159,10 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+         }
+     }
+ 
++    // PS2X_PC_SAMPLE=<path>: guest PC sampling profiler (runtime/ps2_pc_sampler.h). Read once here.
++    m_pcSampler.reset();
++    m_pcSampler = ps2x::pcsample::startFromEnvironment(&m_runtime.memory().gs().vsyncTick);
++
+     GuestThread main{};
+     main.id = kMainThreadId;
+     main.context = mainContext;
+@@ -321,17 +326,28 @@ void EeScheduler::run()
+         {
+             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+             m_guestExecuting.store(true, std::memory_order_release);
++            if (m_pcSampler)
++            {
++                ps2x::pcsample::state().threadId.store(running->id, std::memory_order_relaxed);
++                ps2x::pcsample::state().context.store(&context, std::memory_order_release);
++            }
+             function(m_rdram, &context, &m_runtime);
++            if (m_pcSampler)
++                ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_insideInterrupt = false;
+         }
+         catch (const EeDispatcherTransfer &)
+         {
++            if (m_pcSampler)
++                ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_insideInterrupt = false;
+         }
+         catch (...)
+         {
++            if (m_pcSampler)
++                ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_running.store(false, std::memory_order_release);
+             publishSnapshot();
+@@ -352,6 +368,8 @@ void EeScheduler::run()
+ 
+     m_guestExecuting.store(false, std::memory_order_release);
+     m_running.store(false, std::memory_order_release);
++    if (m_pcSampler)
++        m_pcSampler->stop(); // writes the final CSV; the process may exit before destruction
+     copyMainContextToRuntime();
+     publishSnapshot();
+ }
+@@ -1933,6 +1951,7 @@ void EeScheduler::processEvent(const EeEvent &event)
+         }
+         if (PS2ExternalGS *externalGS = ps2ExternalGS())
+         {
++            ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
+             externalGS->vsync(m_vsyncTick, m_runtime.memory().gs());
+             PresentationFrame frame{};
+             if (externalGS->snapshot(frame.pixels, frame.width, frame.height))
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index b4857e5..a0fdcfd 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_external.h"
++#include "runtime/ps2_pc_sampler.h"
+ #include <algorithm>
+ #include <cstring>
+ 
+@@ -59,7 +60,10 @@ void GifArbiter::drain()
+         if (!pkt.data.empty())
+         {
+             if (externalGS)
++            {
++                ps2x::pcsample::Scope gsScope(ps2x::pcsample::Gs);
+                 externalGS->gifPacket(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
++            }
+             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_pc_sampler.cpp b/ps2xRuntime/src/lib/ps2_pc_sampler.cpp
+new file mode 100644
+index 0000000..010ae28
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_pc_sampler.cpp
+@@ -0,0 +1,142 @@
++#include "runtime/ps2_pc_sampler.h"
++
++#include "ps2_runtime_api.h"
++
++#include <chrono>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <thread>
++#include <tuple>
++
++namespace ps2x::pcsample
++{
++    State &state() noexcept
++    {
++        static State s;
++        return s;
++    }
++
++    struct Sampler::Impl
++    {
++        struct Key
++        {
++            uint64_t tick = 0u;
++            int32_t tid = 0;
++            uint32_t pc = 0u;
++            bool operator<(const Key &o) const
++            {
++                return std::tie(tick, tid, pc) < std::tie(o.tick, o.tid, o.pc);
++            }
++        };
++        struct Counts
++        {
++            uint64_t count = 0u;
++            uint64_t flags[kFlagCount]{};
++        };
++
++        std::string path;
++        std::thread thread;
++        std::atomic<bool> stopRequested{false};
++        bool stopped = false;
++        std::map<Key, Counts> counts; // sampler thread only (the final write runs after join)
++
++        void sampleOnce()
++        {
++            State &st = state();
++            Key key{};
++            const std::atomic<uint64_t> *tick = st.tick.load(std::memory_order_relaxed);
++            if (tick)
++                key.tick = (tick->load(std::memory_order_relaxed) / kTickBucket) * kTickBucket;
++            if (R5900Context *ctx = st.context.load(std::memory_order_acquire))
++            {
++                key.pc = std::atomic_ref<uint32_t>(ctx->pc).load(std::memory_order_relaxed);
++                key.tid = st.threadId.load(std::memory_order_relaxed);
++            }
++            Counts &c = counts[key];
++            ++c.count;
++            for (uint32_t f = 0; f < kFlagCount; ++f)
++                if (st.depth[f].load(std::memory_order_relaxed) > 0)
++                    ++c.flags[f];
++        }
++
++        void write() const
++        {
++            const std::string tmp = path + ".tmp";
++            {
++                std::ofstream out(tmp, std::ios::out | std::ios::trunc);
++                if (!out.is_open())
++                    return;
++                out << "tick,tid,pc,count,vu1,iop,gs,gsvsync\n";
++                for (const auto &[key, c] : counts)
++                {
++                    out << key.tick << ',' << key.tid << ",0x" << std::hex << key.pc << std::dec << ',' << c.count;
++                    for (uint32_t f = 0; f < kFlagCount; ++f)
++                        out << ',' << c.flags[f];
++                    out << '\n';
++                }
++            }
++            std::error_code ec;
++            std::filesystem::rename(tmp, path, ec);
++        }
++
++        void loop()
++        {
++            using clock = std::chrono::steady_clock;
++            auto nextWrite = clock::now() + std::chrono::seconds(2);
++            while (!stopRequested.load(std::memory_order_acquire))
++            {
++                std::this_thread::sleep_for(std::chrono::milliseconds(1));
++                sampleOnce();
++                if (clock::now() >= nextWrite)
++                {
++                    write();
++                    nextWrite = clock::now() + std::chrono::seconds(2);
++                }
++            }
++        }
++    };
++
++    Sampler::Sampler(std::string path, const std::atomic<uint64_t> *tickSource)
++        : m_impl(std::make_unique<Impl>())
++    {
++        m_impl->path = std::move(path);
++        State &st = state();
++        st.context.store(nullptr, std::memory_order_relaxed);
++        st.threadId.store(0, std::memory_order_relaxed);
++        st.tick.store(tickSource, std::memory_order_relaxed);
++        for (auto &d : st.depth)
++            d.store(0, std::memory_order_relaxed);
++        st.enabled.store(true, std::memory_order_release);
++        m_impl->thread = std::thread([impl = m_impl.get()] { impl->loop(); });
++    }
++
++    Sampler::~Sampler()
++    {
++        stop();
++    }
++
++    void Sampler::stop()
++    {
++        if (!m_impl || m_impl->stopped)
++            return;
++        m_impl->stopped = true;
++        m_impl->stopRequested.store(true, std::memory_order_release);
++        if (m_impl->thread.joinable())
++            m_impl->thread.join();
++        State &st = state();
++        st.enabled.store(false, std::memory_order_release);
++        st.context.store(nullptr, std::memory_order_relaxed);
++        st.tick.store(nullptr, std::memory_order_relaxed);
++        m_impl->write();
++    }
++
++    std::unique_ptr<Sampler> startFromEnvironment(const std::atomic<uint64_t> *tickSource)
++    {
++        const char *path = std::getenv("PS2X_PC_SAMPLE");
++        if (!path || !*path)
++            return nullptr;
++        return std::make_unique<Sampler>(path, tickSource);
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 0e67a9b..315e5ad 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,5 +1,6 @@
+ #include "ps2_runtime.h"
+ #include "ps2_log.h"
++#include "runtime/ps2_pc_sampler.h"
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+ #include "game_overrides.h"
+@@ -636,6 +637,7 @@ bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
+ 
+ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
+ {
++    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
+     auto scope = m_iopHost->enterCall(ctx, rdram);
+     request.callToken = scope.token();
+     return m_iopSubsystem->handleRpc(request);
+@@ -643,12 +645,14 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
+ 
+ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
+ {
++    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
+     auto scope = m_iopHost->enterCall(nullptr, rdram);
+     m_iopSubsystem->onSifTransfer(transfer);
+ }
+ 
+ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+ {
++    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
+     m_iopSubsystem->runEeCycles(eeCycles);
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index bd75bba..9188878 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/ps2_pc_sampler.h"
+ #include "runtime/ps2_memory.h"
+ #include "ps2_vu1_detail.h"
+ 
+@@ -1624,6 +1625,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+ {
++    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Vu1);
+     m_activeVuData = vuData;
+     m_activeVuDataSize = dataSize;
+     m_activeGs = &gs;
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index e2a2a44..c43c496 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -12,6 +12,7 @@
+ #include <fstream>
+ #include <sstream>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ namespace
+@@ -325,6 +326,32 @@ namespace
+         std::filesystem::remove(path, ec);
+         return run;
+     }
++
++    // PS2X_PC_SAMPLE: the guest spins for kPcSampleSpinMs with ctx->pc at kPcSampleLoopPc, then stops.
++    constexpr uint32_t kPcSampleEntryPc = 0x00171000u;
++    constexpr uint32_t kPcSampleLoopPc = 0x00171010u;
++    constexpr int kPcSampleSpinMs = 400;
++
++    void pcSampleSpin(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPcSampleSpinMs);
++        while (std::chrono::steady_clock::now() < end)
++            ctx->pc = kPcSampleLoopPc;
++        ctx->pc = 0u;
++        runtime->requestStop();
++    }
++
++    void setPcSampleEnv(const char *value)
++    {
++#ifdef _MSC_VER
++        _putenv_s("PS2X_PC_SAMPLE", value);
++#else
++        if (value && *value)
++            setenv("PS2X_PC_SAMPLE", value, 1);
++        else
++            unsetenv("PS2X_PC_SAMPLE");
++#endif
++    }
+ }
+ 
+ void register_ps2_gs_external_tests()
+@@ -548,5 +575,64 @@ void register_ps2_gs_external_tests()
+                      "an idle guest is busy for under a quarter of the frame (busy " + std::to_string(busySum) +
+                          " us of wall " + std::to_string(wallSum) + " us)");
+         });
++
++        tc.Run("PS2X_PC_SAMPLE writes a pc histogram whose top entry is the pc the guest spins on", [](TestCase &t)
++        {
++            const std::filesystem::path path =
++                std::filesystem::temp_directory_path() /
++                ("ps2x-pc-sample-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
++            std::error_code ec;
++            std::filesystem::remove(path, ec);
++            const std::string pathStr = path.string();
++            setPcSampleEnv(pathStr.c_str());
++            {
++                std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++                PS2Runtime runtime;
++                runtime.registerFunction(kPcSampleEntryPc, pcSampleSpin);
++                R5900Context mainContext{};
++                mainContext.pc = kPcSampleEntryPc;
++                runtime.eeScheduler().reset(rdram.data(), mainContext);
++                runtime.eeScheduler().run();
++            }
++            setPcSampleEnv("");
++
++            std::ifstream in(path);
++            t.IsTrue(in.is_open(), "the pc-sample CSV exists");
++            std::string header;
++            std::getline(in, header);
++            t.IsTrue(header == "tick,tid,pc,count,vu1,iop,gs,gsvsync", "header line (got '" + header + "')");
++            std::unordered_map<uint32_t, uint64_t> byPc;
++            uint64_t total = 0u;
++            for (std::string line; std::getline(in, line);)
++            {
++                if (line.empty())
++                    continue;
++                std::vector<std::string> cols;
++                std::stringstream ss(line);
++                for (std::string col; std::getline(ss, col, ',');)
++                    cols.push_back(col);
++                if (cols.size() != 8u)
++                    continue;
++                const uint32_t pc = static_cast<uint32_t>(std::stoul(cols[2], nullptr, 16));
++                const uint64_t count = std::stoull(cols[3]);
++                byPc[pc] += count;
++                total += count;
++            }
++            in.close();
++            std::filesystem::remove(path, ec);
++
++            uint32_t topPc = 0u;
++            uint64_t topCount = 0u;
++            for (const auto &[pc, count] : byPc)
++                if (count > topCount)
++                {
++                    topPc = pc;
++                    topCount = count;
++                }
++            t.IsTrue(total >= 10u, "at least 10 samples over the spin (got " + std::to_string(total) + ")");
++            t.IsTrue(topPc == kPcSampleLoopPc,
++                     "the top pc is the spin pc (top 0x" + [&] { std::ostringstream o; o << std::hex << topPc; return o.str(); }() +
++                         " with " + std::to_string(topCount) + " of " + std::to_string(total) + ")");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+
