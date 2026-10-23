@@ -45,6 +45,11 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
 - `PS2X_INPUT_INI=<path>` (engine, patches 0038/0040): host input bindings; default `<exe dir>/input.ini` when present,
   else the built-in mapping: PCSX2's keyboard and XInput defaults, both live (`native/input.ini.example`; controls
   table in `boot.md` "Input bindings"). `PS2X_PAD_PIPE=<name>` / `PS2X_PAD_SHOTS=<dir>` (plugin): the live pad.
+- `PS2X_IOP_BATCH=0` (engine, patch 0042): run the IOP at every EE checkpoint (32 EE cycles) as before 0042, for
+  A/B speed runs; stderr `[iop] batching off ...`. Default (unset or anything else): PCSX2's EEsCycle scheme, the
+  EE banks cycles and the IOP runs when they reach its next event (thread wake, timer, DMA completion, callback),
+  3072 EE cycles (PCSX2 `eeWaitCycles`), or an EE call into the IOP (RPC, SIF DMA/transfer, IOP memory, modules),
+  which syncs it first. A performance switch, not a diagnostic.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
 ## Host profiling: `OB_PROFILE=1` build and `tools/hostprof`

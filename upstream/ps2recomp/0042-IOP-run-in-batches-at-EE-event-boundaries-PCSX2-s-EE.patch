@@ -1,0 +1,748 @@
+From b73d34ae7b6d8d937282313712f23fc9b8d73ceb Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 10:15:05 -0400
+Subject: [PATCH] IOP: run in batches at EE event boundaries (PCSX2's EEsCycle
+ scheme)
+
+Every recompiled backward-branch checkpoint (32 EE cycles) ran the IOP for
+4 IOP cycles: a thread-map scan, timer service and a timeslice each time.
+runEeCycles now banks EE cycles and the IOP runs when they reach its next
+event (delayed-thread wake, DMA completion, CDVD callback, timer; 8 EE
+cycles per IOP cycle), 3072 EE cycles (PCSX2 eeWaitCycles = iopWaitCycles
+384 x 8), or before any EE call into the IOP (RPC, SIF transfer, IOP
+memory, heap, bind poll, modules), which syncs it first. Calls that may
+wake a thread or schedule an event reschedule the batch on return; a
+timeslice inside a batch ends at the next event.
+
+PS2X_IOP_BATCH=0 keeps the per-checkpoint stepping (A/B performance switch).
+DebugSnapshot: emulatorEeBatching, emulatorRuns, emulatorPendingEeCycles.
+
+Reference: PCSX2 v2.9.134 pcsx2/R5900.cpp _cpuEventTest_Shared,
+pcsx2/R3000A.cpp PSX_INT, iopEventTest.
+
+Tests: ps2_iop_batch_tests (fewer runs for the same cycles, event deadline,
+EE calls sync first); ps2x PS2SifDma (sceSifSetDma syncs, PS2X_IOP_BATCH=0).
+---
+ ps2xIOP/CMakeLists.txt                   |   4 +
+ ps2xIOP/include/ps2x/iop/iop_subsystem.h |   8 +
+ ps2xIOP/include/ps2x/iop/iop_types.h     |   3 +
+ ps2xIOP/src/emulator/iop_emulator.cpp    | 195 ++++++++++++++++++++-
+ ps2xIOP/src/emulator/iop_emulator.h      |   8 +
+ ps2xIOP/src/iop_subsystem.cpp            |  18 ++
+ ps2xIOP/tests/iop_batch_tests.cpp        | 208 +++++++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp      |  10 ++
+ ps2xTest/src/ps2_sif_dma_tests.cpp       |  50 ++++++
+ 9 files changed, 496 insertions(+), 8 deletions(-)
+ create mode 100644 ps2xIOP/tests/iop_batch_tests.cpp
+
+diff --git a/ps2xIOP/CMakeLists.txt b/ps2xIOP/CMakeLists.txt
+index 3cc409f..4087d47 100644
+--- a/ps2xIOP/CMakeLists.txt
++++ b/ps2xIOP/CMakeLists.txt
+@@ -63,6 +63,10 @@ if(PS2X_IOP_BUILD_TESTS)
+     target_include_directories(ps2_iop_import_version_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+     add_test(NAME ps2_iop_import_version_tests COMMAND ps2_iop_import_version_tests)
+ 
++    add_executable(ps2_iop_batch_tests tests/iop_batch_tests.cpp)
++    target_link_libraries(ps2_iop_batch_tests PRIVATE ps2_iop)
++    add_test(NAME ps2_iop_batch_tests COMMAND ps2_iop_batch_tests)
++
+ endif()
+ 
+ install(TARGETS ps2_iop
+diff --git a/ps2xIOP/include/ps2x/iop/iop_subsystem.h b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+index 16dd7f3..3f304b8 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_subsystem.h
++++ b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+@@ -30,6 +30,14 @@ namespace ps2x::iop
+         // module key), or -1 when none is loaded.
+         [[nodiscard]] int32_t findModuleByName(std::string_view name) const;
+         void runEeCycles(uint64_t eeCycles) noexcept;
++        // Patch 0042, PCSX2's EEsCycle scheme: runEeCycles banks EE cycles and the IOP runs when they reach
++        // its next event (a thread wake, a timer, a DMA completion, a callback) or 3072 EE cycles, and
++        // before any EE call into the IOP below (RPC, SIF transfer, IOP memory, modules). Off: the IOP runs
++        // at every runEeCycles call (per checkpoint), as before. A performance switch; default on.
++        void setEeBatching(bool enabled) noexcept;
++        [[nodiscard]] bool eeBatching() const noexcept;
++        // Run the IOP up to the EE's time now.
++        void syncEe() noexcept;
+ 
+         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
+         [[nodiscard]] bool canBindRpc(uint32_t sid) const noexcept;
+diff --git a/ps2xIOP/include/ps2x/iop/iop_types.h b/ps2xIOP/include/ps2x/iop/iop_types.h
+index 3491440..6332d87 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_types.h
++++ b/ps2xIOP/include/ps2x/iop/iop_types.h
+@@ -149,6 +149,9 @@ namespace ps2x::iop
+         uint32_t emulatorLoadedModules = 0;
+         uint32_t emulatorThreads = 0;
+         uint32_t emulatorRpcServers = 0;
++        bool emulatorEeBatching = false;       // patch 0042: the IOP runs in batches (PS2X_IOP_BATCH)
++        uint64_t emulatorRuns = 0;             // how many times the IOP was run (one per batch, or per checkpoint)
++        uint64_t emulatorPendingEeCycles = 0;  // EE cycles the IOP is behind by (not run yet)
+         std::vector<DebugService> services;
+         std::vector<std::string> diagnostics;
+     };
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index f2254b3..b226da8 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -37,6 +37,13 @@ namespace ps2x::iop::detail
+         constexpr uint32_t kCallStackSize = 0x2000u;
+         constexpr uint32_t kCallStackCapacity = (kCallStackLimit - kCallStackBase) / kCallStackSize;
+         constexpr uint64_t kCdvdCompletionCycles = 128u;
++        // EE cycles per IOP cycle: PS2CLK / PSXCLK = 294.912 MHz / 36.864 MHz.
++        constexpr uint64_t kEeCyclesPerIopCycle = 8u;
++        // Largest batch of EE cycles the IOP is left behind by. PCSX2 runs the IOP only at EE event tests
++        // (R5900.cpp _cpuEventTest_Shared, EEsCycle = psxCpu->ExecuteBlock(EEsCycle)), which are at most
++        // eeWaitCycles = 3072 EE cycles apart (R5900.cpp:44); the IOP's own test interval is
++        // iopWaitCycles = 384 = 3072 / 8 (R3000A.cpp:31, "keep inline with EE wait cycle max").
++        constexpr uint64_t kEeBatchCycles = 3072u;
+ 
+         uint32_t physicalAddress(uint32_t address)
+         {
+@@ -131,7 +138,9 @@ namespace ps2x::iop::detail
+             moduleCursor = kModuleLoadBase;
+             totalCycles = 0;
+             totalInstructions = 0;
+-            eeCycleCarry = 0;
++            pendingEeCycles = 0;
++            flushAtEeCycles = 0;
++            runCount = 0;
+             activeCpu = nullptr;
+             lastError.clear();
+             servicingDmaInterrupts = false;
+@@ -561,8 +570,126 @@ namespace ps2x::iop::detail
+             servicingGuestCallbacks = false;
+         }
+ 
++        // The IOP cycle of its next event: a delayed thread's wake (DelayThread, vblank waits), a DMA
++        // completion, a scheduled guest callback (CDVD), a timer compare/overflow. UINT64_MAX = none.
++        uint64_t nextEventCycle() const
++        {
++            uint64_t next = kernel.nextWakeCycle(UINT64_MAX);
++            for (const auto &[irq, pending] : pendingDmaInterrupts)
++                next = std::min(next, pending.completionCycle);
++            if (!pendingGuestCallbacks.empty())
++                next = std::min(next, pendingGuestCallbacks.begin()->first);
++            return timrman.nextEventCycle(next);
++        }
++
++        // Batching (patch 0042): the banked EE cycles at which the IOP must run next. PCSX2 sets the EE's
++        // next event test so the IOP's next event is never overshot (R5900.cpp nextIopEventDeta,
++        // R3000A.cpp PSX_INT -> cpuSetNextEventDelta), and never further than eeWaitCycles.
++        void scheduleBatch()
++        {
++            uint64_t eeUntil = kEeBatchCycles;
++            const uint64_t next = nextEventCycle();
++            if (next != UINT64_MAX)
++            {
++                const uint64_t iopUntil = next > totalCycles ? next - totalCycles : 0u;
++                if (iopUntil < kEeBatchCycles / kEeCyclesPerIopCycle)
++                    eeUntil = iopUntil * kEeCyclesPerIopCycle;
++            }
++            // At least one IOP cycle, so a due event is serviced by the flush that reaches it.
++            flushAtEeCycles = std::max(eeUntil, kEeCyclesPerIopCycle);
++        }
++
++        // Run the IOP up to the EE's time (whole IOP cycles; the remainder stays banked), then schedule
++        // the next batch. Not while IOP code is running (an EE callback called from an IOP call): the
++        // outermost caller catches up afterwards.
++        void flushBatch() noexcept
++        {
++            if (iopDepth != 0u)
++                return;
++            const uint64_t iopCycles = pendingEeCycles / kEeCyclesPerIopCycle;
++            pendingEeCycles %= kEeCyclesPerIopCycle;
++            if (iopCycles)
++                runCycles(iopCycles);
++            try
++            {
++                scheduleBatch();
++            }
++            catch (...)
++            {
++                flushAtEeCycles = kEeCyclesPerIopCycle;
++            }
++        }
++
++        void runEeCycles(uint64_t eeCycles) noexcept
++        {
++            pendingEeCycles += eeCycles;
++            if (!eeBatching)
++            {
++                // Per-checkpoint stepping (PS2X_IOP_BATCH=0): the pre-0042 behaviour.
++                const uint64_t iopCycles = pendingEeCycles / kEeCyclesPerIopCycle;
++                pendingEeCycles %= kEeCyclesPerIopCycle;
++                if (iopCycles)
++                    runCycles(iopCycles);
++                return;
++            }
++            if (pendingEeCycles >= flushAtEeCycles)
++                flushBatch();
++        }
++
++        // Called before the EE touches IOP state (RPC, SIF transfer, IOP memory, module calls): the IOP
++        // first catches up with the EE, as PCSX2's SIF/DMA paths sync the IOP before acting.
++        void syncForEe() noexcept
++        {
++            if (eeBatching && iopDepth == 0u && pendingEeCycles >= kEeCyclesPerIopCycle)
++                flushBatch();
++        }
++
++        // After an EE call that may have changed IOP events (woken a thread, scheduled a DMA or a callback).
++        void afterEeCall() noexcept
++        {
++            if (!eeBatching || iopDepth != 0u)
++                return;
++            try
++            {
++                scheduleBatch();
++            }
++            catch (...)
++            {
++                flushAtEeCycles = kEeCyclesPerIopCycle;
++            }
++        }
++
++        // An EE-side call into the IOP: sync first; while it runs, IOP code reaching back into the
++        // emulator (host -> runtime -> IOP memory) does not sync again.
++        struct EeCall
++        {
++            Impl &impl;
++            bool changesEvents;
++            EeCall(Impl &owner, bool changes) noexcept
++                : impl(owner), changesEvents(changes)
++            {
++                impl.syncForEe();
++                ++impl.iopDepth;
++            }
++            ~EeCall()
++            {
++                --impl.iopDepth;
++                if (changesEvents)
++                    impl.afterEeCall();
++            }
++            EeCall(const EeCall &) = delete;
++            EeCall &operator=(const EeCall &) = delete;
++        };
++
+         void runCycles(uint64_t cycles) noexcept
+         {
++            ++runCount;
++            ++iopDepth;
++            struct DepthGuard
++            {
++                uint32_t &depth;
++                ~DepthGuard() { --depth; }
++            } depthGuard{iopDepth};
+             try
+             {
+                 const uint64_t target = totalCycles + cycles;
+@@ -584,7 +711,16 @@ namespace ps2x::iop::detail
+                         continue;
+                     }
+                     const uint64_t before = totalCycles;
+-                    runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, target - totalCycles)));
++                    uint64_t slice = std::min<uint64_t>(kDefaultSlice, target - totalCycles);
++                    if (eeBatching)
++                    {
++                        // A batch is up to 384 IOP cycles: end the slice at the next event (a wake, a
++                        // timer) so it is serviced on time, as per-checkpoint stepping did.
++                        const uint64_t nextEvent = nextEventCycle();
++                        if (nextEvent > totalCycles)
++                            slice = std::min(slice, nextEvent - totalCycles);
++                    }
++                    runCpu(next->cpu, static_cast<uint32_t>(slice));
+                     kernel.endTimeslice(*next, kThreadReturnSentinel);
+                     if (totalCycles == before)
+                         ++totalCycles;
+@@ -722,7 +858,11 @@ namespace ps2x::iop::detail
+         uint32_t moduleCursor = kModuleLoadBase;
+         uint64_t totalCycles = 0;
+         uint64_t totalInstructions = 0;
+-        uint64_t eeCycleCarry = 0;
++        bool eeBatching = true;       // patch 0042; a setting, kept across reset()
++        uint64_t pendingEeCycles = 0; // EE cycles the IOP has not run yet (with the sub-IOP-cycle remainder)
++        uint64_t flushAtEeCycles = 0; // run the IOP when pendingEeCycles reaches this (0: at the next checkpoint)
++        uint32_t iopDepth = 0u;       // > 0 while IOP code runs (runCycles or an EE call into the IOP)
++        uint64_t runCount = 0;        // runCycles calls: how many times the IOP was run
+         CpuState *activeCpu = nullptr;
+         std::string lastError;
+         bool servicingDmaInterrupts = false;
+@@ -745,69 +885,107 @@ namespace ps2x::iop::detail
+         m_impl->reset();
+     }
+ 
++    // Every EE-side entry below syncs the IOP first (Impl::EeCall); entries that can wake an IOP thread or
++    // schedule an IOP event also reschedule the next batch when they return.
+     ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
+     {
++        const Impl::EeCall call(*m_impl, true);
+         return m_impl->loadModule(path, arguments, argumentSize);
+     }
+ 
+     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+     {
++        const Impl::EeCall call(*m_impl, true);
+         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
+     }
+ 
+     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
+     {
++        const Impl::EeCall call(*m_impl, true);
+         return m_impl->stopModule(moduleId, result);
+     }
+ 
+     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
+     {
+-        const uint64_t total = m_impl->eeCycleCarry + eeCycles;
+-        const uint64_t iopCycles = total / 8u;
+-        m_impl->eeCycleCarry = total % 8u;
+-        if (iopCycles)
+-            m_impl->runCycles(iopCycles);
++        m_impl->runEeCycles(eeCycles);
++    }
++
++    void IopEmulator::syncEe() noexcept
++    {
++        m_impl->syncForEe();
++    }
++
++    void IopEmulator::setEeBatching(bool enabled) noexcept
++    {
++        if (!enabled)
++            m_impl->syncForEe();
++        m_impl->eeBatching = enabled;
++        m_impl->flushAtEeCycles = 0;
++    }
++
++    bool IopEmulator::eeBatching() const noexcept
++    {
++        return m_impl->eeBatching;
++    }
++
++    uint64_t IopEmulator::pendingEeCycles() const noexcept
++    {
++        return m_impl->pendingEeCycles;
++    }
++
++    uint64_t IopEmulator::runCount() const noexcept
++    {
++        return m_impl->runCount;
+     }
+ 
+     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
+     {
++        const Impl::EeCall call(*m_impl, true);
+         return m_impl->rpc.handleRpc(request, *m_impl);
+     }
+ 
+     bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
+     {
++        // The EE polling sceSifBindRpc sees a server once the IOP thread that registers it has run.
++        const Impl::EeCall call(*m_impl, false);
+         return m_impl->rpc.hasServer(sid);
+     }
+ 
+     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
+     {
++        const Impl::EeCall call(*m_impl, true);
+         m_impl->rpc.onSifTransfer(transfer);
+     }
+ 
+     uint32_t IopEmulator::allocateMemory(uint32_t size, uint32_t alignment)
+     {
++        const Impl::EeCall call(*m_impl, false);
+         return m_impl->memory.allocate(size, alignment);
+     }
+ 
+     bool IopEmulator::freeMemory(uint32_t address)
+     {
++        const Impl::EeCall call(*m_impl, false);
+         return m_impl->memory.freeAllocation(address);
+     }
+ 
+     bool IopEmulator::readMemory(uint32_t address, void *destination, size_t size) const
+     {
++        const Impl::EeCall call(*m_impl, false);
+         return isMemoryRange(address, size) &&
+                m_impl->memory.readRam(address, destination, size);
+     }
+ 
+     bool IopEmulator::writeMemory(uint32_t address, const void *source, size_t size)
+     {
++        const Impl::EeCall call(*m_impl, false);
+         return isMemoryRange(address, size) &&
+                m_impl->memory.writeRam(address, source, size);
+     }
+ 
+     bool IopEmulator::zeroMemory(uint32_t address, size_t size)
+     {
++        const Impl::EeCall call(*m_impl, false);
+         return isMemoryRange(address, size) &&
+                m_impl->memory.zeroRam(address, size);
+     }
+@@ -835,6 +1013,7 @@ namespace ps2x::iop::detail
+ 
+     int32_t IopEmulator::findModuleByName(std::string_view name) const
+     {
++        const Impl::EeCall call(*m_impl, false);
+         for (const auto &[id, module] : m_impl->modules)
+         {
+             if (!module.iopmodName.empty() && module.iopmodName == name)
+diff --git a/ps2xIOP/src/emulator/iop_emulator.h b/ps2xIOP/src/emulator/iop_emulator.h
+index 74d28c1..fa71471 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.h
++++ b/ps2xIOP/src/emulator/iop_emulator.h
+@@ -24,7 +24,15 @@ namespace ps2x::iop::detail
+         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments, uint32_t argumentSize);
+         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize);
+         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result);
++        // Banks EE cycles; the IOP runs when they reach its next event or a 3072-cycle batch (patch 0042),
++        // or at once per call when batching is off.
+         void runEeCycles(uint64_t eeCycles) noexcept;
++        // Run the IOP up to the EE's time now (the EE-side entries below do this themselves).
++        void syncEe() noexcept;
++        void setEeBatching(bool enabled) noexcept;
++        [[nodiscard]] bool eeBatching() const noexcept;
++        [[nodiscard]] uint64_t pendingEeCycles() const noexcept;
++        [[nodiscard]] uint64_t runCount() const noexcept;
+         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
+         [[nodiscard]] bool hasRpcServer(uint32_t sid) const noexcept;
+         void onSifTransfer(const SifTransfer &transfer);
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index c84b5fe..99a0a02 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -181,6 +181,21 @@ namespace ps2x::iop
+         m_impl->emulator.runEeCycles(eeCycles);
+     }
+ 
++    void IopSubsystem::setEeBatching(bool enabled) noexcept
++    {
++        m_impl->emulator.setEeBatching(enabled);
++    }
++
++    bool IopSubsystem::eeBatching() const noexcept
++    {
++        return m_impl->emulator.eeBatching();
++    }
++
++    void IopSubsystem::syncEe() noexcept
++    {
++        m_impl->emulator.syncEe();
++    }
++
+     RpcAbi IopSubsystem::selectRpcAbi(const RpcAbiRequest &request) const
+     {
+         for (const auto &service : m_impl->coreServices)
+@@ -269,6 +284,9 @@ namespace ps2x::iop
+         snapshot.emulatorLoadedModules = m_impl->emulator.loadedModuleCount();
+         snapshot.emulatorThreads = m_impl->emulator.threadCount();
+         snapshot.emulatorRpcServers = m_impl->emulator.rpcServerCount();
++        snapshot.emulatorEeBatching = m_impl->emulator.eeBatching();
++        snapshot.emulatorRuns = m_impl->emulator.runCount();
++        snapshot.emulatorPendingEeCycles = m_impl->emulator.pendingEeCycles();
+         snapshot.diagnostics = m_impl->loadOutcomes;
+         if (!m_impl->lastError.empty())
+         {
+diff --git a/ps2xIOP/tests/iop_batch_tests.cpp b/ps2xIOP/tests/iop_batch_tests.cpp
+new file mode 100644
+index 0000000..c8893c2
+--- /dev/null
++++ b/ps2xIOP/tests/iop_batch_tests.cpp
+@@ -0,0 +1,208 @@
++// Patch 0042: the IOP runs in batches at EE event boundaries (PCSX2's EEsCycle scheme).
++#include "iop_compat_test_support.h"
++
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <string>
++
++namespace
++{
++    using namespace iop_test;
++
++    constexpr uint32_t kEeCheckpoint = 32u; // the recompiler's backward-branch charge (ps2x_eeCheckpointDue)
++    constexpr uint32_t kEeBatch = 3072u;    // PCSX2 eeWaitCycles
++
++    uint32_t jal(uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); }
++
++    // Entry: CreateThread(descriptor 0x10300) + StartThread, returns 0. The thread (0x10100) is `body`.
++    // thbase stubs at 0x10180: CreateThread +20, StartThread +28, DelayThread +36. stdio putchar at 0x101C0+20.
++    Irx threadModule(std::initializer_list<uint32_t> body)
++    {
++        constexpr uint32_t base = 0x10000u;
++        constexpr uint32_t createThread = base + 0x180u + 20u;
++        constexpr uint32_t startThread = base + 0x180u + 28u;
++        Irx image(base);
++        image.words(0x000u, {
++            0x27BDFFE0u, 0xAFBF001Cu,
++            0x3C040001u, 0x34840300u, jal(createThread), 0u,
++            0x00402021u, 0x00002821u, jal(startThread), 0u,
++            0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, 0u,
++        });
++        image.words(0x100u, body);
++        image.words(0x180u, {
++            0x41E00000u, 0u, 0x00000101u, 0x61626874u, 0x00006573u, // "thbase"
++            0x03E00008u, 0x24000004u,                                // CreateThread
++            0x03E00008u, 0x24000006u,                                // StartThread
++            0x03E00008u, 0x24000021u,                                // DelayThread (33)
++            0u, 0u,
++        });
++        image.words(0x1C0u, {
++            0x41E00000u, 0u, 0x00000101u, 0x69647473u, 0x0000006Fu, // "stdio"
++            0x03E00008u, 0x24000006u,                                // putchar
++            0u, 0u,
++        });
++        image.words(0x300u, {0u, 0u, base + 0x100u, 0x400u, 20u});
++        return image;
++    }
++
++    // DelayThread(1001 us) = 36901 IOP cycles: the wake falls inside a 3072-cycle batch, so fixed batches
++    // alone see it late (by 160 EE cycles in this test). Then putchar('W'), then return.
++    Irx delayThenMarkModule()
++    {
++        constexpr uint32_t delayThread = 0x10000u + 0x180u + 36u;
++        constexpr uint32_t putchar = 0x10000u + 0x1C0u + 20u;
++        return threadModule({
++            0x240403E9u, jal(delayThread), 0u, // DelayThread(1001)
++            0x24040057u, jal(putchar), 0u,     // putchar('W')
++            0x03E00008u, 0u,
++        });
++    }
++
++    Irx spinModule()
++    {
++        return threadModule({0x1000FFFFu, 0u}); // b . (a thread that is always ready)
++    }
++
++    bool marked(const Host &host)
++    {
++        return std::any_of(host.logs.begin(), host.logs.end(),
++                           [](const std::string &line) { return line.find("[IOP putchar] W") != std::string::npos; });
++    }
++
++    void load(IopSubsystem &iop, Host &host, const Irx &image)
++    {
++        image.install(host, 0x1000u);
++        const ModuleLoadResult result = iop.loadModuleBuffer(0x1000u);
++        require(result.handled && result.moduleId > 0 && result.startResult == 0, "synthetic IRX did not start");
++    }
++
++    struct Run
++    {
++        uint64_t cycles = 0u;
++        uint64_t runs = 0u;
++        uint64_t instructions = 0u;
++    };
++
++    // `checkpoints` backward-branch checkpoints of 32 EE cycles each, then catch up.
++    Run stepCheckpoints(const Irx *image, bool batching, uint32_t checkpoints)
++    {
++        Host host;
++        IopSubsystem iop(host);
++        iop.setEeBatching(batching);
++        if (image)
++            load(iop, host, *image);
++        const uint64_t runsBefore = iop.debugSnapshot().emulatorRuns;
++        for (uint32_t i = 0; i < checkpoints; ++i)
++            iop.runEeCycles(kEeCheckpoint);
++        iop.syncEe();
++        const DebugSnapshot after = iop.debugSnapshot();
++        require(after.emulatorPendingEeCycles < 8u, "syncEe left whole IOP cycles unrun");
++        return {after.emulatorCycles, after.emulatorRuns - runsBefore, after.emulatorInstructions};
++    }
++
++    void batchingRunsTheIopFewerTimes()
++    {
++        constexpr uint32_t checkpoints = 9600u; // 307200 EE cycles = 38400 IOP cycles
++        const Irx spin = spinModule();
++        const std::array<const Irx *, 2> images{nullptr, &spin};
++        for (const Irx *image : images)
++        {
++            const Run off = stepCheckpoints(image, false, checkpoints);
++            const Run on = stepCheckpoints(image, true, checkpoints);
++            std::cout << "  " << (image ? "spinning thread" : "idle IOP") << ": per-checkpoint " << off.runs
++                      << " runs, batched " << on.runs << " runs, IOP cycles " << off.cycles << " / " << on.cycles
++                      << ", instructions " << off.instructions << " / " << on.instructions << '\n';
++            require(off.runs == checkpoints, "per-checkpoint stepping must run the IOP at every checkpoint");
++            require(on.cycles == off.cycles, "batching must run the IOP for the same number of cycles");
++            require(on.runs <= uint64_t{checkpoints} * kEeCheckpoint / kEeBatch + 2u,
++                    "batching must run the IOP about once per 3072 EE cycles");
++        }
++    }
++
++    // The EE cycle (after the thread is delayed) at which the woken thread's putchar is seen.
++    uint64_t wakeSeenAt(bool batching, uint64_t &runs)
++    {
++        Host host;
++        IopSubsystem iop(host);
++        iop.setEeBatching(batching);
++        load(iop, host, delayThenMarkModule());
++        iop.runEeCycles(8u * 64u); // the thread starts and calls DelayThread
++        iop.syncEe();
++        require(!marked(host), "the thread woke before its delay");
++        const uint64_t runsBefore = iop.debugSnapshot().emulatorRuns;
++        for (uint64_t ee = kEeCheckpoint; ee <= 8u * 40000u; ee += kEeCheckpoint)
++        {
++            iop.runEeCycles(kEeCheckpoint);
++            if (marked(host))
++            {
++                runs = iop.debugSnapshot().emulatorRuns - runsBefore;
++                return ee;
++            }
++        }
++        throw std::runtime_error("the delayed thread never woke");
++    }
++
++    void iopEventFiresOnTime()
++    {
++        uint64_t runsOff = 0u, runsOn = 0u;
++        const uint64_t off = wakeSeenAt(false, runsOff);
++        const uint64_t on = wakeSeenAt(true, runsOn);
++        std::cout << "  DelayThread(1001 us) wake seen at EE +" << off << " per-checkpoint (" << runsOff
++                  << " runs), +" << on << " batched (" << runsOn << " runs)\n";
++        // PCSX2: the EE's next event test is set to the IOP's next event (nextIopEventDeta), so the IOP
++        // reaches the wake at its EE time. Here the EE yields only at checkpoints: one checkpoint of slack.
++        require(on <= off + kEeCheckpoint, "the IOP event fired later than its EE deadline allows");
++        require(on + kEeCheckpoint >= off, "the IOP event fired before it was due");
++        require(runsOn * 20u < runsOff, "the wait was not batched");
++    }
++
++    void eeCallsIntoTheIopSyncFirst()
++    {
++        using Call = void (*)(IopSubsystem &);
++        const std::array<std::pair<const char *, Call>, 6> calls{{
++            {"SIF transfer", [](IopSubsystem &iop) {
++                 iop.onSifTransfer({SifTransferKind::SetDma, SifTransferPhase::AfterCopy, 0x800u, 0x20000u, 16u});
++             }},
++            {"IOP memory write (SIF DMA)", [](IopSubsystem &iop) {
++                 const uint32_t value = 1u;
++                 require(iop.writeMemory(0x20000u, &value, sizeof(value)), "write failed");
++             }},
++            {"IOP memory read", [](IopSubsystem &iop) {
++                 uint32_t value = 0u;
++                 require(iop.readMemory(0x20000u, &value, sizeof(value)), "read failed");
++             }},
++            {"RPC", [](IopSubsystem &iop) { (void)iop.handleRpc(request(0x12345u, 0u)); }},
++            {"RPC bind poll", [](IopSubsystem &iop) { (void)iop.canBindRpc(0x12345u); }},
++            {"IOP heap alloc", [](IopSubsystem &iop) { (void)iop.allocateMemory(64u); }},
++        }};
++        for (const auto &[name, call] : calls)
++        {
++            Host host;
++            IopSubsystem iop(host);
++            iop.runEeCycles(kEeCheckpoint); // the first checkpoint after reset runs and schedules a batch
++            const uint64_t before = iop.debugSnapshot().emulatorCycles;
++            for (int i = 0; i < 10; ++i)
++                iop.runEeCycles(kEeCheckpoint);
++            const DebugSnapshot banked = iop.debugSnapshot();
++            require(banked.emulatorCycles == before && banked.emulatorPendingEeCycles == 10u * kEeCheckpoint,
++                    "an idle IOP must bank checkpoints until its batch is due");
++            call(iop);
++            const DebugSnapshot synced = iop.debugSnapshot();
++            std::cout << "  " << name << ": IOP +" << synced.emulatorCycles - before << " cycles, "
++                      << synced.emulatorPendingEeCycles << " EE cycles still banked\n";
++            require(synced.emulatorCycles == before + 10u * kEeCheckpoint / 8u && synced.emulatorPendingEeCycles == 0u,
++                    "an EE call into the IOP must first run the IOP up to the EE's time");
++        }
++    }
++}
++
++int main()
++{
++    const Test tests[] = {
++        {"batching runs the IOP fewer times for the same EE cycles", batchingRunsTheIopFewerTimes},
++        {"an IOP event fires no later than its EE deadline", iopEventFiresOnTime},
++        {"an EE call into the IOP (SIF, RPC, memory) syncs it first", eeCallsIntoTheIopSyncFirst},
++    };
++    return run(tests);
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 77f0ea5..6b1ca1b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -527,6 +527,16 @@ PS2Runtime::PS2Runtime()
+ {
+     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
+     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
++    {
++        // PS2X_IOP_BATCH=0: run the IOP at every EE checkpoint (pre-0042) instead of in batches at its
++        // next event / 3072 EE cycles / an EE call into the IOP. A performance switch for A/B runs.
++        const char *iopBatchEnv = std::getenv("PS2X_IOP_BATCH");
++        if (iopBatchEnv && std::string_view(iopBatchEnv) == "0")
++        {
++            m_iopSubsystem->setEeBatching(false);
++            std::cerr << "[iop] batching off (PS2X_IOP_BATCH=0): the IOP runs at every EE checkpoint" << std::endl;
++        }
++    }
+ 
+     m_eeScheduler = std::make_unique<EeScheduler>(*this);
+ 
+diff --git a/ps2xTest/src/ps2_sif_dma_tests.cpp b/ps2xTest/src/ps2_sif_dma_tests.cpp
+index aace83c..34a4bfe 100644
+--- a/ps2xTest/src/ps2_sif_dma_tests.cpp
++++ b/ps2xTest/src/ps2_sif_dma_tests.cpp
+@@ -180,6 +180,56 @@ void register_ps2_sif_dma_tests()
+             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
+         });
+ 
++        tc.Run("sceSifSetDma runs the batched IOP up to the EE's time first (patch 0042)", [](TestCase &t)
++        {
++            TestEnv env;
++            t.IsTrue(env.runtime.iopDebugSnapshot().emulatorEeBatching, "IOP batching is on by default");
++
++            env.runtime.eeScheduler().accountCycles(32u); // first checkpoint after reset: runs, schedules a batch
++            const uint64_t before = env.runtime.iopDebugSnapshot().emulatorCycles;
++            for (int i = 0; i < 10; ++i)
++                env.runtime.eeScheduler().accountCycles(32u); // backward-branch checkpoints
++            t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles, before, "an idle IOP banks checkpoints");
++            t.Equals(env.runtime.iopDebugSnapshot().emulatorPendingEeCycles, uint64_t{320u}, "10 checkpoints banked");
++
++            constexpr uint32_t kDescAddr = 0x00020000u;
++            constexpr uint32_t kSrcAddr = 0x00020100u;
++            constexpr uint32_t kDstAddr = 0x00020200u;
++            const Ps2SifDmaTransfer desc{kSrcAddr, kDstAddr, 16, 0};
++            std::memcpy(env.rdram.data() + kDescAddr, &desc, sizeof(desc));
++            setRegU32(env.ctx, 4, kDescAddr);
++            setRegU32(env.ctx, 5, 1u);
++            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
++            t.IsTrue(getRegS32(env.ctx, 2) > 0, "sceSifSetDma succeeds");
++
++            const auto synced = env.runtime.iopDebugSnapshot();
++            t.Equals(synced.emulatorCycles, before + 40u, "the SIF DMA ran the IOP for the banked 320 EE cycles first");
++            t.Equals(synced.emulatorPendingEeCycles, uint64_t{0u}, "nothing left banked");
++        });
++
++        tc.Run("PS2X_IOP_BATCH=0 runs the IOP at every checkpoint (patch 0042)", [](TestCase &t)
++        {
++#ifdef _MSC_VER
++            _putenv_s("PS2X_IOP_BATCH", "0");
++#else
++            setenv("PS2X_IOP_BATCH", "0", 1);
++#endif
++            TestEnv env;
++#ifdef _MSC_VER
++            _putenv_s("PS2X_IOP_BATCH", "");
++#else
++            unsetenv("PS2X_IOP_BATCH");
++#endif
++            t.IsFalse(env.runtime.iopDebugSnapshot().emulatorEeBatching, "PS2X_IOP_BATCH=0 turns batching off");
++            const auto start = env.runtime.iopDebugSnapshot();
++            for (int i = 0; i < 10; ++i)
++                env.runtime.eeScheduler().accountCycles(32u);
++            const auto after = env.runtime.iopDebugSnapshot();
++            t.Equals(after.emulatorRuns - start.emulatorRuns, uint64_t{10u}, "one IOP run per checkpoint");
++            t.Equals(after.emulatorCycles - start.emulatorCycles, uint64_t{40u}, "4 IOP cycles per checkpoint");
++            t.Equals(after.emulatorPendingEeCycles, uint64_t{0u}, "nothing banked");
++        });
++
+         tc.Run("IOP heap DMA uses private backing instead of aliasing EE RDRAM", [](TestCase &t)
+         {
+             TestEnv env;
+-- 
+2.46.2.windows.1
+
