@@ -1,0 +1,1251 @@
+From 2b08169fe83d255127481000e4867a43a31c895b Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:58:27 -0400
+Subject: [PATCH 38/39] Runtime: input bindings from input.ini
+
+The host pad mapping was hard-coded twice: PSPadBackend::readState
+(ps2_pad.cpp, the one the runner uses: scePadRead always asks the backend
+first) and an older, different fallback in Kernel/Stubs/Pad.cpp (reached only
+without a runtime, i.e. in unit tests). Both now read one table,
+runtime/ps2_input_bindings.h, built once at start-up.
+
+- PS2Runtime::initialize loads PS2X_INPUT_INI=<path>, else <exe dir>/input.ini
+  when present; no file = the defaults, which are exactly PSPadBackend's old
+  mapping (gamepad 0 when present and then only it; else the keyboard: arrows
+  and WASD as the d-pad, X/SPACE cross, C/ESCAPE circle, Z/KP_0 square,
+  V/KP_1 triangle, Q/E L1/R1, LEFT_SHIFT/RIGHT_SHIFT L2/R2, ENTER start, TAB
+  select; axes 128 + v * 127, no dead zone).
+- Sections [keyboard] and [gamepad]; one entry per PS2 button (up down left
+  right cross circle square triangle l1 r1 l2 r2 l3 r3 start select), several
+  raylib names comma-separated (without KEY_ / GAMEPAD_BUTTON_, any case);
+  stick_left/stick_right (keyboard: four keys up, down, left, right; gamepad:
+  two axes x, y); gamepad device (0..3) and deadzone (0..1, per axis, the rest
+  rescaled). Empty or NONE unbinds. A bad line is printed once as
+  "[input] line N: ..." and its entry keeps its value.
+- Per poll: the same raylib calls as before (one per bound code, stopping at
+  the first held one per button).
+- Tests: the defaults reproduce the old mapping key by key, button by button,
+  axis by axis (22 key polls); a file overrides a binding and the others keep
+  their defaults (also through PS2X_INPUT_INI); bad lines are reported once
+  each and fall back; the dead zone centres and rescales the axes.
+---
+ ps2xRuntime/CMakeLists.txt                    |   1 +
+ .../include/runtime/ps2_input_bindings.h      |  86 ++++
+ ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp      | 126 +----
+ ps2xRuntime/src/lib/ps2_input_bindings.cpp    | 481 ++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_pad.cpp               | 102 +---
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |   3 +
+ ps2xTest/CMakeLists.txt                       |   1 +
+ ps2xTest/src/main.cpp                         |   2 +
+ ps2xTest/src/ps2_input_bindings_tests.cpp     | 268 ++++++++++
+ 9 files changed, 857 insertions(+), 213 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_input_bindings.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_input_bindings.cpp
+ create mode 100644 ps2xTest/src/ps2_input_bindings_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index a567270..423745e 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -396,6 +396,7 @@ add_library(ps2_runtime STATIC
+     src/lib/gs/gs_null_backend.cpp
+     src/lib/ps2_iop_host.cpp
+     src/lib/ps2_memory.cpp
++    src/lib/ps2_input_bindings.cpp
+     src/lib/ps2_pad.cpp
+     src/lib/ps2_rom_device.cpp
+     src/lib/ps2_vfs.cpp
+diff --git a/ps2xRuntime/include/runtime/ps2_input_bindings.h b/ps2xRuntime/include/runtime/ps2_input_bindings.h
+new file mode 100644
+index 0000000..612c350
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_input_bindings.h
+@@ -0,0 +1,86 @@
++#ifndef PS2_INPUT_BINDINGS_H
++#define PS2_INPUT_BINDINGS_H
++
++// Host input bindings: which keyboard keys and gamepad buttons/axes drive the PS2 pad. One table, built once at
++// start-up from input.ini (PS2X_INPUT_INI=<path> overrides <exe dir>/input.ini); no file = the defaults, which are
++// the mapping PSPadBackend had hard-coded (gamepad 0 when present, else the keyboard; no dead zone).
++//
++// input.ini (case-insensitive names; ';' or '#' starts a comment; several codes per button comma-separated):
++//   [keyboard]                     raylib key names without KEY_: X, ENTER, RIGHT_SHIFT, KP_0, ...
++//   cross = X, SPACE
++//   stick_left = W, S, A, D        four keys: up, down, left, right (default: none)
++//   [gamepad]                      raylib names without GAMEPAD_BUTTON_ / GAMEPAD_AXIS_
++//   device = 0                     raylib gamepad index
++//   deadzone = 0.15                0..1, per axis, the rest rescaled to 0..1 (default 0)
++//   cross = RIGHT_FACE_DOWN
++//   stick_left = LEFT_X, LEFT_Y    two axes: x, y
++// Buttons: up down left right cross circle square triangle l1 r1 l2 r2 l3 r3 start select. An empty value or NONE
++// unbinds. A bad line is reported once ("[input] line N: ...") and that entry keeps its default.
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace ps2input
++{
++    enum PadButton : uint8_t
++    {
++        Up, Down, Left, Right, Cross, Circle, Square, Triangle, L1, R1, L2, R2, L3, R3, Start, Select,
++        ButtonCount
++    };
++
++    constexpr size_t kMaxCodesPerButton = 8;
++
++    struct CodeList
++    {
++        uint8_t count = 0;
++        int16_t codes[kMaxCodesPerButton] = {};
++    };
++
++    struct InputBindings
++    {
++        CodeList keys[ButtonCount];        // raylib KeyboardKey values
++        int16_t keyStick[2][4] = {};       // [left, right][up, down, left, right] keys; 0 = none
++        CodeList padButtons[ButtonCount];  // raylib GamepadButton values
++        int16_t padStick[2][2] = {{0, 1}, {2, 3}}; // [left, right][x, y] raylib GamepadAxis; -1 = none
++        int device = 0;
++        float deadzone = 0.0f;
++    };
++
++    uint16_t padButtonMask(PadButton button); // libpad active-low bit (bytes 2-3 of the pad data)
++    const char *padButtonName(PadButton button);
++
++    InputBindings defaultInputBindings();
++
++    // Applies ini text on top of `bindings`. Each bad line appends one "[input] line N: ..." message and leaves its
++    // entry as it was.
++    void parseInputIni(const std::string &text, InputBindings &bindings, std::vector<std::string> &messages);
++
++    // Host input, injectable for tests.
++    struct InputSource
++    {
++        void *user;
++        bool (*keyDown)(void *user, int key);
++        bool (*gamepadAvailable)(void *user, int device);
++        bool (*gamepadButtonDown)(void *user, int device, int button);
++        float (*gamepadAxis)(void *user, int device, int axis);
++    };
++    InputSource raylibInputSource();
++
++    // -1..1 to the pad byte (128 + v * 127, truncated, as before), after the dead zone.
++    uint8_t axisToPadByte(float value, float deadzone);
++
++    // One pad poll: buttons (active-low) and sticks in pad data order (bytes 4-7: rx, ry, lx, ly). The gamepad
++    // `device`, when available, is the only source; else the keyboard.
++    void evaluateInput(const InputBindings &bindings, const InputSource &source, uint16_t &buttons, uint8_t sticks[4]);
++
++    const InputBindings &activeInputBindings();
++    void setActiveInputBindings(const InputBindings &bindings); // start-up and tests; not while the game polls
++
++    // Start-up (main thread, before the game thread): PS2X_INPUT_INI, else <exe dir>/input.ini when present.
++    // Messages go to stdout. Returns true when a file was read.
++    bool loadInputBindingsAtStartup();
++}
++
++#endif
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
+index 58e8c9b..159d8f3 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
+@@ -1,5 +1,6 @@
+ #include "Common.h"
+ #include "Pad.h"
++#include "runtime/ps2_input_bindings.h"
+ 
+ namespace ps2_stubs
+ {
+@@ -67,21 +68,6 @@ namespace ps2_stubs
+         PadPortState g_padPorts[kPadPortCount]{};
+         int g_padReadLogCount = 0;
+ 
+-        uint8_t axisToByte(float axis)
+-        {
+-            axis = std::clamp(axis, -1.0f, 1.0f);
+-            const float mapped = (axis + 1.0f) * 127.5f;
+-            return static_cast<uint8_t>(std::lround(mapped));
+-        }
+-
+-        void setButton(PadInputState &state, uint16_t mask, bool pressed)
+-        {
+-            if (pressed)
+-            {
+-                state.buttons = static_cast<uint16_t>(state.buttons & ~mask);
+-            }
+-        }
+-
+         int findFirstGamepad()
+         {
+             for (int i = 0; i < 4; ++i)
+@@ -94,104 +80,6 @@ namespace ps2_stubs
+             return -1;
+         }
+ 
+-        void applyGamepadState(PadInputState &state)
+-        {
+-            if (!IsWindowReady())
+-            {
+-                return;
+-            }
+-
+-            const int gamepad = findFirstGamepad();
+-            if (gamepad < 0)
+-            {
+-                return;
+-            }
+-
+-            // Raylib mapping (PS2 -> raylib buttons/axes):
+-            // D-Pad -> LEFT_FACE_*, Cross/Circle/Square/Triangle -> RIGHT_FACE_*
+-            // L1/R1 -> TRIGGER_1, L2/R2 -> TRIGGER_2, L3/R3 -> THUMB
+-            // Select/Start -> MIDDLE_LEFT/MIDDLE_RIGHT
+-            state.lx = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_X));
+-            state.ly = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_Y));
+-            state.rx = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_RIGHT_X));
+-            state.ry = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_RIGHT_Y));
+-
+-            setButton(state, kPadBtnUp, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_UP));
+-            setButton(state, kPadBtnDown, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN));
+-            setButton(state, kPadBtnLeft, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT));
+-            setButton(state, kPadBtnRight, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT));
+-
+-            setButton(state, kPadBtnCross, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
+-            setButton(state, kPadBtnCircle, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+-            setButton(state, kPadBtnSquare, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT));
+-            setButton(state, kPadBtnTriangle, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP));
+-
+-            setButton(state, kPadBtnL1, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1));
+-            setButton(state, kPadBtnR1, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1));
+-            setButton(state, kPadBtnL2, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2));
+-            setButton(state, kPadBtnR2, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2));
+-
+-            setButton(state, kPadBtnL3, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_THUMB));
+-            setButton(state, kPadBtnR3, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_THUMB));
+-
+-            setButton(state, kPadBtnSelect, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_LEFT));
+-            setButton(state, kPadBtnStart, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT));
+-        }
+-
+-        void applyKeyboardState(PadInputState &state, bool allowAnalog)
+-        {
+-            if (!IsWindowReady())
+-            {
+-                return;
+-            }
+-
+-            // Keyboard mapping (PS2 -> keys):
+-            // D-Pad: arrows, Square/Cross/Circle/Triangle: Z/X/C/V
+-            // L1/R1: Q/E, L2/R2: 1/3, Start/Select: Enter/RightShift
+-            // L3/R3: LeftCtrl/RightCtrl, Analog left: WASD
+-            setButton(state, kPadBtnUp, IsKeyDown(KEY_UP));
+-            setButton(state, kPadBtnDown, IsKeyDown(KEY_DOWN));
+-            setButton(state, kPadBtnLeft, IsKeyDown(KEY_LEFT));
+-            setButton(state, kPadBtnRight, IsKeyDown(KEY_RIGHT));
+-
+-            setButton(state, kPadBtnSquare, IsKeyDown(KEY_Z));
+-            setButton(state, kPadBtnCross, IsKeyDown(KEY_X));
+-            setButton(state, kPadBtnCircle, IsKeyDown(KEY_C));
+-            setButton(state, kPadBtnTriangle, IsKeyDown(KEY_V));
+-
+-            setButton(state, kPadBtnL1, IsKeyDown(KEY_Q));
+-            setButton(state, kPadBtnR1, IsKeyDown(KEY_E));
+-            setButton(state, kPadBtnL2, IsKeyDown(KEY_ONE));
+-            setButton(state, kPadBtnR2, IsKeyDown(KEY_THREE));
+-
+-            setButton(state, kPadBtnStart, IsKeyDown(KEY_ENTER));
+-            setButton(state, kPadBtnSelect, IsKeyDown(KEY_RIGHT_SHIFT));
+-            setButton(state, kPadBtnL3, IsKeyDown(KEY_LEFT_CONTROL));
+-            setButton(state, kPadBtnR3, IsKeyDown(KEY_RIGHT_CONTROL));
+-
+-            if (!allowAnalog)
+-            {
+-                return;
+-            }
+-
+-            float ax = 0.0f;
+-            float ay = 0.0f;
+-            if (IsKeyDown(KEY_D))
+-                ax += 1.0f;
+-            if (IsKeyDown(KEY_A))
+-                ax -= 1.0f;
+-            if (IsKeyDown(KEY_S))
+-                ay += 1.0f;
+-            if (IsKeyDown(KEY_W))
+-                ay -= 1.0f;
+-
+-            if (ax != 0.0f || ay != 0.0f)
+-            {
+-                state.lx = axisToByte(ax);
+-                state.ly = axisToByte(ay);
+-            }
+-        }
+-
+         void resetPadStateLocked()
+         {
+             for (PadPortState &portState : g_padPorts)
+@@ -308,10 +196,16 @@ namespace ps2_stubs
+                     state.ly = backendData[7];
+                     usedBackend = true;
+                 }
+-                else
++                else if (IsWindowReady())
+                 {
+-                    applyGamepadState(state);
+-                    applyKeyboardState(state, portState.analogMode);
++                    // No runtime (unit tests): the same bindings table as PSPadBackend.
++                    uint8_t sticks[4];
++                    ps2input::evaluateInput(ps2input::activeInputBindings(), ps2input::raylibInputSource(),
++                                            state.buttons, sticks);
++                    state.rx = sticks[0];
++                    state.ry = sticks[1];
++                    state.lx = sticks[2];
++                    state.ly = sticks[3];
+                 }
+             }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_input_bindings.cpp b/ps2xRuntime/src/lib/ps2_input_bindings.cpp
+new file mode 100644
+index 0000000..af0eba7
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_input_bindings.cpp
+@@ -0,0 +1,481 @@
++#include "runtime/ps2_input_bindings.h"
++
++#include "raylib.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <sstream>
++
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++// raylib.h and windows.h clash (CloseWindow, ShowCursor, Rectangle...): declare the one call needed.
++extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void *module, wchar_t *name,
++                                                                           unsigned long size);
++#endif
++
++namespace ps2input
++{
++    namespace
++    {
++        struct Named
++        {
++            const char *name;
++            int value;
++        };
++
++        const char *const kButtonNames[ButtonCount] = {"up", "down", "left", "right", "cross", "circle",
++                                                       "square", "triangle", "l1", "r1", "l2", "r2",
++                                                       "l3", "r3", "start", "select"};
++        const uint16_t kButtonMasks[ButtonCount] = {
++            1u << 4, 1u << 6, 1u << 7, 1u << 5,     // up down left right
++            1u << 14, 1u << 13, 1u << 15, 1u << 12, // cross circle square triangle
++            1u << 10, 1u << 11, 1u << 8, 1u << 9,   // l1 r1 l2 r2
++            1u << 1, 1u << 2, 1u << 3, 1u << 0};    // l3 r3 start select
++
++#define OB_KEY(n) {#n, KEY_##n}
++        const Named kKeys[] = {
++            OB_KEY(APOSTROPHE), OB_KEY(COMMA), OB_KEY(MINUS), OB_KEY(PERIOD), OB_KEY(SLASH), OB_KEY(ZERO),
++            OB_KEY(ONE), OB_KEY(TWO), OB_KEY(THREE), OB_KEY(FOUR), OB_KEY(FIVE), OB_KEY(SIX), OB_KEY(SEVEN),
++            OB_KEY(EIGHT), OB_KEY(NINE), OB_KEY(SEMICOLON), OB_KEY(EQUAL), OB_KEY(A), OB_KEY(B), OB_KEY(C),
++            OB_KEY(D), OB_KEY(E), OB_KEY(F), OB_KEY(G), OB_KEY(H), OB_KEY(I), OB_KEY(J), OB_KEY(K), OB_KEY(L),
++            OB_KEY(M), OB_KEY(N), OB_KEY(O), OB_KEY(P), OB_KEY(Q), OB_KEY(R), OB_KEY(S), OB_KEY(T), OB_KEY(U),
++            OB_KEY(V), OB_KEY(W), OB_KEY(X), OB_KEY(Y), OB_KEY(Z), OB_KEY(LEFT_BRACKET), OB_KEY(BACKSLASH),
++            OB_KEY(RIGHT_BRACKET), OB_KEY(GRAVE), OB_KEY(SPACE), OB_KEY(ESCAPE), OB_KEY(ENTER), OB_KEY(TAB),
++            OB_KEY(BACKSPACE), OB_KEY(INSERT), OB_KEY(DELETE), OB_KEY(RIGHT), OB_KEY(LEFT), OB_KEY(DOWN),
++            OB_KEY(UP), OB_KEY(PAGE_UP), OB_KEY(PAGE_DOWN), OB_KEY(HOME), OB_KEY(END), OB_KEY(CAPS_LOCK),
++            OB_KEY(SCROLL_LOCK), OB_KEY(NUM_LOCK), OB_KEY(PRINT_SCREEN), OB_KEY(PAUSE), OB_KEY(F1), OB_KEY(F2),
++            OB_KEY(F3), OB_KEY(F4), OB_KEY(F5), OB_KEY(F6), OB_KEY(F7), OB_KEY(F8), OB_KEY(F9), OB_KEY(F10),
++            OB_KEY(F11), OB_KEY(F12), OB_KEY(LEFT_SHIFT), OB_KEY(LEFT_CONTROL), OB_KEY(LEFT_ALT),
++            OB_KEY(LEFT_SUPER), OB_KEY(RIGHT_SHIFT), OB_KEY(RIGHT_CONTROL), OB_KEY(RIGHT_ALT), OB_KEY(RIGHT_SUPER),
++            OB_KEY(KB_MENU), OB_KEY(KP_0), OB_KEY(KP_1), OB_KEY(KP_2), OB_KEY(KP_3), OB_KEY(KP_4), OB_KEY(KP_5),
++            OB_KEY(KP_6), OB_KEY(KP_7), OB_KEY(KP_8), OB_KEY(KP_9), OB_KEY(KP_DECIMAL), OB_KEY(KP_DIVIDE),
++            OB_KEY(KP_MULTIPLY), OB_KEY(KP_SUBTRACT), OB_KEY(KP_ADD), OB_KEY(KP_ENTER), OB_KEY(KP_EQUAL)};
++#undef OB_KEY
++
++#define OB_PADB(n) {#n, GAMEPAD_BUTTON_##n}
++        const Named kPadButtons[] = {
++            OB_PADB(LEFT_FACE_UP), OB_PADB(LEFT_FACE_RIGHT), OB_PADB(LEFT_FACE_DOWN), OB_PADB(LEFT_FACE_LEFT),
++            OB_PADB(RIGHT_FACE_UP), OB_PADB(RIGHT_FACE_RIGHT), OB_PADB(RIGHT_FACE_DOWN), OB_PADB(RIGHT_FACE_LEFT),
++            OB_PADB(LEFT_TRIGGER_1), OB_PADB(LEFT_TRIGGER_2), OB_PADB(RIGHT_TRIGGER_1), OB_PADB(RIGHT_TRIGGER_2),
++            OB_PADB(MIDDLE_LEFT), OB_PADB(MIDDLE), OB_PADB(MIDDLE_RIGHT), OB_PADB(LEFT_THUMB), OB_PADB(RIGHT_THUMB)};
++#undef OB_PADB
++
++#define OB_AXIS(n) {#n, GAMEPAD_AXIS_##n}
++        const Named kAxes[] = {OB_AXIS(LEFT_X), OB_AXIS(LEFT_Y), OB_AXIS(RIGHT_X), OB_AXIS(RIGHT_Y),
++                               OB_AXIS(LEFT_TRIGGER), OB_AXIS(RIGHT_TRIGGER)};
++#undef OB_AXIS
++
++        std::string upper(std::string s)
++        {
++            for (char &c : s)
++                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
++            return s;
++        }
++
++        std::string trim(const std::string &s)
++        {
++            size_t b = 0, e = s.size();
++            while (b < e && std::isspace(static_cast<unsigned char>(s[b])))
++                ++b;
++            while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1])))
++                --e;
++            return s.substr(b, e - b);
++        }
++
++        template <size_t N>
++        bool lookup(const Named (&table)[N], std::string name, const char *prefix, int &value)
++        {
++            name = upper(trim(name));
++            const std::string p = prefix;
++            if (name.compare(0, p.size(), p) == 0)
++                name = name.substr(p.size());
++            for (const Named &n : table)
++                if (name == n.name)
++                {
++                    value = n.value;
++                    return true;
++                }
++            return false;
++        }
++
++        // Splits "A, B ,C" into trimmed names; an empty value or NONE = no names.
++        std::vector<std::string> splitNames(const std::string &value)
++        {
++            std::vector<std::string> out;
++            const std::string v = trim(value);
++            if (v.empty() || upper(v) == "NONE")
++                return out;
++            std::stringstream ss(v);
++            std::string item;
++            while (std::getline(ss, item, ','))
++                out.push_back(trim(item));
++            return out;
++        }
++
++        CodeList codes(std::initializer_list<int> values)
++        {
++            CodeList list;
++            for (int v : values)
++                list.codes[list.count++] = static_cast<int16_t>(v);
++            return list;
++        }
++
++        bool raylibKeyDown(void *, int key) { return IsKeyDown(key); }
++        bool raylibGamepadAvailable(void *, int device) { return IsGamepadAvailable(device); }
++        bool raylibGamepadButtonDown(void *, int device, int button) { return IsGamepadButtonDown(device, button); }
++        float raylibGamepadAxis(void *, int device, int axis) { return GetGamepadAxisMovement(device, axis); }
++
++        InputBindings &activeStorage()
++        {
++            static InputBindings s_active = defaultInputBindings();
++            return s_active;
++        }
++
++        std::filesystem::path exeDirectory()
++        {
++#if defined(_WIN32)
++            wchar_t buffer[1040];
++            const unsigned long n = GetModuleFileNameW(nullptr, buffer, 1040u);
++            if (n == 0u || n >= 1040u)
++                return {};
++            return std::filesystem::path(std::wstring(buffer, n)).parent_path();
++#else
++            std::error_code ec;
++            const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
++            return ec ? std::filesystem::path{} : exe.parent_path();
++#endif
++        }
++    }
++
++    uint16_t padButtonMask(PadButton button) { return button < ButtonCount ? kButtonMasks[button] : 0u; }
++    const char *padButtonName(PadButton button) { return button < ButtonCount ? kButtonNames[button] : "?"; }
++
++    // The mapping PSPadBackend::readState had hard-coded (ps2_pad.cpp before input.ini).
++    InputBindings defaultInputBindings()
++    {
++        InputBindings b;
++        b.keys[Up] = codes({KEY_UP, KEY_W});
++        b.keys[Down] = codes({KEY_DOWN, KEY_S});
++        b.keys[Left] = codes({KEY_LEFT, KEY_A});
++        b.keys[Right] = codes({KEY_RIGHT, KEY_D});
++        b.keys[Cross] = codes({KEY_X, KEY_SPACE});
++        b.keys[Circle] = codes({KEY_C, KEY_ESCAPE});
++        b.keys[Square] = codes({KEY_Z, KEY_KP_0});
++        b.keys[Triangle] = codes({KEY_V, KEY_KP_1});
++        b.keys[L1] = codes({KEY_Q});
++        b.keys[R1] = codes({KEY_E});
++        b.keys[L2] = codes({KEY_LEFT_SHIFT});
++        b.keys[R2] = codes({KEY_RIGHT_SHIFT});
++        b.keys[Start] = codes({KEY_ENTER});
++        b.keys[Select] = codes({KEY_TAB});
++        // L3/R3 and the sticks: no keys.
++
++        b.padButtons[Up] = codes({GAMEPAD_BUTTON_LEFT_FACE_UP});
++        b.padButtons[Down] = codes({GAMEPAD_BUTTON_LEFT_FACE_DOWN});
++        b.padButtons[Left] = codes({GAMEPAD_BUTTON_LEFT_FACE_LEFT});
++        b.padButtons[Right] = codes({GAMEPAD_BUTTON_LEFT_FACE_RIGHT});
++        b.padButtons[Cross] = codes({GAMEPAD_BUTTON_RIGHT_FACE_DOWN});
++        b.padButtons[Circle] = codes({GAMEPAD_BUTTON_RIGHT_FACE_RIGHT});
++        b.padButtons[Square] = codes({GAMEPAD_BUTTON_RIGHT_FACE_LEFT});
++        b.padButtons[Triangle] = codes({GAMEPAD_BUTTON_RIGHT_FACE_UP});
++        b.padButtons[L1] = codes({GAMEPAD_BUTTON_LEFT_TRIGGER_1});
++        b.padButtons[R1] = codes({GAMEPAD_BUTTON_RIGHT_TRIGGER_1});
++        b.padButtons[L2] = codes({GAMEPAD_BUTTON_LEFT_TRIGGER_2});
++        b.padButtons[R2] = codes({GAMEPAD_BUTTON_RIGHT_TRIGGER_2});
++        b.padButtons[L3] = codes({GAMEPAD_BUTTON_LEFT_THUMB});
++        b.padButtons[R3] = codes({GAMEPAD_BUTTON_RIGHT_THUMB});
++        b.padButtons[Start] = codes({GAMEPAD_BUTTON_MIDDLE_RIGHT});
++        b.padButtons[Select] = codes({GAMEPAD_BUTTON_MIDDLE_LEFT});
++        b.padStick[0][0] = GAMEPAD_AXIS_LEFT_X;
++        b.padStick[0][1] = GAMEPAD_AXIS_LEFT_Y;
++        b.padStick[1][0] = GAMEPAD_AXIS_RIGHT_X;
++        b.padStick[1][1] = GAMEPAD_AXIS_RIGHT_Y;
++        b.device = 0;
++        b.deadzone = 0.0f;
++        return b;
++    }
++
++    void parseInputIni(const std::string &text, InputBindings &bindings, std::vector<std::string> &messages)
++    {
++        enum Section
++        {
++            None,
++            Keyboard,
++            Gamepad,
++            Unknown
++        } section = None;
++        std::stringstream in(text);
++        std::string raw;
++        int lineNo = 0;
++        auto bad = [&messages, &lineNo](const std::string &why)
++        { messages.push_back("[input] line " + std::to_string(lineNo) + ": " + why); };
++
++        while (std::getline(in, raw))
++        {
++            ++lineNo;
++            const size_t comment = raw.find_first_of(";#");
++            const std::string line = trim(comment == std::string::npos ? raw : raw.substr(0, comment));
++            if (line.empty())
++                continue;
++            if (line.front() == '[')
++            {
++                const std::string name = upper(trim(line.substr(1, line.size() - 2)));
++                if (line.size() < 2 || line.back() != ']')
++                {
++                    bad("section header without ']'");
++                    section = Unknown;
++                }
++                else if (name == "KEYBOARD")
++                    section = Keyboard;
++                else if (name == "GAMEPAD")
++                    section = Gamepad;
++                else
++                {
++                    bad("unknown section [" + name + "] (keyboard, gamepad); its lines are ignored");
++                    section = Unknown;
++                }
++                continue;
++            }
++            if (section == Unknown)
++                continue;
++            const size_t eq = line.find('=');
++            if (eq == std::string::npos)
++            {
++                bad("expected <name> = <value>");
++                continue;
++            }
++            if (section == None)
++            {
++                bad("entry outside [keyboard] or [gamepad]");
++                continue;
++            }
++            const std::string key = upper(trim(line.substr(0, eq)));
++            const std::string value = trim(line.substr(eq + 1));
++            const std::vector<std::string> names = splitNames(value);
++
++            int button = -1;
++            for (int i = 0; i < ButtonCount; ++i)
++                if (key == upper(kButtonNames[i]))
++                    button = i;
++
++            if (button >= 0)
++            {
++                if (names.size() > kMaxCodesPerButton)
++                {
++                    bad(std::string("more than ") + std::to_string(kMaxCodesPerButton) + " codes for " +
++                        kButtonNames[button]);
++                    continue;
++                }
++                CodeList list;
++                bool ok = true;
++                for (const std::string &n : names)
++                {
++                    int v = 0;
++                    const bool found = section == Keyboard ? lookup(kKeys, n, "KEY_", v)
++                                                           : lookup(kPadButtons, n, "GAMEPAD_BUTTON_", v);
++                    if (!found)
++                    {
++                        bad(std::string("unknown ") + (section == Keyboard ? "key" : "gamepad button") + " '" + n +
++                            "' for " + kButtonNames[button]);
++                        ok = false;
++                        break;
++                    }
++                    list.codes[list.count++] = static_cast<int16_t>(v);
++                }
++                if (ok)
++                    (section == Keyboard ? bindings.keys : bindings.padButtons)[button] = list;
++                continue;
++            }
++
++            if (key == "STICK_LEFT" || key == "STICK_RIGHT")
++            {
++                const int stick = key == "STICK_LEFT" ? 0 : 1;
++                if (section == Keyboard)
++                {
++                    int16_t keys[4] = {};
++                    bool ok = names.empty() || names.size() == 4;
++                    if (!ok)
++                        bad("stick needs four keys (up, down, left, right) or none");
++                    for (size_t i = 0; ok && i < names.size(); ++i)
++                    {
++                        int v = 0;
++                        if (!lookup(kKeys, names[i], "KEY_", v))
++                        {
++                            bad("unknown key '" + names[i] + "' for " + upper(key));
++                            ok = false;
++                        }
++                        keys[i] = static_cast<int16_t>(v);
++                    }
++                    if (ok)
++                        std::copy(keys, keys + 4, bindings.keyStick[stick]);
++                }
++                else
++                {
++                    int16_t axes[2] = {-1, -1};
++                    bool ok = names.empty() || names.size() == 2;
++                    if (!ok)
++                        bad("stick needs two axes (x, y) or none");
++                    for (size_t i = 0; ok && i < names.size(); ++i)
++                    {
++                        int v = 0;
++                        if (!lookup(kAxes, names[i], "GAMEPAD_AXIS_", v))
++                        {
++                            bad("unknown gamepad axis '" + names[i] + "' for " + upper(key));
++                            ok = false;
++                        }
++                        axes[i] = static_cast<int16_t>(v);
++                    }
++                    if (ok)
++                        std::copy(axes, axes + 2, bindings.padStick[stick]);
++                }
++                continue;
++            }
++
++            if (section == Gamepad && key == "DEVICE")
++            {
++                char *end = nullptr;
++                const long v = std::strtol(value.c_str(), &end, 10);
++                if (value.empty() || *end != '\0' || v < 0 || v > 3)
++                    bad("device must be a gamepad index 0..3");
++                else
++                    bindings.device = static_cast<int>(v);
++                continue;
++            }
++            if (section == Gamepad && key == "DEADZONE")
++            {
++                char *end = nullptr;
++                const float v = std::strtof(value.c_str(), &end);
++                if (value.empty() || *end != '\0' || !(v >= 0.0f && v <= 1.0f))
++                    bad("deadzone must be a number 0..1");
++                else
++                    bindings.deadzone = v;
++                continue;
++            }
++            bad("unknown entry '" + trim(line.substr(0, eq)) + "'");
++        }
++    }
++
++    InputSource raylibInputSource()
++    {
++        return InputSource{nullptr, &raylibKeyDown, &raylibGamepadAvailable, &raylibGamepadButtonDown,
++                           &raylibGamepadAxis};
++    }
++
++    uint8_t axisToPadByte(float value, float deadzone)
++    {
++        if (deadzone > 0.0f)
++        {
++            const float a = value < 0.0f ? -value : value;
++            if (a <= deadzone)
++                value = 0.0f;
++            else
++            {
++                const float scaled = std::min(1.0f, (a - deadzone) / (1.0f - deadzone));
++                value = value < 0.0f ? -scaled : scaled;
++            }
++        }
++        return static_cast<uint8_t>(128 + value * 127); // the old conversion, unchanged
++    }
++
++    void evaluateInput(const InputBindings &b, const InputSource &src, uint16_t &buttons, uint8_t sticks[4])
++    {
++        buttons = 0xFFFFu;
++        sticks[0] = sticks[1] = sticks[2] = sticks[3] = 0x80u;
++        if (src.gamepadAvailable(src.user, b.device))
++        {
++            for (int i = 0; i < ButtonCount; ++i)
++            {
++                const CodeList &l = b.padButtons[i];
++                for (uint8_t k = 0; k < l.count; ++k)
++                    if (src.gamepadButtonDown(src.user, b.device, l.codes[k]))
++                    {
++                        buttons = static_cast<uint16_t>(buttons & ~kButtonMasks[i]);
++                        break;
++                    }
++            }
++            // Pad data order: rx, ry, lx, ly.
++            for (int s = 0; s < 2; ++s)
++                for (int a = 0; a < 2; ++a)
++                    if (b.padStick[s][a] >= 0)
++                        sticks[(s == 0 ? 2 : 0) + a] =
++                            axisToPadByte(src.gamepadAxis(src.user, b.device, b.padStick[s][a]), b.deadzone);
++            return;
++        }
++        for (int i = 0; i < ButtonCount; ++i)
++        {
++            const CodeList &l = b.keys[i];
++            for (uint8_t k = 0; k < l.count; ++k)
++                if (src.keyDown(src.user, l.codes[k]))
++                {
++                    buttons = static_cast<uint16_t>(buttons & ~kButtonMasks[i]);
++                    break;
++                }
++        }
++        for (int s = 0; s < 2; ++s)
++        {
++            const int16_t *k = b.keyStick[s];
++            if (k[0] == 0 && k[1] == 0 && k[2] == 0 && k[3] == 0)
++                continue;
++            float x = 0.0f, y = 0.0f;
++            if (k[0] && src.keyDown(src.user, k[0]))
++                y -= 1.0f;
++            if (k[1] && src.keyDown(src.user, k[1]))
++                y += 1.0f;
++            if (k[2] && src.keyDown(src.user, k[2]))
++                x -= 1.0f;
++            if (k[3] && src.keyDown(src.user, k[3]))
++                x += 1.0f;
++            sticks[(s == 0 ? 2 : 0) + 0] = axisToPadByte(x, 0.0f);
++            sticks[(s == 0 ? 2 : 0) + 1] = axisToPadByte(y, 0.0f);
++        }
++    }
++
++    const InputBindings &activeInputBindings() { return activeStorage(); }
++    void setActiveInputBindings(const InputBindings &bindings) { activeStorage() = bindings; }
++
++    bool loadInputBindingsAtStartup()
++    {
++        std::filesystem::path path;
++        bool named = false;
++        if (const char *env = std::getenv("PS2X_INPUT_INI"); env && *env)
++        {
++            path = std::filesystem::u8path(env);
++            named = true;
++        }
++        else
++        {
++            const std::filesystem::path dir = exeDirectory();
++            if (dir.empty())
++                return false;
++            path = dir / "input.ini";
++        }
++        std::ifstream file(path, std::ios::binary);
++        if (!file)
++        {
++            if (named)
++                std::cout << "[input] cannot open PS2X_INPUT_INI=" << path.string() << ": default bindings"
++                          << std::endl;
++            return false;
++        }
++        std::stringstream text;
++        text << file.rdbuf();
++        InputBindings bindings = defaultInputBindings();
++        std::vector<std::string> messages;
++        parseInputIni(text.str(), bindings, messages);
++        for (const std::string &m : messages)
++            std::cout << m << std::endl;
++        setActiveInputBindings(bindings);
++        std::cout << "[input] bindings from " << path.string() << " (" << messages.size() << " bad line(s))"
++                  << std::endl;
++        return true;
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 5a74a69..bcd0896 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,6 +1,6 @@
+ #include "runtime/ps2_pad.h"
+ #include "runtime/ps2_diag_hooks.h"
+-#include "ps2_host_backend.h"
++#include "runtime/ps2_input_bindings.h"
+ #include <cstring>
+ 
+ namespace
+@@ -8,22 +8,7 @@ namespace
+     constexpr uint8_t kPadAnalogMarker = 0x73;
+     constexpr uint8_t kPadStickCenter = 0x80;
+ 
+-    constexpr uint16_t PAD_LEFT = 0x0080u;
+-    constexpr uint16_t PAD_DOWN = 0x0040u;
+-    constexpr uint16_t PAD_RIGHT = 0x0020u;
+-    constexpr uint16_t PAD_UP = 0x0010u;
+-    constexpr uint16_t PAD_START = 0x0008u;
+-    constexpr uint16_t PAD_R3 = 0x0004u;
+-    constexpr uint16_t PAD_L3 = 0x0002u;
+-    constexpr uint16_t PAD_SELECT = 0x0001u;
+-    constexpr uint16_t PAD_SQUARE = 0x8000u;
+-    constexpr uint16_t PAD_CROSS = 0x4000u;
+-    constexpr uint16_t PAD_CIRCLE = 0x2000u;
+-    constexpr uint16_t PAD_TRIANGLE = 0x1000u;
+-    constexpr uint16_t PAD_R1 = 0x0800u;
+-    constexpr uint16_t PAD_L1 = 0x0400u;
+-    constexpr uint16_t PAD_R2 = 0x0200u;
+-    constexpr uint16_t PAD_L2 = 0x0100u;
++    const ps2input::InputSource s_hostInput = ps2input::raylibInputSource();
+ }
+ 
+ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+@@ -50,87 +35,10 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+         }
+     }
+ 
++    // Host input through the bindings table (runtime/ps2_input_bindings.h): input.ini, else the defaults, which
++    // are the mapping this function had hard-coded (gamepad 0 when present, else the keyboard).
+     uint16_t btns = 0xFFFFu;
+-    constexpr int kGamepad = 0;
+-    const bool useGamepad = IsGamepadAvailable(kGamepad);
+-    auto clearBit = [&btns](uint16_t mask)
+-    { btns &= ~mask; };
+-
+-    if (useGamepad)
+-    {
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_UP))
+-            clearBit(PAD_UP);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+-            clearBit(PAD_DOWN);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+-            clearBit(PAD_LEFT);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+-            clearBit(PAD_RIGHT);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+-            clearBit(PAD_CROSS);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+-            clearBit(PAD_CIRCLE);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
+-            clearBit(PAD_SQUARE);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP))
+-            clearBit(PAD_TRIANGLE);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
+-            clearBit(PAD_L1);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
+-            clearBit(PAD_R1);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
+-            clearBit(PAD_L2);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
+-            clearBit(PAD_R2);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+-            clearBit(PAD_START);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
+-            clearBit(PAD_SELECT);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
+-            clearBit(PAD_L3);
+-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
+-            clearBit(PAD_R3);
+-
+-        float lx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_X);
+-        float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);
+-        float rx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_X);
+-        float ry = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_Y);
+-        data[6] = static_cast<uint8_t>(128 + lx * 127);
+-        data[7] = static_cast<uint8_t>(128 + ly * 127);
+-        data[4] = static_cast<uint8_t>(128 + rx * 127);
+-        data[5] = static_cast<uint8_t>(128 + ry * 127);
+-    }
+-    else
+-    {
+-        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
+-            clearBit(PAD_UP);
+-        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
+-            clearBit(PAD_DOWN);
+-        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
+-            clearBit(PAD_LEFT);
+-        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
+-            clearBit(PAD_RIGHT);
+-        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
+-            clearBit(PAD_CROSS);
+-        if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
+-            clearBit(PAD_CIRCLE);
+-        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
+-            clearBit(PAD_SQUARE);
+-        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
+-            clearBit(PAD_TRIANGLE);
+-        if (IsKeyDown(KEY_Q))
+-            clearBit(PAD_L1);
+-        if (IsKeyDown(KEY_E))
+-            clearBit(PAD_R1);
+-        if (IsKeyDown(KEY_LEFT_SHIFT))
+-            clearBit(PAD_L2);
+-        if (IsKeyDown(KEY_RIGHT_SHIFT))
+-            clearBit(PAD_R2);
+-        if (IsKeyDown(KEY_ENTER))
+-            clearBit(PAD_START);
+-        if (IsKeyDown(KEY_TAB))
+-            clearBit(PAD_SELECT);
+-    }
++    ps2input::evaluateInput(ps2input::activeInputBindings(), s_hostInput, btns, data + 4);
+ 
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index cde0b0b..b798a76 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -10,6 +10,7 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_fps_counter.h"
+ #include "runtime/ps2_diag_hooks.h"
++#include "runtime/ps2_input_bindings.h"
+ #include "ThreadNaming.h"
+ #include "Kernel/Stubs/Audio.h"
+ #include "Kernel/Stubs/GS.h"
+@@ -933,6 +934,8 @@ bool PS2Runtime::initialize(const char *title)
+         if (ps2DiagHooks())
+             ps2SetExternalGSFrameDemand(DiagFrameDemand);
+     }
++    // Host input bindings: PS2X_INPUT_INI, else <exe dir>/input.ini when present, else the defaults.
++    ps2input::loadInputBindingsAtStartup();
+ 
+     try
+     {
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 7bc07c0..1e61370 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -42,6 +42,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_runtime_api_tests.cpp
+     src/ps2_fps_counter_tests.cpp
+     src/ps2_diag_hooks_tests.cpp
++    src/ps2_input_bindings_tests.cpp
+     src/ps2_runtime_api_support.cpp
+ )
+ 
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 340e2f1..7142b75 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -23,6 +23,7 @@ void register_ps2_gs_external_tests();
+ void register_ps2_runtime_api_tests();
+ void register_ps2_fps_counter_tests();
+ void register_ps2_diag_hooks_tests();
++void register_ps2_input_bindings_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -50,6 +51,7 @@ int main()
+     register_ps2_runtime_api_tests();
+     register_ps2_fps_counter_tests();
+     register_ps2_diag_hooks_tests();
++    register_ps2_input_bindings_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_input_bindings_tests.cpp b/ps2xTest/src/ps2_input_bindings_tests.cpp
+new file mode 100644
+index 0000000..f1efb9c
+--- /dev/null
++++ b/ps2xTest/src/ps2_input_bindings_tests.cpp
+@@ -0,0 +1,268 @@
++#include "MiniTest.h"
++#include "runtime/ps2_input_bindings.h"
++
++#include <cstdlib>
++#include <fstream>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++// raylib values, written out so the old mapping below reads as it did in ps2_pad.cpp.
++namespace
++{
++    enum : int
++    {
++        K_SPACE = 32, K_A = 65, K_C = 67, K_D = 68, K_E = 69, K_J = 74, K_K = 75, K_Q = 81, K_S = 83, K_V = 86,
++        K_W = 87, K_X = 88, K_Z = 90, K_ESCAPE = 256, K_ENTER = 257, K_TAB = 258, K_RIGHT = 262, K_LEFT = 263,
++        K_DOWN = 264, K_UP = 265, K_KP_0 = 320, K_KP_1 = 321, K_LEFT_SHIFT = 340, K_RIGHT_SHIFT = 344,
++        K_LEFT_CONTROL = 341
++    };
++    enum : int
++    {
++        B_LEFT_FACE_UP = 1, B_LEFT_FACE_RIGHT, B_LEFT_FACE_DOWN, B_LEFT_FACE_LEFT, B_RIGHT_FACE_UP,
++        B_RIGHT_FACE_RIGHT, B_RIGHT_FACE_DOWN, B_RIGHT_FACE_LEFT, B_LEFT_TRIGGER_1, B_LEFT_TRIGGER_2,
++        B_RIGHT_TRIGGER_1, B_RIGHT_TRIGGER_2, B_MIDDLE_LEFT, B_MIDDLE, B_MIDDLE_RIGHT, B_LEFT_THUMB, B_RIGHT_THUMB
++    };
++    constexpr uint16_t PAD_LEFT = 0x0080u, PAD_DOWN = 0x0040u, PAD_RIGHT = 0x0020u, PAD_UP = 0x0010u,
++                       PAD_START = 0x0008u, PAD_R3 = 0x0004u, PAD_L3 = 0x0002u, PAD_SELECT = 0x0001u,
++                       PAD_SQUARE = 0x8000u, PAD_CROSS = 0x4000u, PAD_CIRCLE = 0x2000u, PAD_TRIANGLE = 0x1000u,
++                       PAD_R1 = 0x0800u, PAD_L1 = 0x0400u, PAD_R2 = 0x0200u, PAD_L2 = 0x0100u;
++
++    // The hard-coded mapping of PSPadBackend::readState before input.ini (ps2_pad.cpp at patch 0037).
++    const std::vector<std::pair<int, uint16_t>> kOldKeys = {
++        {K_UP, PAD_UP}, {K_W, PAD_UP}, {K_DOWN, PAD_DOWN}, {K_S, PAD_DOWN}, {K_LEFT, PAD_LEFT}, {K_A, PAD_LEFT},
++        {K_RIGHT, PAD_RIGHT}, {K_D, PAD_RIGHT}, {K_X, PAD_CROSS}, {K_SPACE, PAD_CROSS}, {K_C, PAD_CIRCLE},
++        {K_ESCAPE, PAD_CIRCLE}, {K_Z, PAD_SQUARE}, {K_KP_0, PAD_SQUARE}, {K_V, PAD_TRIANGLE},
++        {K_KP_1, PAD_TRIANGLE}, {K_Q, PAD_L1}, {K_E, PAD_R1}, {K_LEFT_SHIFT, PAD_L2}, {K_RIGHT_SHIFT, PAD_R2},
++        {K_ENTER, PAD_START}, {K_TAB, PAD_SELECT}};
++    const std::vector<std::pair<int, uint16_t>> kOldPadButtons = {
++        {B_LEFT_FACE_UP, PAD_UP}, {B_LEFT_FACE_DOWN, PAD_DOWN}, {B_LEFT_FACE_LEFT, PAD_LEFT},
++        {B_LEFT_FACE_RIGHT, PAD_RIGHT}, {B_RIGHT_FACE_DOWN, PAD_CROSS}, {B_RIGHT_FACE_RIGHT, PAD_CIRCLE},
++        {B_RIGHT_FACE_LEFT, PAD_SQUARE}, {B_RIGHT_FACE_UP, PAD_TRIANGLE}, {B_LEFT_TRIGGER_1, PAD_L1},
++        {B_RIGHT_TRIGGER_1, PAD_R1}, {B_LEFT_TRIGGER_2, PAD_L2}, {B_RIGHT_TRIGGER_2, PAD_R2},
++        {B_MIDDLE_RIGHT, PAD_START}, {B_MIDDLE_LEFT, PAD_SELECT}, {B_LEFT_THUMB, PAD_L3}, {B_RIGHT_THUMB, PAD_R3}};
++
++    uint8_t oldAxis(float v) { return static_cast<uint8_t>(128 + v * 127); }
++
++    struct FakeInput
++    {
++        std::set<int> keys;
++        int gamepad = -1; // available device, -1 = none
++        std::set<int> buttons;
++        float axes[6] = {};
++        int keyCalls = 0;
++
++        ps2input::InputSource source()
++        {
++            return ps2input::InputSource{
++                this,
++                [](void *u, int k)
++                {
++                    auto *f = static_cast<FakeInput *>(u);
++                    ++f->keyCalls;
++                    return f->keys.count(k) != 0;
++                },
++                [](void *u, int d) { return static_cast<FakeInput *>(u)->gamepad == d; },
++                [](void *u, int d, int b)
++                {
++                    auto *f = static_cast<FakeInput *>(u);
++                    return f->gamepad == d && f->buttons.count(b) != 0;
++                },
++                [](void *u, int, int a) { return static_cast<FakeInput *>(u)->axes[a]; }};
++        }
++    };
++
++    uint16_t poll(const ps2input::InputBindings &b, FakeInput &in, uint8_t sticks[4])
++    {
++        uint16_t buttons = 0;
++        ps2input::evaluateInput(b, in.source(), buttons, sticks);
++        return buttons;
++    }
++
++    void setEnv(const char *name, const char *value)
++    {
++#if defined(_WIN32)
++        _putenv_s(name, value);
++#else
++        if (*value)
++            setenv(name, value, 1);
++        else
++            unsetenv(name);
++#endif
++    }
++
++    bool hasLine(const std::vector<std::string> &messages, int line)
++    {
++        const std::string prefix = "[input] line " + std::to_string(line) + ": ";
++        for (const std::string &m : messages)
++            if (m.compare(0, prefix.size(), prefix) == 0)
++                return true;
++        return false;
++    }
++}
++
++void register_ps2_input_bindings_tests()
++{
++    MiniTest::Case("InputBindings", [](TestCase &tc)
++    {
++        tc.Run("defaults equal the old hard-coded mapping (keyboard, gamepad 0, axes, no dead zone)", [](TestCase &t)
++        {
++            const ps2input::InputBindings b = ps2input::defaultInputBindings();
++            uint8_t sticks[4];
++            FakeInput idle;
++            t.Equals(poll(b, idle, sticks), static_cast<uint16_t>(0xFFFFu), "nothing held");
++            t.Equals(sticks[0], static_cast<uint8_t>(0x80u), "sticks centred");
++            t.Equals(sticks[3], static_cast<uint8_t>(0x80u), "sticks centred");
++            t.Equals(idle.keyCalls, 22, "one poll per bound key, as the old code (22 IsKeyDown)");
++
++            for (const auto &[key, mask] : kOldKeys)
++            {
++                FakeInput in;
++                in.keys.insert(key);
++                t.Equals(poll(b, in, sticks), static_cast<uint16_t>(0xFFFFu & ~mask),
++                         "key " + std::to_string(key));
++                t.Equals(sticks[2], static_cast<uint8_t>(0x80u), "no keyboard stick by default");
++            }
++            FakeInput unbound;
++            unbound.keys = {K_LEFT_CONTROL, K_J, K_K, 49 /* ONE */};
++            t.Equals(poll(b, unbound, sticks), static_cast<uint16_t>(0xFFFFu), "keys the old code ignored");
++
++            for (const auto &[button, mask] : kOldPadButtons)
++            {
++                FakeInput in;
++                in.gamepad = 0;
++                in.buttons.insert(button);
++                in.keys.insert(K_X); // the keyboard is ignored while gamepad 0 is present
++                t.Equals(poll(b, in, sticks), static_cast<uint16_t>(0xFFFFu & ~mask),
++                         "gamepad button " + std::to_string(button));
++            }
++            FakeInput pad;
++            pad.gamepad = 0;
++            const float values[4] = {-1.0f, 0.2f, 0.5f, 1.0f}; // LEFT_X, LEFT_Y, RIGHT_X, RIGHT_Y
++            for (int a = 0; a < 4; ++a)
++                pad.axes[a] = values[a];
++            poll(b, pad, sticks);
++            t.Equals(sticks[2], oldAxis(-1.0f), "lx = 128 + v * 127");
++            t.Equals(sticks[3], oldAxis(0.2f), "ly: no dead zone");
++            t.Equals(sticks[0], oldAxis(0.5f), "rx");
++            t.Equals(sticks[1], oldAxis(1.0f), "ry");
++
++            FakeInput second;
++            second.gamepad = 1; // only gamepad 0 counted before
++            second.keys.insert(K_C);
++            t.Equals(poll(b, second, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "gamepad 1 ignored");
++        });
++
++        tc.Run("a file overrides a binding; the rest keep their defaults", [](TestCase &t)
++        {
++            ps2input::InputBindings b = ps2input::defaultInputBindings();
++            std::vector<std::string> messages;
++            ps2input::parseInputIni("; comment\n[Keyboard]\ncross = j, KEY_K   # two keys\n"
++                                    "stick_left = W, S, A, D\n[gamepad]\ndevice = 1\ncircle = RIGHT_FACE_DOWN\n"
++                                    "stick_right = right_y, right_x\n",
++                                    b, messages);
++            t.Equals(messages.size(), static_cast<size_t>(0), "no bad lines");
++            uint8_t sticks[4];
++            FakeInput j;
++            j.keys = {K_J};
++            t.Equals(poll(b, j, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "J = cross");
++            FakeInput x;
++            x.keys = {K_X};
++            t.Equals(poll(b, x, sticks), static_cast<uint16_t>(0xFFFFu), "X no longer cross");
++            FakeInput c;
++            c.keys = {K_C};
++            t.Equals(poll(b, c, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "C still circle");
++            FakeInput w;
++            w.keys = {K_W, K_D};
++            const uint16_t wb = poll(b, w, sticks);
++            t.Equals(wb, static_cast<uint16_t>(0xFFFFu & ~(PAD_UP | PAD_RIGHT)), "W/D still the d-pad");
++            t.Equals(sticks[3], oldAxis(-1.0f), "W = left stick up");
++            t.Equals(sticks[2], oldAxis(1.0f), "D = left stick right");
++            FakeInput pad;
++            pad.gamepad = 1;
++            pad.buttons = {B_RIGHT_FACE_DOWN};
++            pad.axes[2] = 1.0f;  // RIGHT_X
++            pad.axes[3] = -1.0f; // RIGHT_Y
++            t.Equals(poll(b, pad, sticks), static_cast<uint16_t>(0xFFFFu & ~(PAD_CROSS | PAD_CIRCLE)),
++                     "device 1; RIGHT_FACE_DOWN = cross (default) and circle (file)");
++            t.Equals(sticks[0], oldAxis(-1.0f), "rx from RIGHT_Y (swapped in the file)");
++            t.Equals(sticks[1], oldAxis(1.0f), "ry from RIGHT_X");
++
++            // Through the start-up loader and PS2X_INPUT_INI.
++            const std::string path = std::string(PS2X_TEST_BINARY_DIR) + "/input-bindings-test.ini";
++            {
++                std::ofstream f(path, std::ios::binary);
++                f << "[keyboard]\r\nstart = K\r\n";
++            }
++            setEnv("PS2X_INPUT_INI", path.c_str());
++            t.IsTrue(ps2input::loadInputBindingsAtStartup(), "file read");
++            FakeInput k;
++            k.keys = {K_K};
++            t.Equals(poll(ps2input::activeInputBindings(), k, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_START),
++                     "active table: K = start");
++            setEnv("PS2X_INPUT_INI", "Z:/no/such/input.ini");
++            t.IsFalse(ps2input::loadInputBindingsAtStartup(), "missing file: not read");
++            setEnv("PS2X_INPUT_INI", "");
++            ps2input::setActiveInputBindings(ps2input::defaultInputBindings());
++        });
++
++        tc.Run("a bad line is reported once and its entry keeps the default", [](TestCase &t)
++        {
++            ps2input::InputBindings b = ps2input::defaultInputBindings();
++            std::vector<std::string> messages;
++            ps2input::parseInputIni("[keyboard]\n"            // 1
++                                    "cross = J, NOPE\n"       // 2 unknown key: cross stays X, SPACE
++                                    "circle = J\n"            // 3 fine
++                                    "triangle\n"              // 4 no '='
++                                    "jump = X\n"              // 5 unknown entry
++                                    "stick_left = W, S\n"     // 6 needs four keys
++                                    "[gamepad]\n"             // 7
++                                    "deadzone = 1.5\n"        // 8 out of range
++                                    "device = two\n"          // 9 not a number
++                                    "square = LEFT_FACE_UPP\n" // 10 unknown button
++                                    "[mouse]\n"               // 11 unknown section
++                                    "cross = LEFT\n",         // 12 ignored with its section
++                                    b, messages);
++            t.Equals(messages.size(), static_cast<size_t>(8), "one message per bad line");
++            for (int line : {2, 4, 5, 6, 8, 9, 10, 11})
++                t.IsTrue(hasLine(messages, line), "line " + std::to_string(line) + " reported");
++            t.IsFalse(hasLine(messages, 3), "good line not reported");
++            uint8_t sticks[4];
++            FakeInput x;
++            x.keys = {K_X};
++            t.Equals(poll(b, x, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "cross keeps X");
++            FakeInput j;
++            j.keys = {K_J};
++            t.Equals(poll(b, j, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "J = circle (good line)");
++            t.IsTrue(b.deadzone == 0.0f, "deadzone kept");
++            t.Equals(b.device, 0, "device kept");
++            t.Equals(static_cast<int>(b.keyStick[0][0]), 0, "stick_left kept (none)");
++            t.Equals(static_cast<int>(b.padButtons[ps2input::Square].count), 1, "square kept");
++            t.Equals(static_cast<int>(b.padButtons[ps2input::Square].codes[0]), static_cast<int>(B_RIGHT_FACE_LEFT),
++                     "square kept");
++        });
++
++        tc.Run("deadzone applies to the gamepad axes", [](TestCase &t)
++        {
++            ps2input::InputBindings b = ps2input::defaultInputBindings();
++            std::vector<std::string> messages;
++            ps2input::parseInputIni("[gamepad]\ndeadzone = 0.25\n", b, messages);
++            t.Equals(messages.size(), static_cast<size_t>(0), "no bad lines");
++            t.IsTrue(b.deadzone == 0.25f, "read");
++            FakeInput pad;
++            pad.gamepad = 0;
++            pad.axes[0] = 0.2f;    // LEFT_X inside the dead zone
++            pad.axes[1] = -0.625f; // LEFT_Y: (0.625 - 0.25) / 0.75 = 0.5
++            pad.axes[2] = 1.0f;    // RIGHT_X: full stays full
++            pad.axes[3] = -0.25f;  // RIGHT_Y: on the edge = centre
++            uint8_t sticks[4];
++            poll(b, pad, sticks);
++            t.Equals(sticks[2], static_cast<uint8_t>(128u), "lx centred");
++            t.Equals(sticks[3], oldAxis(-0.5f), "ly rescaled");
++            t.Equals(sticks[0], oldAxis(1.0f), "rx full");
++            t.Equals(sticks[1], static_cast<uint8_t>(128u), "ry centred");
++            t.Equals(ps2input::axisToPadByte(0.2f, 0.0f), oldAxis(0.2f), "deadzone 0 = the old conversion");
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+

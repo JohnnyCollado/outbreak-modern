@@ -24,6 +24,8 @@ add_library(ob_diag_core STATIC
     src/frame_time.cpp
     src/pc_sampler.cpp
     src/vu1_recorder.cpp
+    src/pad_control.cpp
+    src/pad_pipe.cpp
 )
 target_include_directories(ob_diag_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -32,6 +34,9 @@ target_include_directories(ob_diag_core PUBLIC
     "${OB_STB_DIR}"
 )
 set_target_properties(ob_diag_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(WIN32)
+    target_link_libraries(ob_diag_core PUBLIC advapi32) # pad pipe: token, SID, security descriptor
+endif()
 
 add_library(ob_diag SHARED src/plugin.cpp)
 target_link_libraries(ob_diag PRIVATE ob_diag_core)
@@ -42,6 +47,7 @@ add_executable(ob_diag_tests
     tests/input_script_tests.cpp
     tests/frame_dump_tests.cpp
     tests/diag_tests.cpp
+    tests/pad_control_tests.cpp
     tests/stb_image_impl.cpp
     src/plugin.cpp
 )

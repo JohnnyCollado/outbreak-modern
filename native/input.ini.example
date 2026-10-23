@@ -1,0 +1,56 @@
+; input.ini - host input bindings for the runner (PS2Recomp patch 0038, runtime/ps2_input_bindings.h).
+;
+; Copy to input.ini beside ps2EntryRunner.exe (C:\ob\r\ps2xRuntime\input.ini), or point PS2X_INPUT_INI at a file.
+; Read once at start-up. Without a file the defaults below apply; they are the mapping the runner always had.
+; A bad line is printed once as "[input] line N: ..." and that entry keeps its default.
+;
+; Names are raylib's without the prefix (KEY_, GAMEPAD_BUTTON_, GAMEPAD_AXIS_), any case. Several codes per button
+; are comma-separated (up to 8). An empty value or NONE unbinds the button.
+; Buttons: up down left right cross circle square triangle l1 r1 l2 r2 l3 r3 start select
+; The gamepad (index `device`), when connected, is the only input; otherwise the keyboard is.
+; ';' or '#' starts a comment.
+
+[keyboard]
+up       = UP, W
+down     = DOWN, S
+left     = LEFT, A
+right    = RIGHT, D
+cross    = X, SPACE
+circle   = C, ESCAPE
+square   = Z, KP_0
+triangle = V, KP_1
+l1       = Q
+r1       = E
+l2       = LEFT_SHIFT
+r2       = RIGHT_SHIFT
+l3       = NONE
+r3       = NONE
+start    = ENTER
+select   = TAB
+; Analog sticks from four keys: up, down, left, right (default: none). For example, to walk with IJKL:
+; stick_left = I, K, J, L
+stick_left  = NONE
+stick_right = NONE
+
+[gamepad]
+device   = 0          ; raylib gamepad index 0..3
+deadzone = 0          ; 0..1 per axis; below it = centre, the rest rescaled to the full range
+up       = LEFT_FACE_UP
+down     = LEFT_FACE_DOWN
+left     = LEFT_FACE_LEFT
+right    = LEFT_FACE_RIGHT
+cross    = RIGHT_FACE_DOWN
+circle   = RIGHT_FACE_RIGHT
+square   = RIGHT_FACE_LEFT
+triangle = RIGHT_FACE_UP
+l1       = LEFT_TRIGGER_1
+r1       = RIGHT_TRIGGER_1
+l2       = LEFT_TRIGGER_2
+r2       = RIGHT_TRIGGER_2
+l3       = LEFT_THUMB
+r3       = RIGHT_THUMB
+start    = MIDDLE_RIGHT
+select   = MIDDLE_LEFT
+; Two axes each: x, y (LEFT_X LEFT_Y RIGHT_X RIGHT_Y LEFT_TRIGGER RIGHT_TRIGGER).
+stick_left  = LEFT_X, LEFT_Y
+stick_right = RIGHT_X, RIGHT_Y

@@ -11,6 +11,8 @@
 #                                            frame-time CSV); --hidden: PS2X_HIDDEN=1 without a script
 #   tools/ob.sh boot --script F [--tag T]    hidden scripted boot (PS2X_INPUT_SCRIPT, ob_diag plugin); ends by
 #                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
+#   tools/ob.sh boot --pad NAME [--secs N] [--tag T]  hidden boot driven live over \\.\pipe\NAME (PS2X_PAD_PIPE,
+#                                            ob_diag plugin; client tools/ob/pad.py); shots in $OB_ROOT/frames-<tag>
 #   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
 #   tools/ob.sh pcsx2-gs                     PCSX2 GS static lib (native/pcsx2_gs): clone/deps if missing, build, smoke
 #   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
@@ -181,12 +183,13 @@ cmd_recompile() {
 }
 
 cmd_boot() {
-    local secs=200 tag=latest script= diag=1
+    local secs=200 tag=latest script= diag=1 pad=
     while [ $# -gt 0 ]; do
         case $1 in
             --secs) secs=$2; shift 2 ;;
             --tag) tag=$2; shift 2 ;;
             --script) script=$2; shift 2 ;;
+            --pad) pad=$2; shift 2 ;;
             --no-diag) diag=0; shift ;;
             --hidden) export PS2X_HIDDEN=1; shift ;;
             *) echo "boot: unknown arg $1"; return 2 ;;
@@ -200,7 +203,7 @@ cmd_boot() {
         [ -f "$OB_DIAG_BUILD/ob_diag.dll" ] || { echo "boot: $OB_DIAG_BUILD/ob_diag.dll missing (ob.sh recompile)"; return 2; }
         export PS2X_DIAG; PS2X_DIAG=$(cygpath -w "$OB_DIAG_BUILD/ob_diag.dll")
     else
-        [ -z "$script" ] || { echo "boot: --script needs the diagnostics plugin (drop --no-diag)"; return 2; }
+        [ -z "$script" ] && [ -z "$pad" ] || { echo "boot: --script/--pad need the diagnostics plugin (drop --no-diag)"; return 2; }
         unset PS2X_DIAG
     fi
     if [ -n "$script" ]; then
@@ -212,6 +215,17 @@ cmd_boot() {
         export PS2X_INPUT_SCRIPT; PS2X_INPUT_SCRIPT=$(cygpath -w "$(realpath "$script")")
         export PS2X_HIDDEN=1
     fi
+    if [ -n "$pad" ]; then
+        # Live pad: hidden window, the plugin owns pad port 0 and serves \\.\pipe\<name>; shots (one frame each)
+        # go to frames-<tag>. Ends on the client's quit (exit 0) or the --secs kill.
+        [ -z "$script" ] || { echo "boot: --pad and --script both drive the pad: pick one"; return 2; }
+        frames="$OB_ROOT/frames-$tag"; rm -rf "$frames"; mkdir -p "$frames"
+        export PS2X_PAD_PIPE="$pad" PS2X_PAD_SHOTS; PS2X_PAD_SHOTS=$(cygpath -w "$frames")
+        export PS2X_HIDDEN=1
+    fi
+    # Input bindings (patch 0038): nothing is staged; the runner reads input.ini only if one sits beside the exe
+    # (example: native/input.ini.example) or PS2X_INPUT_INI names one.
+    [ -f "$OB_R/ps2xRuntime/input.ini" ] && echo "boot: using $OB_R/ps2xRuntime/input.ini"
     # Vulkan SDK off PATH so the staged shaderc_shared.dll beside the runner is the one loaded (as cmd_pcsx2_gs).
     local np; np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
     PATH="$np" PS2X_FRAME_DUMP_DIR="$(cygpath -w "$frames")" powershell -NoProfile -Command "
@@ -351,5 +365,5 @@ case ${1:-} in
     pcsx2-gs) cmd_pcsx2_gs ;;
     vucompare) shift; cmd_vucompare "$@" ;;
     depcheck) cmd_depcheck ;;
-    *) sed -n '6,19p' "$0"; exit 2 ;;
+    *) sed -n '6,21p' "$0"; exit 2 ;;
 esac

@@ -16,6 +16,7 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> [PS2X_VU1=<interp\|mvu>] bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`). The gated screens end at character select, before any VU1 run: `PS2X_VU1` does not change them |
 | Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`); loads the ob_diag plugin (`PS2X_DIAG`) |
 | Engine-only boot | `bash tools/ob.sh boot --no-diag --hidden --secs N --tag T` | No plugin, as a play build; speed from the `[fps]` log lines |
+| Live pad boot | `bash tools/ob.sh boot --pad ob_pad --secs 900 --tag T` + `python tools/ob/pad.py <cmd>` | Hidden; driven over a named pipe, one command at a time (`boot.md` "Live pad") |
 | Visible boot | `PS2X_GS=pcsx2-vk bash tools/ob.sh boot --tag visible` | Opens a window: needs the developer's "proceed" each time |
 
 From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob.sh boot --tag visible`
@@ -39,6 +40,8 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   per 64-vsync bucket (pc 0 = outside guest code). `PS2X_FRAME_TIME=<path.csv>` (plugin; was 0027/0029): per-vsync `tick,wall_us,busy_us`.
   Summarize: `python -I tools/ob/pc_profile.py <csv> --from T --to T` (maps pcs to functions).
 - `PS2X_VU1_CAPTURE=<dir>[,N[,K]]` (plugin; was patch 0031): VU1 program capture, see below.
+- `PS2X_INPUT_INI=<path>` (engine, patch 0038): host input bindings; default `<exe dir>/input.ini` when present, else the
+  built-in mapping (`native/input.ini.example`). `PS2X_PAD_PIPE=<name>` / `PS2X_PAD_SHOTS=<dir>` (plugin): the live pad.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
 ## VU1 capture (ob_diag plugin, was patch 0031) and `vucompare`

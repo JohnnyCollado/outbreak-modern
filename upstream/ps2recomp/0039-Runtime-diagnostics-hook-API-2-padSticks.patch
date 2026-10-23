@@ -1,0 +1,131 @@
+From 6b1fc3f5fc0f724b6f652ae413d900e38bd516f6 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 06:00:25 -0400
+Subject: [PATCH 39/39] Runtime: diagnostics hook API 2, padSticks
+
+A plugin that owns the pad (padButtons true) could only report buttons; the
+sticks stayed centred, so a test driver could not walk a character with the
+analog stick. PS2_DIAG_API_VERSION 2 adds one hook:
+
+    virtual bool padSticks(int port, uint8_t sticks[4]); // rx, ry, lx, ly
+
+called on the game thread right after padButtons returned true; true = those
+bytes go to the pad data (bytes 4-7), false = centred as before. A new
+virtual changes the vtable, hence the version bump: a plugin built for API 1
+is refused by its own version check.
+
+Test: a recording plugin's sticks reach PSPadBackend::readState bytes 4-7;
+padSticks false leaves them centred.
+---
+ ps2xRuntime/include/runtime/ps2_diag_hooks.h |  5 ++-
+ ps2xRuntime/src/lib/ps2_pad.cpp              |  5 ++-
+ ps2xTest/src/ps2_diag_hooks_tests.cpp        | 33 ++++++++++++++++++++
+ 3 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_diag_hooks.h b/ps2xRuntime/include/runtime/ps2_diag_hooks.h
+index 2b692d3..07a6032 100644
+--- a/ps2xRuntime/include/runtime/ps2_diag_hooks.h
++++ b/ps2xRuntime/include/runtime/ps2_diag_hooks.h
+@@ -21,7 +21,7 @@
+ 
+ struct VU1State;
+ 
+-#define PS2_DIAG_API_VERSION 1u
++#define PS2_DIAG_API_VERSION 2u // 2: padSticks
+ #define PS2_DIAG_ENTRY_NAME "ps2_diag_create"
+ 
+ // Engine services for a plugin.
+@@ -83,6 +83,9 @@ public:
+ 
+     // Game thread: a pad poll. true = the plugin owns the pad; buttons = the active-low button word to report.
+     virtual bool padButtons(int port, uint16_t &buttons) { return false; }
++    // Game thread, right after padButtons returned true: true = report these sticks (libpad bytes 4-7: rx, ry, lx,
++    // ly; 0x80 = centre) instead of centred ones.
++    virtual bool padSticks(int port, uint8_t sticks[4]) { return false; }
+ 
+     // Main thread.
+     virtual void onFrame(uint64_t tick, const uint8_t *rgba, uint32_t width, uint32_t height) {} // packed RGBA8
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index bcd0896..252b0f0 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -23,7 +23,7 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+     data[3] = 0xFF;
+     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+ 
+-    // A diagnostics plugin that owns the pad (a scripted run): only its buttons, no host pad or keys.
++    // A diagnostics plugin that owns the pad (a scripted run): only its buttons and sticks, no host pad or keys.
+     if (PS2DiagHooks *diag = ps2DiagHooks())
+     {
+         uint16_t owned = 0xFFFFu;
+@@ -31,6 +31,9 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+         {
+             data[2] = static_cast<uint8_t>(owned & 0xFF);
+             data[3] = static_cast<uint8_t>(owned >> 8);
++            uint8_t sticks[4] = {kPadStickCenter, kPadStickCenter, kPadStickCenter, kPadStickCenter};
++            if (diag->padSticks(port, sticks))
++                std::memcpy(data + 4, sticks, 4);
+             return true;
+         }
+     }
+diff --git a/ps2xTest/src/ps2_diag_hooks_tests.cpp b/ps2xTest/src/ps2_diag_hooks_tests.cpp
+index 8dd008e..b007ca9 100644
+--- a/ps2xTest/src/ps2_diag_hooks_tests.cpp
++++ b/ps2xTest/src/ps2_diag_hooks_tests.cpp
+@@ -26,6 +26,8 @@ namespace
+         uint64_t wantTick = 0;
+         uint16_t padWord = 0;
+         bool ownPad = false;
++        bool ownSticks = false;
++        uint8_t stickBytes[4] = {0x80, 0x80, 0x80, 0x80};
+ 
+         void onVsync(uint64_t tick, uint64_t idleWaitNs) override
+         {
+@@ -47,6 +49,12 @@ namespace
+             buttons = padWord;
+             return ownPad;
+         }
++        bool padSticks(int, uint8_t sticks[4]) override
++        {
++            for (int i = 0; i < 4; ++i)
++                sticks[i] = stickBytes[i];
++            return ownSticks;
++        }
+     };
+ 
+     struct DiagScope
+@@ -191,6 +199,31 @@ void register_ps2_diag_hooks_tests()
+             t.IsTrue(pad.readState(0, 0, data, sizeof(data)), "pad read");
+             t.Equals(data[2], static_cast<uint8_t>(0xFFu), "low byte");
+             t.Equals(data[3], static_cast<uint8_t>(0xDFu), "high byte: circle held");
++            t.Equals(data[6], static_cast<uint8_t>(0x80u), "no padSticks: left stick centred");
++        });
++
++        tc.Run("a plugin that owns the pad sets the sticks (API 2: padSticks)", [](TestCase &t)
++        {
++            t.Equals(PS2_DIAG_API_VERSION, 2u, "API version 2");
++            RecordingDiagHooks rec;
++            rec.ownPad = true;
++            rec.padWord = 0xFFFFu;
++            rec.ownSticks = true;
++            rec.stickBytes[0] = 0x80u; // rx
++            rec.stickBytes[1] = 0x80u; // ry
++            rec.stickBytes[2] = 0xFFu; // lx: full right
++            rec.stickBytes[3] = 0x01u; // ly: full up
++            DiagScope scope(&rec);
++            PSPadBackend pad;
++            uint8_t data[32] = {};
++            t.IsTrue(pad.readState(0, 0, data, sizeof(data)), "pad read");
++            t.Equals(data[4], static_cast<uint8_t>(0x80u), "rx");
++            t.Equals(data[5], static_cast<uint8_t>(0x80u), "ry");
++            t.Equals(data[6], static_cast<uint8_t>(0xFFu), "lx from the plugin");
++            t.Equals(data[7], static_cast<uint8_t>(0x01u), "ly from the plugin");
++            rec.ownSticks = false;
++            t.IsTrue(pad.readState(0, 0, data, sizeof(data)), "pad read");
++            t.Equals(data[6], static_cast<uint8_t>(0x80u), "padSticks false: centred");
+         });
+ 
+         tc.Run("loader: no PS2X_DIAG and no plugin beside the exe = no hooks; a missing PS2X_DIAG = exit 2", [](TestCase &t)
+-- 
+2.46.2.windows.1
+
