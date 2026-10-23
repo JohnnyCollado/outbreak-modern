@@ -206,6 +206,90 @@ namespace
 		std::snprintf(d, sizeof(d), "(%d of 200)", count);
 		Check("stop: every queued record executes before the thread ends", count == 200, d);
 	}
+	// ---- sleep/wake stress: both sides keep falling asleep; a lost wake-up hangs (the watchdog fails it) ----
+	struct StressCtx
+	{
+		uint32_t rng = 777;
+		uint64_t done = 0;
+	};
+	void StressHandler(void* c, const obgs::RecordHeader& h, const uint8_t*)
+	{
+		StressCtx& x = *static_cast<StressCtx*>(c);
+		x.rng = x.rng * 1103515245u + 12345u;
+		const uint32_t r = (x.rng >> 16) % 100;
+		if (r < 3)
+			SpinFor(std::chrono::microseconds(150 + r * 40)); // past the producer's spin: it sleeps
+		x.done++;
+		if (h.cmd == kRead)
+			*reinterpret_cast<uint64_t*>(h.a) = x.done;
+	}
+
+	void TestStress()
+	{
+		StressCtx ctx;
+		obgs::Ring ring;
+		ring.start(&StressHandler, nullptr, &ctx, 1 << 16, 2);
+		std::atomic<bool> finished{false};
+		std::thread watchdog([&] {
+			const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+			while (!finished.load() && std::chrono::steady_clock::now() < end)
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			if (!finished.load())
+			{
+				std::printf("[Failed] stress: producer or GS thread still asleep after 20 s (lost wake-up)\nPassed: %d\nTotal Tests: %d\n",
+					g_passed, g_total + 1);
+				std::fflush(stdout);
+				std::_Exit(1);
+			}
+		});
+		// CPU hogs (2 per core): the producer and the GS thread get preempted between their wake-up checks, as the
+		// game thread is under load in a real run (the lost wake-up of entry 27 needs exactly that).
+		std::atomic<bool> hog_stop{false};
+		std::vector<std::thread> hogs;
+		for (unsigned i = 0; i < 2 * std::max(1u, std::thread::hardware_concurrency()); i++)
+			hogs.emplace_back([&] { while (!hog_stop.load(std::memory_order_relaxed)) OB_GS_RING_PAUSE(); });
+		uint32_t rng = 4242;
+		uint64_t posted = 0, bad = 0;
+		const uint8_t pkt[96] = {};
+		const auto t0 = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1500))
+		{
+			rng = rng * 1103515245u + 12345u;
+			const uint32_t r = (rng >> 16) % 100;
+			if (r < 4)
+				SpinFor(std::chrono::microseconds(100 + r * 50)); // past the GS thread's spin: it sleeps
+			if (r < 10)
+			{
+				uint64_t seen = 0;
+				ring.call(kRead, 0, reinterpret_cast<uint64_t>(&seen), 0);
+				posted++;
+				bad += seen != posted;
+			}
+			else if (r < 20)
+			{
+				ring.post(kVsyncCmd, obgs::Ring::kVsync, 0, 0, 0, pkt, sizeof(pkt));
+				posted++;
+			}
+			else
+			{
+				ring.post(kData, 0, 0, 0, 0, pkt, (r * 13) % sizeof(pkt));
+				posted++;
+			}
+		}
+		hog_stop = true;
+		for (std::thread& t : hogs)
+			t.join();
+		ring.stop();
+		finished = true;
+		watchdog.join();
+		char d[192];
+		std::snprintf(d, sizeof(d), "(%llu records, %llu executed, %llu reads saw the wrong count, %llu sync waits, %llu vsync stalls, %llu timeout wakes)",
+			(unsigned long long)posted, (unsigned long long)ctx.done, (unsigned long long)bad,
+			(unsigned long long)ring.stats().syncWaits, (unsigned long long)ring.stats().vsyncStalls,
+			(unsigned long long)ring.timeoutWakes());
+		Check("stress: 1.5 s of sleeps and wakes on both sides, no lost wake-up, reads exact",
+			ctx.done == posted && bad == 0 && ring.timeoutWakes() == 0, d);
+	}
 } // namespace
 
 int main()
@@ -215,6 +299,7 @@ int main()
 	TestSyncReadback();
 	TestQueueAhead();
 	TestStop();
+	TestStress();
 	std::printf("time %.0f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 	std::printf("Passed: %d\nTotal Tests: %d\n", g_passed, g_total);
 	return g_passed == g_total ? 0 : 1;

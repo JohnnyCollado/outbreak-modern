@@ -566,10 +566,10 @@ void ob_gs_vsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint64_t b
 		{
 			const obgs::Ring::Stats& st = s_ring->stats();
 			std::fprintf(stderr, "[pcsx2-gs] gs thread: %llu vsyncs, %llu records, %llu MiB, sync waits %llu (%.1f ms), "
-				"queue-ahead stalls %llu (%.1f ms), ring full %llu, indirect %llu\n", (unsigned long long)s_vsyncs_posted,
+				"queue-ahead stalls %llu (%.1f ms), ring full %llu, indirect %llu, timeout wakes %llu\n", (unsigned long long)s_vsyncs_posted,
 				(unsigned long long)st.records, (unsigned long long)(st.bytes >> 20), (unsigned long long)st.syncWaits,
 				st.syncWaitNs / 1e6, (unsigned long long)st.vsyncStalls, st.vsyncStallNs / 1e6,
-				(unsigned long long)st.fullStalls, (unsigned long long)st.indirect);
+				(unsigned long long)st.fullStalls, (unsigned long long)st.indirect, (unsigned long long)s_ring->timeoutWakes());
 			std::fflush(stderr);
 		}
 		return;

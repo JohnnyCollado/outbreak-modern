@@ -126,6 +126,20 @@ cmd_test() {
     else
         echo "pcsx2_vu: 0/0 (build failed: $OB_LOGS/ob-pcsx2-vu.log)"; red=1
     fi
+    # GS thread tests (native/pcsx2_gs/tests): the command ring alone, and the adapter end to end on PCSX2's SW
+    # renderer, built in the pcsx2-gs build dir (ob.sh pcsx2-gs staged resources/ and the DLLs there), Vulkan SDK off
+    # PATH as for the smoke.
+    log="$OB_LOGS/ob-test-pcsx2_gs.log"
+    local gsb="${OB_PCSX2_GS_BUILD:-$OB_ROOT/pcsx2-gs-build}" np
+    np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
+    if vc cmake --build "$gsb" --target ob_gs_ring_tests ob_pcsx2_gs_adapter_tests > "$OB_LOGS/ob-pcsx2-gs-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./ob_gs_ring_tests.exe; PATH="$np" ./ob_pcsx2_gs_adapter_tests.exe) > "$log" 2>&1
+        p=$(awk '/^Passed: /{s+=$2} END{print s+0}' "$log"); t=$(awk '/^Total Tests: /{s+=$3; n++} END{print (n==2 ? s : 0)}' "$log")
+        echo "pcsx2_gs: $p/$t"
+        [ "$t" -gt 0 ] && [ "$p" = "$t" ] || { red=1; grep -a 'Failed\]' "$log" | head -20; }
+    else
+        echo "pcsx2_gs: 0/0 (build failed: $OB_LOGS/ob-pcsx2-gs-tests-build.log)"; red=1
+    fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
 }

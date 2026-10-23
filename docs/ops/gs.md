@@ -118,6 +118,9 @@ backend interface, privileged registers, readback, present and vblank).
   vsyncs are queued (`MTGS::PostVsyncStart`, `EmuConfig.GS.VsyncQueueSize`, default 2 in `Config.h`). CSR
   SIGNAL/FINISH/FIELD stay ours (game thread). Window attach and resize stay on the main thread (the child window
   must belong to the thread that pumps the parent); the resize is applied at the next vsync the GS thread runs.
+  Sleep/wake: each side spins, then sleeps on a condition variable; the waker clears the sleeper's flag with
+  `exchange` (a plain store lost a wake-up and froze the game, report entry 27); a 20 ms timeout is a safety
+  valve, `timeout wakes` in the stats line must stay 0.
   Shutdown: the child's `WM_DESTROY` (the runner's `CloseWindow`, after it joined the game thread) drains the ring
   and joins the GS thread; later calls run inline. Not a thread_local destructor at the game thread's exit: that
   runs under the loader lock and deadlocks with the GS thread's own exit. Tests: `ob_gs_ring_tests` (the ring alone),

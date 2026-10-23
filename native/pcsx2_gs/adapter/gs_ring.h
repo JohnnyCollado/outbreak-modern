@@ -9,10 +9,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
@@ -89,6 +91,8 @@ namespace obgs
 		int queueAhead() const { return m_queueAhead; }
 		const Stats& stats() const { return m_stats; }
 		int queuedVsyncs() const { return m_queued.load(std::memory_order_acquire); }
+		// Sleeps that ended by the 20 ms timeout with their condition met and no wake-up: a lost wake-up. Expect 0.
+		uint64_t timeoutWakes() const { return m_timeoutWakes.load(std::memory_order_relaxed); }
 
 		// Producer: copies payload into the ring and returns at once. A payload larger than a quarter of the ring
 		// goes by pointer instead and the call waits for it (the bytes stay valid). flags may hold kVsync.
@@ -181,11 +185,36 @@ namespace obgs
 		void publish()
 		{
 			m_write.store(m_wpos, std::memory_order_seq_cst);
-			if (m_consumerSleeping.load(std::memory_order_seq_cst))
+			wake(m_consumerSleeping, m_consumerCv);
+		}
+
+		// Sleep/wake (only when a side has run out of spinning). The sleeper sets its flag, re-checks its condition,
+		// then waits on a condition variable whose predicate is re-read under the mutex; the waker clears the flag
+		// with exchange (never a plain store: a blind clear could erase a flag set for a later sleep, which then
+		// misses its wake-up: the hang of report entry 27) and notifies under the same mutex. A 20 ms timeout is
+		// a safety valve (PCSX2's MTGS keeps one too); a wake that only the timeout delivered is counted.
+		void wake(std::atomic<bool>& flag, std::condition_variable& cv)
+		{
+			if (flag.exchange(false, std::memory_order_seq_cst))
 			{
-				m_consumerSleeping.store(false, std::memory_order_relaxed);
-				m_write.notify_one();
+				std::lock_guard<std::mutex> lk(m_sleepMu);
+				cv.notify_one();
 			}
+		}
+
+		template <typename Cond>
+		void sleepUntil(std::atomic<bool>& flag, std::condition_variable& cv, Cond cond)
+		{
+			std::unique_lock<std::mutex> lk(m_sleepMu);
+			flag.store(true, std::memory_order_seq_cst);
+			while (!cond())
+			{
+				if (!flag.load(std::memory_order_seq_cst))
+					return; // woken: the caller re-checks
+				if (cv.wait_for(lk, std::chrono::milliseconds(20)) == std::cv_status::timeout && flag.load() && cond())
+					m_timeoutWakes.fetch_add(1, std::memory_order_relaxed);
+			}
+			flag.store(false, std::memory_order_seq_cst);
 		}
 
 		void waitSpace(uint64_t need)
@@ -202,8 +231,8 @@ namespace obgs
 			waitUntil([this, pos] { return m_read.load(std::memory_order_acquire) >= pos; });
 		}
 
-		// Producer wait: spin, then sleep on m_read (the consumer bumps it after every record, after any vsync count
-		// change). Eventcount: flag first, re-check, then wait on the value read before the re-check.
+		// Producer wait: spin, then sleep until the consumer's next m_read bump (after every record, after any vsync
+		// count change) wakes it to re-check.
 		template <typename Cond>
 		void waitUntil(Cond cond)
 		{
@@ -213,17 +242,8 @@ namespace obgs
 					return;
 				OB_GS_RING_PAUSE();
 			}
-			for (;;)
-			{
-				const uint64_t r = m_read.load(std::memory_order_seq_cst);
-				m_producerSleeping.store(true, std::memory_order_seq_cst);
-				if (cond())
-				{
-					m_producerSleeping.store(false, std::memory_order_relaxed);
-					return;
-				}
-				m_read.wait(r, std::memory_order_seq_cst);
-			}
+			while (!cond())
+				sleepUntil(m_producerSleeping, m_producerCv, cond);
 		}
 
 		void consumerLoop()
@@ -243,14 +263,8 @@ namespace obgs
 					}
 					while (w == r)
 					{
-						m_consumerSleeping.store(true, std::memory_order_seq_cst);
-						w = m_write.load(std::memory_order_seq_cst);
-						if (w != r)
-						{
-							m_consumerSleeping.store(false, std::memory_order_relaxed);
-							break;
-						}
-						m_write.wait(r, std::memory_order_seq_cst);
+						sleepUntil(m_consumerSleeping, m_consumerCv,
+							[this, r] { return m_write.load(std::memory_order_seq_cst) != r; });
 						w = m_write.load(std::memory_order_acquire);
 					}
 				}
@@ -278,11 +292,7 @@ namespace obgs
 						m_queued.fetch_sub(1, std::memory_order_seq_cst);
 					r += sizeof(h) + padded(copyBytes);
 					m_read.store(r, std::memory_order_seq_cst);
-					if (m_producerSleeping.load(std::memory_order_seq_cst))
-					{
-						m_producerSleeping.store(false, std::memory_order_relaxed);
-						m_read.notify_one();
-					}
+					wake(m_producerSleeping, m_producerCv);
 					if (h.cmd == kQuit)
 						return;
 				}
@@ -298,6 +308,9 @@ namespace obgs
 		alignas(64) std::atomic<int> m_queued{0};
 		std::atomic<bool> m_consumerSleeping{false};
 		std::atomic<bool> m_producerSleeping{false};
+		std::atomic<uint64_t> m_timeoutWakes{0};
+		std::mutex m_sleepMu;
+		std::condition_variable m_consumerCv, m_producerCv;
 		// Set at start.
 		uint8_t* m_buf = nullptr;
 		uint8_t* m_data = nullptr;
