@@ -25,7 +25,10 @@ Share = fraction of pixels outside the tolerance against the PCSX2 reference (lo
 | mainmenu (advisory) | 0.998910 | 0.996238 | 0.989694 | movie background |
 | charselect (advisory) | 0.891462 | 0.694545 | 0.606197 | movie background |
 
-Gated green: cpu 0/3, pcsx2-vk 1/3. What changed since 1.2: the PCSX2 GS (patches 0021-0024, 0026) and the VIF1
+Gated green: cpu 0/3, pcsx2-vk 1/3, **pcsx2-sw 3/3 (savedata, access, capcom all 0.000000, max delta 0)**
+(`.run/logs/sc-gate-pcsx2-sw.log`, same build plus the shader cache). The vk remainder is PCSX2's hardware
+renderer differing from its own software renderer, which made the references. Decision (2026-10-23): the gate
+judges correctness with `PS2X_GS=pcsx2-sw`; `pcsx2-vk` is the display path. What changed since 1.2: the PCSX2 GS (patches 0021-0024, 0026) and the VIF1
 IMAGE-continuation fix (0025), which corrected glyph and CLUT uploads for both backends
 (`reports/2026-10-22-pcsx2-gs.md`, T12). The advisory screens are dominated by Sofdec movie backgrounds (out of
 scope until the movies milestone).
@@ -45,7 +48,8 @@ scheduler's idle wait. Budget 16.68 ms (59.94 Hz). CSVs: `C:\ob\logs\ft29-<gs>[-
 - PCSX2 Vulkan does about half the work per frame of the CPU GS and goes over budget about a tenth as often.
 - The Vulkan max is one frame per boot, tick 2: PCSX2's GS opening and compiling its shaders on first use
   (`native/pcsx2_gs/adapter/pcsx2_side.cpp:88`, `DisableShaderCache = true`). It varied 1.0-3.1 s between runs.
-  Start-up cost, not a stall; enabling PCSX2's shader cache would remove it after the first run.
+  Start-up cost, not a stall. Since 2026-10-23 the shader cache is on (`C:\ob\ps2xRuntime\cache`): tick 2
+  drops from 1,083 ms (cold) to 325 ms (warm) (`C:\ob\logstsc-*.csv`).
 - Since patch 0026, the CPU GS does no drawing when PCSX2 is selected (decode only), so these numbers are PCSX2's
   real cost, not both renderers added together.
 

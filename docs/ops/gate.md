@@ -87,6 +87,8 @@ so `watch 0x12000020` silently reads RDRAM 0x20. No env switch traces them. FBW 
 ## Current baseline (phase 1.3, 2026-10-22) — `gate/baseline-1.3.md`
 - `C:\ob\up` 00e03cd (patches 0001-0029). pcsx2-vk: savedata 0.003353, access 0.000000 GREEN, capcom 0.001251
   (1/3 gated green); cpu: 0.042668, 0.050319, 0.018507 (0/3). Frame time: pcsx2-vk busy median ~4.85 ms, cpu ~10.2 ms.
+- **Correctness gate = `PS2X_GS=pcsx2-sw bash tools/ob.sh gate`** (references are PCSX2-SW): 3/3 gated green,
+  max delta 0 (2026-10-23). pcsx2-vk is the display path; its small remainder is PCSX2 HW vs SW.
 - Compare new runs against this file; the 1.2 baseline below is history.
 
 ## Baseline (T7, 2026-10-22) — `gate/baseline-1.2.md`

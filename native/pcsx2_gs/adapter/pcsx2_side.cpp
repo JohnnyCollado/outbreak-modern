@@ -85,7 +85,7 @@ namespace
 		o.PCRTCOverscan = false;
 		o.TVShader = 0;
 		o.CASMode = GSCASMode::Disabled;
-		o.DisableShaderCache = true;
+		o.DisableShaderCache = false; // cache in EmuFolders::Cache: shaders compile once, not on every launch
 		return o;
 	}
 
@@ -97,6 +97,9 @@ namespace
 		s_tried = true;
 		EmuFolders::AppRoot = std::string(Path::GetDirectory(FileSystem::GetProgramPath()));
 		EmuFolders::Resources = Path::Combine(EmuFolders::AppRoot, "resources");
+		EmuFolders::Cache = Path::Combine(EmuFolders::AppRoot, "cache");
+		if (!FileSystem::EnsureDirectoryExists(EmuFolders::Cache.c_str(), false))
+			std::fprintf(stderr, "[pcsx2-gs] shader cache dir %s not created; shaders compile every launch\n", EmuFolders::Cache.c_str());
 		const GSRendererType t = ToType(s_renderer);
 		// PCSX2's own log (swap chain present mode, fallbacks, resize errors) -> pcsx2-gs.log in the working dir.
 		Log::SetFileOutputLevel(LOGLEVEL_DEV, "pcsx2-gs.log");
