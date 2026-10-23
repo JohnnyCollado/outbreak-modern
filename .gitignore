@@ -19,3 +19,9 @@ ps2_emu/
 .run/
 __pycache__/
 .claude-state/
+
+# Johnny's local playtest launcher (machine-specific paths)
+play.bat
+
+# Johnny's profiling playtest launcher (play.bat on the OB_PROFILE=1 copy in C:/ob/r-profile)
+play-profile.bat

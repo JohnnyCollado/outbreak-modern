@@ -12,6 +12,8 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | VU1 interpreter vs microVU | `bash tools/ob.sh vucompare [DIR\|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]` | Builds `native/pcsx2_vu` + `ob_pcsx2_vu_compare.exe` into `C:\ob\pcsx2-vu-build` (first build ~55 s incl. its own copy of `ob_pcsx2_gs`; then 5-8 s), runs it on `C:\ob\vu1-captures`. Needs `ob.sh recompile` first (links the runner's `ps2_runtime.lib`). See "VU1 capture" below |
 | Dependency check | `bash tools/ob.sh depcheck` | ~12 s. Touches `gs_frontend.h` (mtime restored after), dry-runs the runner build (`cmake --build C:/ob/r --target ps2EntryRunner -- -n -f C:/ob/r/build.ninja` via `tools/ob/vc.bat`), counts the steps. Green = `depcheck: ok: gs_frontend.h rebuilds N runtime step(s), 0 generated game units`, exit 0; else exit 1 and the game units (`Unity\`) are listed. The `-f` with the absolute manifest path is needed: CMake's CONFIGURE_DEPENDS glob check is always dirty, and a plain `-n` stops after "Re-running CMake" with no steps. Run after any runtime change (patch 0028 keeps game code off runtime headers). Log `C:\ob\logs\ob-depcheck.log` |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
+| Profile build | `OB_PROFILE=1 bash tools/ob.sh recompile` | Debug info for the host libraries only, game units untouched; copy in `C:\ob\r-profile`. See "Host profiling" below |
+| Host profiler | `bash tools/ob.sh hostprof-build` | `C:\ob\hostprof-build\hostprof.exe` (~5 s). See "Host profiling" below |
 | Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest, `ob_diag` (the plugin's own tests; builds `native/ob_diag` into `C:\ob\diag-build`, ~3 s incremental), `pcsx2_vu` (`ob_pcsx2_vu_tests`: microVU placement under a crowded address space and the fallback; built in `C:\ob\pcsx2-vu-build`, links the runner's `ps2_runtime.lib`, so rebuild the runner after a runtime change) |
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> [PS2X_VU1=<interp\|mvu>] bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`). The gated screens end at character select, before any VU1 run: `PS2X_VU1` does not change them |
 | Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`); loads the ob_diag plugin (`PS2X_DIAG`) |
@@ -44,6 +46,34 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   else the built-in mapping: PCSX2's keyboard and XInput defaults, both live (`native/input.ini.example`; controls
   table in `boot.md` "Input bindings"). `PS2X_PAD_PIPE=<name>` / `PS2X_PAD_SHOTS=<dir>` (plugin): the live pad.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
+
+## Host profiling: `OB_PROFILE=1` build and `tools/hostprof`
+
+Where the host CPU time goes (GS, microVU, runtime, generated game code), under real play: visible window, no ob_diag.
+
+- Build: `OB_PROFILE=1 bash tools/ob.sh recompile`. `tools/ob/profile.cmake` is injected through
+  `CMAKE_PROJECT_INCLUDE` (no PS2Recomp edit) and, at the end of the configure, adds `/Z7` (C/C++ only, not ml64) to
+  `ps2_runtime`, `ps2_iop`, `ob_pcsx2_gs`, `ob_pcsx2_gs_adapter`, `ps2x_external_gs`, `ob_pcsx2_vu`,
+  `ps2x_external_vu1`, and links `ps2EntryRunner` with `/DEBUG:FULL /OPT:REF /OPT:ICF` (`/DEBUG` alone turns
+  REF/ICF off). Optimisation flags unchanged. Game units (`Unity\`, the PCH) keep their command lines: toggling the
+  mode in either direction rebuilds 0 of them (count `Unity` in the `[n/m]` lines of `C:\ob\logs\ob-runner-build.log`).
+  raylib is left out (its build tree `C:\ob\t\_deps` is shared with the tools tree). The exe, its PDB (~240 MB),
+  the DLLs and shaders are copied to `C:\ob\r-profile`, so the profile exe survives the next normal build.
+- Cost (2026-10-23): either toggle recompiles the host libraries, 0 game units: normal -> profile 84 s runner build
+  (link 3.4 s), profile -> normal 81 s (link 1.7 s); an unchanged re-run 3 s (`reports/2026-10-23-gameplay.md`
+  entry 25). The normal build after a round trip has the same `.text` hash as before. The profile `.text` differs by +384 bytes of 65 MB (linker folding
+  under `/DEBUG`); the `/Z7` objects linked without `/DEBUG` give the normal `.text` size.
+- Profiler: `bash tools/ob.sh hostprof-build`, then attach to a running runner:
+  `C:\ob\hostprof-build\hostprof.exe --name ps2EntryRunner.exe --secs 30 --out C:\ob\logs\hostprof-jsbar.txt`
+  (or `--pid N`; `--hz 1000` default, effective ~750-1000 Hz; `--min-cycles 50000`). Per tick, for each thread whose
+  cycle counter moved by `--min-cycles` since the last tick: `SuspendThread`, `GetThreadContext` (RIP, RSP),
+  `ResumeThread`, nothing allocated or locked in between (`gotchas.md`); idle threads are not suspended. Then DbgHelp
+  symbols (PDB beside the exe) and the report: per-thread CPU time (`GetThreadTimes` over the window), on-CPU samples,
+  top 30 functions (exclusive) and modules per busy thread. Generated game code has public names only: a sample is
+  named after the public that starts its function (`.pdata`), otherwise `game code (generated)`; code with no module
+  is JIT (microVU's cache). Exclusive only: no call stacks.
+- Developer run: `play-profile.bat` (git-ignored, beside `play.bat`: the same line on `C:\ob\r-profile`), walk into
+  J's Bar, run the hostprof command above from a second shell.
 
 ## VU1 capture (ob_diag plugin, was patch 0031) and `vucompare`
 

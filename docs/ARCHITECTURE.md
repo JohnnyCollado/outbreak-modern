@@ -62,6 +62,7 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `gate/` | The correctness judge: scripted boot, frozen tolerance, reference hashes, baselines, evidence | `docs/ops/gate.md` |
 | `tools/ob.sh` (+ `tools/ob/`) | Windows driver: build tools, recompile, boot, test, gate, pcsx2-gs | `tools/ob/sync_changed.py` keeps rebuilds incremental |
 | `native/input.ini.example` | Commented example of the runner's `input.ini` (host key/gamepad bindings, patches 0038/0040) | Not staged; copy beside the exe to use |
+| `tools/hostprof/` | External sampling profiler `hostprof.exe` (suspend, read RIP, resume per thread; DbgHelp symbols; per-thread CPU time and top functions). Outside the engine: attaches to a running `ps2EntryRunner.exe` | Built by `ob.sh hostprof-build` into `C:\ob\hostprof-build`; names host functions in an `OB_PROFILE=1` build (`tools/ob/profile.cmake`, `docs/ops/build.md` "Host profiling") |
 | `tools/gate/` | Gate scoring (`gate.py`) and reference handling (`refs.py`) | |
 | `tools/mwo3_to_elf.py`, `tools/splat_functions.py` | Turn overlay `.BIN` files into ELFs and function lists for the recompiler | With tests |
 | `tools/q_scan.py`, `tools/recomp_cycle.sh` | Analysis scan; Linux form of the recompile cycle | |

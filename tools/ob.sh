@@ -6,6 +6,7 @@
 #   tools/ob.sh tools                        configure + build the tools tree ($OB_T)
 #   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu tests: "<suite>: <pass>/<total>"
 #   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
+#                                            (OB_PROFILE=1: host libraries with debug info, copy in $OB_ROOT/r-profile)
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
 #                    [--no-diag] [--hidden]  --no-diag: without the ob_diag plugin (a play build; no script, dumps,
 #                                            frame-time CSV); --hidden: PS2X_HIDDEN=1 without a script
@@ -19,6 +20,8 @@
 #                                            build native/pcsx2_vu + compare tool, diff interpreter vs microVU on
 #                                            PS2X_VU1_CAPTURE files (default $OB_ROOT/vu1-captures)
 #   tools/ob.sh depcheck                     dry run after touching gs_frontend.h: 0 generated game units must rebuild
+#   tools/ob.sh hostprof-build               external sampling profiler tools/hostprof into $OB_HOSTPROF_BUILD
+#                                            (C:/ob/hostprof-build/hostprof.exe); pair with OB_PROFILE=1 recompile
 #
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
 # OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat;
@@ -173,22 +176,35 @@ cmd_recompile() {
     # Debug info: none by default (linking ~5,800 objects with /Zi took 5+ min); OB_DEBUG=1 for full PDBs.
     local cxxf="/O2 /DNDEBUG" ldf="/INCREMENTAL:NO"
     [ "${OB_DEBUG:-0}" = 1 ] && cxxf="/O2 /Zi /DNDEBUG" ldf="/DEBUG:FULL /INCREMENTAL:NO"
+    # OB_PROFILE=1: debug info for the host libraries only (tools/ob/profile.cmake), for tools/hostprof; the game
+    # units keep their flags, so toggling it rebuilds no game unit. Empty = normal build.
+    local prof=
+    [ "${OB_PROFILE:-0}" = 1 ] && prof="$REPO/tools/ob/profile.cmake"
     start=$(date +%s)
     {
         { { [ -f "$OB_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_R/CMakeCache.txt" &&
               grep -qxF "PS2X_EXTERNAL_VU1_DIR:PATH=$evu" "$OB_R/CMakeCache.txt" &&
               grep -qxF "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=$cxxf" "$OB_R/CMakeCache.txt" &&
-              grep -qxF "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=$ldf" "$OB_R/CMakeCache.txt"; } ||
-            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$cxxf" "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=$ldf" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DPS2X_EXTERNAL_VU1_DIR=$evu" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd"; } &&
+              grep -qxF "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=$ldf" "$OB_R/CMakeCache.txt" &&
+              grep -qxF "CMAKE_PROJECT_INCLUDE:FILEPATH=$prof" "$OB_R/CMakeCache.txt"; } ||
+            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$cxxf" "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=$ldf" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DPS2X_EXTERNAL_VU1_DIR=$evu" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd" "-DCMAKE_PROJECT_INCLUDE:FILEPATH=$prof"; } &&
         vc cmake --build "$OB_R" -j $JOBS --target ps2EntryRunner
     } > "$log" 2>&1
     rc=$?
-    echo "runner build exit $rc in $(( $(date +%s) - start )) s ($log)"
+    echo "runner build exit $rc in $(( $(date +%s) - start )) s ($log)$([ -n "$prof" ] && echo ', OB_PROFILE=1')"
     [ $rc = 0 ] || { tail -5 "$log"; return 1; }
     local rd="$OB_R/ps2xRuntime"
     rm -rf "$rd/resources/shaders" && mkdir -p "$rd/resources" &&
         cp -r "$px/bin/resources/shaders" "$rd/resources/" &&
         cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$rd/" || { echo "runner: pcsx2 staging failed"; return 1; }
+    if [ -n "$prof" ]; then
+        # A copy that survives the next normal build: play-profile.bat runs it; hostprof finds the PDB beside it.
+        local pr="$OB_ROOT/r-profile"
+        rm -rf "$pr" && mkdir -p "$pr" &&
+            cp -r "$rd/ps2EntryRunner.exe" "$rd/ps2EntryRunner.pdb" "$rd/shaderc_shared.dll" "$rd/zstd.dll" "$rd/resources" "$pr/" ||
+            { echo "runner: profile copy to $pr failed"; return 1; }
+        echo "runner: OB_PROFILE build copied to $pr (exe + pdb)"
+    fi
     diag_build || return 1
     [ $bad = 0 ] || { echo "recompile errors > 0"; return 1; }
 }
@@ -373,6 +389,20 @@ cmd_depcheck() {
     return 1
 }
 
+# hostprof-build: configure (once) + build tools/hostprof (hostprof.exe, the external sampling profiler; no engine
+# code) into $OB_HOSTPROF_BUILD. Usage: hostprof.exe (--pid N | --name ps2EntryRunner.exe) --secs 30 --out FILE.
+cmd_hostprof_build() {
+    local b="${OB_HOSTPROF_BUILD:-$OB_ROOT/hostprof-build}" log="$OB_LOGS/ob-hostprof-build.log" rc start
+    start=$(date +%s)
+    mkdir -p "$b"
+    { { [ -f "$b/build.ninja" ] || vc cmake -S "$REPO/tools/hostprof" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release; } &&
+      vc cmake --build "$b"; } > "$log" 2>&1
+    rc=$?
+    echo "hostprof: build exit $rc in $(( $(date +%s) - start )) s: $b/hostprof.exe ($log)"
+    [ $rc = 0 ] || tail -15 "$log"
+    return $rc
+}
+
 case ${1:-} in
     tools) cmd_tools ;;
     test) cmd_test ;;
@@ -382,5 +412,6 @@ case ${1:-} in
     pcsx2-gs) cmd_pcsx2_gs ;;
     vucompare) shift; cmd_vucompare "$@" ;;
     depcheck) cmd_depcheck ;;
-    *) sed -n '6,21p' "$0"; exit 2 ;;
+    hostprof-build) cmd_hostprof_build ;;
+    *) sed -n '6,24p' "$0"; exit 2 ;;
 esac
