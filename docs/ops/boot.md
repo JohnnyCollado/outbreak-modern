@@ -51,8 +51,28 @@ Screen predicates for `peek` (task step, title/select states): `gate/play.script
 (both would drive the pad). If a command never completes (the guest stopped vsyncing) the client times out; the
 server waits for that command before it reads the next.
 
-## Input bindings (input.ini, patch 0038)
+## Input bindings (input.ini, patches 0038, 0040)
 With a host pad (no plugin owning it), the runner maps keys and gamepad from `input.ini` beside the exe
 (`C:\ob\r\ps2xRuntime\input.ini`) or `PS2X_INPUT_INI=<path>`; no file = the built-in defaults. `ob.sh` stages
 nothing. Format and defaults: `native/input.ini.example`; a bad line is logged once as `[input] line N: ...` and
 keeps its default; a read file logs `[input] bindings from <path> (N bad line(s))`.
+
+Default controls (patch 0040): keyboard = PCSX2 v2.9.134's default keyboard mapping
+(`pcsx2/Input/InputManager.cpp:1771-1794`), gamepad = PCSX2's XInput mapping (`XInputSource.cpp:41-47, 108-124`).
+Both work at once: a button is down if either holds it; a stick follows the gamepad unless it rests inside its
+dead zone, then the keyboard.
+
+| PS2 | Keyboard | Xbox gamepad |
+|---|---|---|
+| D-pad | arrow keys | D-pad |
+| Left stick | W / A / S / D | left stick |
+| Right stick | T / F / G / H (up / left / down / right) | right stick |
+| Cross / Circle / Square / Triangle | K / L / J / I | A / B / X / Y |
+| L1 / R1 | Q / E | LB / RB |
+| L2 / R2 | 1 / 3 | LT / RT (pressed past 30/255 of travel) |
+| L3 / R3 | 2 / 4 | left / right stick click |
+| Start / Select | Enter / Backspace | Start / Back |
+
+Stick dead zones: Microsoft's XInput values (`Xinput.h:100-102`), left 7849/32767 (~0.24), right 8689/32767
+(~0.265); `deadzone`, `deadzone_left`, `deadzone_right`, `trigger_threshold` in `[gamepad]` change them. PCSX2's own
+default dead zone is 0.

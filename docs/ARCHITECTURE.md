@@ -32,7 +32,7 @@ ps2EntryRunner.exe at run time
                    PS2X_GS=pcsx2-vk   PCSX2 2.9.134 Vulkan GS (the display path)
   IOP ............ interpreter running the game's own IRX modules
   SPU2 (sound) ... not producing sound yet
-  window/input ... raylib window and pad (bindings: input.ini, patch 0038); PCSX2 Vulkan draws into a child window;
+  window/input ... raylib window and pad (bindings: input.ini, patches 0038/0040); PCSX2 Vulkan draws into a child window;
                    title = frame counter
   diagnostics .... optional plugin ob_diag.dll (native/ob_diag) on the hook API runtime/ps2_diag_hooks.h
 ```
@@ -61,7 +61,7 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `native/ob_diag/` | **The diagnostics plugin** `ob_diag.dll` over PS2Recomp's hook API (`runtime/ps2_diag_hooks.h`, patch 0036): scripted input (`PS2X_INPUT_SCRIPT`), frame dumps and captures (`PS2X_FRAME_DUMP_DIR`), frame-time CSV (`PS2X_FRAME_TIME`), guest PC sampler (`PS2X_PC_SAMPLE`), live mock controller on a named pipe (`PS2X_PAD_PIPE`; client `tools/ob/pad.py`), VU1 capture (`PS2X_VU1_CAPTURE`; `include/ob_vu1_capture.h` is the file format), and its tests (`ob_diag_tests`) | Built into `C:\ob\diag-build`; loaded only via `PS2X_DIAG` (ob.sh) or when placed beside the exe; a play build ships without it |
 | `gate/` | The correctness judge: scripted boot, frozen tolerance, reference hashes, baselines, evidence | `docs/ops/gate.md` |
 | `tools/ob.sh` (+ `tools/ob/`) | Windows driver: build tools, recompile, boot, test, gate, pcsx2-gs | `tools/ob/sync_changed.py` keeps rebuilds incremental |
-| `native/input.ini.example` | Commented example of the runner's `input.ini` (host key/gamepad bindings, patch 0038) | Not staged; copy beside the exe to use |
+| `native/input.ini.example` | Commented example of the runner's `input.ini` (host key/gamepad bindings, patches 0038/0040) | Not staged; copy beside the exe to use |
 | `tools/gate/` | Gate scoring (`gate.py`) and reference handling (`refs.py`) | |
 | `tools/mwo3_to_elf.py`, `tools/splat_functions.py` | Turn overlay `.BIN` files into ELFs and function lists for the recompiler | With tests |
 | `tools/q_scan.py`, `tools/recomp_cycle.sh` | Analysis scan; Linux form of the recompile cycle | |

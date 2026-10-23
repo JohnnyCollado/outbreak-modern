@@ -40,8 +40,9 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   per 64-vsync bucket (pc 0 = outside guest code). `PS2X_FRAME_TIME=<path.csv>` (plugin; was 0027/0029): per-vsync `tick,wall_us,busy_us`.
   Summarize: `python -I tools/ob/pc_profile.py <csv> --from T --to T` (maps pcs to functions).
 - `PS2X_VU1_CAPTURE=<dir>[,N[,K]]` (plugin; was patch 0031): VU1 program capture, see below.
-- `PS2X_INPUT_INI=<path>` (engine, patch 0038): host input bindings; default `<exe dir>/input.ini` when present, else the
-  built-in mapping (`native/input.ini.example`). `PS2X_PAD_PIPE=<name>` / `PS2X_PAD_SHOTS=<dir>` (plugin): the live pad.
+- `PS2X_INPUT_INI=<path>` (engine, patches 0038/0040): host input bindings; default `<exe dir>/input.ini` when present,
+  else the built-in mapping: PCSX2's keyboard and XInput defaults, both live (`native/input.ini.example`; controls
+  table in `boot.md` "Input bindings"). `PS2X_PAD_PIPE=<name>` / `PS2X_PAD_SHOTS=<dir>` (plugin): the live pad.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
 ## VU1 capture (ob_diag plugin, was patch 0031) and `vucompare`

@@ -1,0 +1,963 @@
+From b2a273948809bce19b4fb94f85817ac7ccbabb8c Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 06:29:24 -0400
+Subject: [PATCH] Runtime: default input bindings follow PCSX2 (keyboard) and
+ XInput (Xbox gamepad)
+
+Patch 0038's defaults copied the runner's old hard-coded mapping. They now
+follow the common standard:
+
+- Keyboard = PCSX2 v2.9.134's default keyboard mapping
+  (pcsx2/Input/InputManager.cpp GetKeyboardGenericBindingMapping): arrows =
+  d-pad, W/S/A/D = left stick, T/G/F/H = right stick, K/L/J/I = cross/circle/
+  square/triangle, Q/E = L1/R1, 1/3 = L2/R2, 2/4 = L3/R3, ENTER = start,
+  BACKSPACE = select. Nothing else (the old X/SPACE, C/ESCAPE, Z/KP_0, V/KP_1,
+  LEFT/RIGHT_SHIFT, TAB defaults are gone).
+- Gamepad 0 = PCSX2's XInput mapping (pcsx2/Input/XInputSource.cpp) in
+  raylib's names, as before, except L2/R2: raylib 5.5 on desktop reports LT/RT
+  as axes (-1 released .. 1 pulled) and sets LEFT/RIGHT_TRIGGER_2 only past
+  0.1 (55% travel). l2/r2 now list the button and the trigger axis; a button
+  list in [gamepad] may name LEFT_TRIGGER / RIGHT_TRIGGER (code
+  kTriggerAxisCode + axis), down above trigger_threshold of travel.
+- Dead zones = Xinput.h XINPUT_GAMEPAD_LEFT/RIGHT_THUMB_DEADZONE (7849, 8689
+  of 32767), trigger threshold XINPUT_GAMEPAD_TRIGGER_THRESHOLD (30 of 255).
+  ini: deadzone sets both sticks; deadzone_left / deadzone_right override it
+  wherever they are in the file; trigger_threshold.
+- Keyboard and gamepad both live (as in PCSX2): a button is down if either
+  source has it down; a stick is the gamepad's after its dead zone, or the
+  keyboard's when the gamepad stick is inside it. Replaces "gamepad present =
+  keyboard ignored".
+- InputSource gains gamepadTriggerTravel (raylib: raylibTriggerTravel, GLFW
+  -1..1 to 0..1; Android 0..1 as is); applyDeadzone is public.
+
+Tests: the defaults table equals the spec entry by entry (16 keys, 8 stick
+keys, 16 gamepad buttons + 2 trigger axes, axes, device, dead zones,
+threshold) and by behaviour; old default keys unbound; per-stick dead zones
+and trigger threshold, raylib trigger travel, ini overrides independent of
+order; keyboard and gamepad merge; bad lines for the new entries. Against
+0038's implementation: 496/502 (all 6 input cases fail).
+---
+ .../include/runtime/ps2_input_bindings.h      |  50 ++-
+ ps2xRuntime/src/lib/ps2_input_bindings.cpp    | 208 ++++++----
+ ps2xRuntime/src/lib/ps2_pad.cpp               |   4 +-
+ ps2xTest/src/ps2_input_bindings_tests.cpp     | 377 +++++++++++++-----
+ 4 files changed, 446 insertions(+), 193 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_input_bindings.h b/ps2xRuntime/include/runtime/ps2_input_bindings.h
+index 612c350..9f80e60 100644
+--- a/ps2xRuntime/include/runtime/ps2_input_bindings.h
++++ b/ps2xRuntime/include/runtime/ps2_input_bindings.h
+@@ -2,17 +2,29 @@
+ #define PS2_INPUT_BINDINGS_H
+ 
+ // Host input bindings: which keyboard keys and gamepad buttons/axes drive the PS2 pad. One table, built once at
+-// start-up from input.ini (PS2X_INPUT_INI=<path> overrides <exe dir>/input.ini); no file = the defaults, which are
+-// the mapping PSPadBackend had hard-coded (gamepad 0 when present, else the keyboard; no dead zone).
++// start-up from input.ini (PS2X_INPUT_INI=<path> overrides <exe dir>/input.ini); no file = the defaults:
++//   keyboard = PCSX2's default keyboard mapping (pcsx2/Input/InputManager.cpp, GetKeyboardGenericBindingMapping):
++//     arrows = d-pad, WASD = left stick, TFGH = right stick, K/L/J/I = cross/circle/square/triangle,
++//     Q/E = L1/R1, 1/3 = L2/R2, 2/4 = L3/R3, ENTER = start, BACKSPACE = select;
++//   gamepad 0 = PCSX2's XInput mapping (pcsx2/Input/XInputSource.cpp): A/B/X/Y = cross/circle/square/triangle,
++//     LB/RB = L1/R1, LT/RT = L2/R2, stick clicks = L3/R3, Back/Start = select/start, sticks = sticks;
++//   dead zones = Xinput.h's XINPUT_GAMEPAD_LEFT/RIGHT_THUMB_DEADZONE (7849, 8689 of 32767) and trigger press
++//     threshold XINPUT_GAMEPAD_TRIGGER_THRESHOLD (30 of 255).
++// Keyboard and gamepad are both live: a button is down when either has it down; a stick is the gamepad's unless
++// it is inside its dead zone, then the keyboard's.
+ //
+ // input.ini (case-insensitive names; ';' or '#' starts a comment; several codes per button comma-separated):
+-//   [keyboard]                     raylib key names without KEY_: X, ENTER, RIGHT_SHIFT, KP_0, ...
+-//   cross = X, SPACE
+-//   stick_left = W, S, A, D        four keys: up, down, left, right (default: none)
++//   [keyboard]                     raylib key names without KEY_: K, ENTER, BACKSPACE, ONE, ...
++//   cross = K, SPACE
++//   stick_left = W, S, A, D        four keys: up, down, left, right
+ //   [gamepad]                      raylib names without GAMEPAD_BUTTON_ / GAMEPAD_AXIS_
+ //   device = 0                     raylib gamepad index
+-//   deadzone = 0.15                0..1, per axis, the rest rescaled to 0..1 (default 0)
++//   deadzone = 0.15                0..1, both sticks, per axis, the rest rescaled to 0..1
++//   deadzone_left = 0.24           per stick; overrides deadzone wherever it appears in the file
++//   deadzone_right = 0.265
++//   trigger_threshold = 0.12       0..1 of trigger travel: a trigger axis bound to a button presses it above this
+ //   cross = RIGHT_FACE_DOWN
++//   l2 = LEFT_TRIGGER_2, LEFT_TRIGGER   a button list may name the trigger axes LEFT_TRIGGER / RIGHT_TRIGGER
+ //   stick_left = LEFT_X, LEFT_Y    two axes: x, y
+ // Buttons: up down left right cross circle square triangle l1 r1 l2 r2 l3 r3 start select. An empty value or NONE
+ // unbinds. A bad line is reported once ("[input] line N: ...") and that entry keeps its default.
+@@ -32,6 +44,15 @@ namespace ps2input
+ 
+     constexpr size_t kMaxCodesPerButton = 8;
+ 
++    // In padButtons, a code >= kTriggerAxisCode is a trigger axis (raylib GamepadAxis = code - kTriggerAxisCode),
++    // down when its travel is above triggerThreshold.
++    constexpr int16_t kTriggerAxisCode = 0x100;
++
++    // Microsoft's XInput recommendations (Xinput.h XINPUT_GAMEPAD_*): the defaults.
++    constexpr float kXInputLeftDeadzone = 7849.0f / 32767.0f;   // ~0.240
++    constexpr float kXInputRightDeadzone = 8689.0f / 32767.0f;  // ~0.265
++    constexpr float kXInputTriggerThreshold = 30.0f / 255.0f;   // ~0.118
++
+     struct CodeList
+     {
+         uint8_t count = 0;
+@@ -42,10 +63,11 @@ namespace ps2input
+     {
+         CodeList keys[ButtonCount];        // raylib KeyboardKey values
+         int16_t keyStick[2][4] = {};       // [left, right][up, down, left, right] keys; 0 = none
+-        CodeList padButtons[ButtonCount];  // raylib GamepadButton values
++        CodeList padButtons[ButtonCount];  // raylib GamepadButton values, or kTriggerAxisCode + trigger axis
+         int16_t padStick[2][2] = {{0, 1}, {2, 3}}; // [left, right][x, y] raylib GamepadAxis; -1 = none
+         int device = 0;
+-        float deadzone = 0.0f;
++        float deadzone[2] = {0.0f, 0.0f};  // [left, right] stick, per axis
++        float triggerThreshold = 0.0f;     // trigger travel 0..1
+     };
+ 
+     uint16_t padButtonMask(PadButton button); // libpad active-low bit (bytes 2-3 of the pad data)
+@@ -65,14 +87,22 @@ namespace ps2input
+         bool (*gamepadAvailable)(void *user, int device);
+         bool (*gamepadButtonDown)(void *user, int device, int button);
+         float (*gamepadAxis)(void *user, int device, int axis);
++        float (*gamepadTriggerTravel)(void *user, int device, int axis); // 0 = released .. 1 = fully pulled
+     };
+     InputSource raylibInputSource();
+ 
++    // raylib's trigger axis value to travel 0..1. Desktop (GLFW) reports -1 released .. 1 pulled; Android 0..1.
++    float raylibTriggerTravel(float raw);
++
++    // The per-axis dead zone: |v| <= deadzone = 0, the rest rescaled to 0..1.
++    float applyDeadzone(float value, float deadzone);
++
+     // -1..1 to the pad byte (128 + v * 127, truncated, as before), after the dead zone.
+     uint8_t axisToPadByte(float value, float deadzone);
+ 
+-    // One pad poll: buttons (active-low) and sticks in pad data order (bytes 4-7: rx, ry, lx, ly). The gamepad
+-    // `device`, when available, is the only source; else the keyboard.
++    // One pad poll: buttons (active-low) and sticks in pad data order (bytes 4-7: rx, ry, lx, ly). Keyboard and
++    // gamepad `device` (when available) both count: a button is down if either has it down; each stick is the
++    // gamepad's after its dead zone, or the keyboard's when the gamepad stick is inside its dead zone.
+     void evaluateInput(const InputBindings &bindings, const InputSource &source, uint16_t &buttons, uint8_t sticks[4]);
+ 
+     const InputBindings &activeInputBindings();
+diff --git a/ps2xRuntime/src/lib/ps2_input_bindings.cpp b/ps2xRuntime/src/lib/ps2_input_bindings.cpp
+index af0eba7..2408fa3 100644
+--- a/ps2xRuntime/src/lib/ps2_input_bindings.cpp
++++ b/ps2xRuntime/src/lib/ps2_input_bindings.cpp
+@@ -72,6 +72,8 @@ namespace ps2input
+ #define OB_AXIS(n) {#n, GAMEPAD_AXIS_##n}
+         const Named kAxes[] = {OB_AXIS(LEFT_X), OB_AXIS(LEFT_Y), OB_AXIS(RIGHT_X), OB_AXIS(RIGHT_Y),
+                                OB_AXIS(LEFT_TRIGGER), OB_AXIS(RIGHT_TRIGGER)};
++        // Axes a button list may name (as kTriggerAxisCode + axis).
++        const Named kTriggerAxes[] = {OB_AXIS(LEFT_TRIGGER), OB_AXIS(RIGHT_TRIGGER)};
+ #undef OB_AXIS
+ 
+         std::string upper(std::string s)
+@@ -133,6 +135,25 @@ namespace ps2input
+         bool raylibGamepadAvailable(void *, int device) { return IsGamepadAvailable(device); }
+         bool raylibGamepadButtonDown(void *, int device, int button) { return IsGamepadButtonDown(device, button); }
+         float raylibGamepadAxis(void *, int device, int axis) { return GetGamepadAxisMovement(device, axis); }
++        float raylibGamepadTriggerTravel(void *, int device, int axis)
++        {
++            return raylibTriggerTravel(GetGamepadAxisMovement(device, axis));
++        }
++
++        bool anyDown(const CodeList &list, const InputSource &src, bool gamepad, int device, float threshold)
++        {
++            for (uint8_t k = 0; k < list.count; ++k)
++            {
++                const int c = list.codes[k];
++                const bool down = !gamepad ? src.keyDown(src.user, c)
++                                  : c >= kTriggerAxisCode
++                                      ? src.gamepadTriggerTravel(src.user, device, c - kTriggerAxisCode) > threshold
++                                      : src.gamepadButtonDown(src.user, device, c);
++                if (down)
++                    return true;
++            }
++            return false;
++        }
+ 
+         InputBindings &activeStorage()
+         {
+@@ -159,25 +180,32 @@ namespace ps2input
+     uint16_t padButtonMask(PadButton button) { return button < ButtonCount ? kButtonMasks[button] : 0u; }
+     const char *padButtonName(PadButton button) { return button < ButtonCount ? kButtonNames[button] : "?"; }
+ 
+-    // The mapping PSPadBackend::readState had hard-coded (ps2_pad.cpp before input.ini).
++    // Keyboard: PCSX2 v2.9's default keyboard mapping (InputManager.cpp GetKeyboardGenericBindingMapping).
++    // Gamepad: PCSX2's XInput mapping (XInputSource.cpp) in raylib's names; raylib (GLFW) lays every pad out as
++    // an Xbox pad. Dead zones and trigger threshold: Microsoft's XInput recommendations (Xinput.h).
+     InputBindings defaultInputBindings()
+     {
+         InputBindings b;
+-        b.keys[Up] = codes({KEY_UP, KEY_W});
+-        b.keys[Down] = codes({KEY_DOWN, KEY_S});
+-        b.keys[Left] = codes({KEY_LEFT, KEY_A});
+-        b.keys[Right] = codes({KEY_RIGHT, KEY_D});
+-        b.keys[Cross] = codes({KEY_X, KEY_SPACE});
+-        b.keys[Circle] = codes({KEY_C, KEY_ESCAPE});
+-        b.keys[Square] = codes({KEY_Z, KEY_KP_0});
+-        b.keys[Triangle] = codes({KEY_V, KEY_KP_1});
++        b.keys[Up] = codes({KEY_UP});
++        b.keys[Down] = codes({KEY_DOWN});
++        b.keys[Left] = codes({KEY_LEFT});
++        b.keys[Right] = codes({KEY_RIGHT});
++        b.keys[Cross] = codes({KEY_K});
++        b.keys[Circle] = codes({KEY_L});
++        b.keys[Square] = codes({KEY_J});
++        b.keys[Triangle] = codes({KEY_I});
+         b.keys[L1] = codes({KEY_Q});
+         b.keys[R1] = codes({KEY_E});
+-        b.keys[L2] = codes({KEY_LEFT_SHIFT});
+-        b.keys[R2] = codes({KEY_RIGHT_SHIFT});
++        b.keys[L2] = codes({KEY_ONE});
++        b.keys[R2] = codes({KEY_THREE});
++        b.keys[L3] = codes({KEY_TWO});
++        b.keys[R3] = codes({KEY_FOUR});
+         b.keys[Start] = codes({KEY_ENTER});
+-        b.keys[Select] = codes({KEY_TAB});
+-        // L3/R3 and the sticks: no keys.
++        b.keys[Select] = codes({KEY_BACKSPACE});
++        const int16_t leftStick[4] = {KEY_W, KEY_S, KEY_A, KEY_D};  // up, down, left, right
++        const int16_t rightStick[4] = {KEY_T, KEY_G, KEY_F, KEY_H};
++        std::copy(leftStick, leftStick + 4, b.keyStick[0]);
++        std::copy(rightStick, rightStick + 4, b.keyStick[1]);
+ 
+         b.padButtons[Up] = codes({GAMEPAD_BUTTON_LEFT_FACE_UP});
+         b.padButtons[Down] = codes({GAMEPAD_BUTTON_LEFT_FACE_DOWN});
+@@ -189,8 +217,11 @@ namespace ps2input
+         b.padButtons[Triangle] = codes({GAMEPAD_BUTTON_RIGHT_FACE_UP});
+         b.padButtons[L1] = codes({GAMEPAD_BUTTON_LEFT_TRIGGER_1});
+         b.padButtons[R1] = codes({GAMEPAD_BUTTON_RIGHT_TRIGGER_1});
+-        b.padButtons[L2] = codes({GAMEPAD_BUTTON_LEFT_TRIGGER_2});
+-        b.padButtons[R2] = codes({GAMEPAD_BUTTON_RIGHT_TRIGGER_2});
++        // LT/RT: raylib 5.5 desktop reports them as axes and also sets LEFT/RIGHT_TRIGGER_2 itself once the axis
++        // passes 0.1 (55% travel; rcore_desktop_glfw.c PollInputEvents); Android gives a digital L2/R2 and an axis.
++        // The axis entry applies the XInput threshold; the button entry covers pads with only a digital L2/R2.
++        b.padButtons[L2] = codes({GAMEPAD_BUTTON_LEFT_TRIGGER_2, kTriggerAxisCode + GAMEPAD_AXIS_LEFT_TRIGGER});
++        b.padButtons[R2] = codes({GAMEPAD_BUTTON_RIGHT_TRIGGER_2, kTriggerAxisCode + GAMEPAD_AXIS_RIGHT_TRIGGER});
+         b.padButtons[L3] = codes({GAMEPAD_BUTTON_LEFT_THUMB});
+         b.padButtons[R3] = codes({GAMEPAD_BUTTON_RIGHT_THUMB});
+         b.padButtons[Start] = codes({GAMEPAD_BUTTON_MIDDLE_RIGHT});
+@@ -200,7 +231,9 @@ namespace ps2input
+         b.padStick[1][0] = GAMEPAD_AXIS_RIGHT_X;
+         b.padStick[1][1] = GAMEPAD_AXIS_RIGHT_Y;
+         b.device = 0;
+-        b.deadzone = 0.0f;
++        b.deadzone[0] = kXInputLeftDeadzone;
++        b.deadzone[1] = kXInputRightDeadzone;
++        b.triggerThreshold = kXInputTriggerThreshold;
+         return b;
+     }
+ 
+@@ -216,6 +249,7 @@ namespace ps2input
+         std::stringstream in(text);
+         std::string raw;
+         int lineNo = 0;
++        float deadzoneBoth = -1.0f, deadzoneStick[2] = {-1.0f, -1.0f}; // -1 = not in the file
+         auto bad = [&messages, &lineNo](const std::string &why)
+         { messages.push_back("[input] line " + std::to_string(lineNo) + ": " + why); };
+ 
+@@ -280,12 +314,18 @@ namespace ps2input
+                 for (const std::string &n : names)
+                 {
+                     int v = 0;
+-                    const bool found = section == Keyboard ? lookup(kKeys, n, "KEY_", v)
+-                                                           : lookup(kPadButtons, n, "GAMEPAD_BUTTON_", v);
++                    bool found = section == Keyboard ? lookup(kKeys, n, "KEY_", v)
++                                                     : lookup(kPadButtons, n, "GAMEPAD_BUTTON_", v);
++                    if (!found && section == Gamepad && lookup(kTriggerAxes, n, "GAMEPAD_AXIS_", v))
++                    {
++                        v += kTriggerAxisCode;
++                        found = true;
++                    }
+                     if (!found)
+                     {
+-                        bad(std::string("unknown ") + (section == Keyboard ? "key" : "gamepad button") + " '" + n +
+-                            "' for " + kButtonNames[button]);
++                        bad(std::string("unknown ") +
++                            (section == Keyboard ? "key" : "gamepad button or trigger axis") + " '" + n + "' for " +
++                            kButtonNames[button]);
+                         ok = false;
+                         break;
+                     }
+@@ -350,92 +390,100 @@ namespace ps2input
+                     bindings.device = static_cast<int>(v);
+                 continue;
+             }
+-            if (section == Gamepad && key == "DEADZONE")
++            if (section == Gamepad &&
++                (key == "DEADZONE" || key == "DEADZONE_LEFT" || key == "DEADZONE_RIGHT" || key == "TRIGGER_THRESHOLD"))
+             {
+                 char *end = nullptr;
+                 const float v = std::strtof(value.c_str(), &end);
+                 if (value.empty() || *end != '\0' || !(v >= 0.0f && v <= 1.0f))
+-                    bad("deadzone must be a number 0..1");
++                    bad(key == "TRIGGER_THRESHOLD" ? "trigger_threshold must be a number 0..1"
++                                                          : "deadzone must be a number 0..1");
++                else if (key == "DEADZONE")
++                    deadzoneBoth = v;
++                else if (key == "DEADZONE_LEFT")
++                    deadzoneStick[0] = v;
++                else if (key == "DEADZONE_RIGHT")
++                    deadzoneStick[1] = v;
+                 else
+-                    bindings.deadzone = v;
++                    bindings.triggerThreshold = v;
+                 continue;
+             }
+             bad("unknown entry '" + trim(line.substr(0, eq)) + "'");
+         }
++        // deadzone sets both sticks; deadzone_left/right override it wherever they are in the file.
++        for (int s = 0; s < 2; ++s)
++        {
++            if (deadzoneBoth >= 0.0f)
++                bindings.deadzone[s] = deadzoneBoth;
++            if (deadzoneStick[s] >= 0.0f)
++                bindings.deadzone[s] = deadzoneStick[s];
++        }
+     }
+ 
+     InputSource raylibInputSource()
+     {
+         return InputSource{nullptr, &raylibKeyDown, &raylibGamepadAvailable, &raylibGamepadButtonDown,
+-                           &raylibGamepadAxis};
++                           &raylibGamepadAxis, &raylibGamepadTriggerTravel};
++    }
++
++    float raylibTriggerTravel(float raw)
++    {
++#if defined(__ANDROID__)
++        const float t = raw; // AMotionEvent AXIS_LTRIGGER/RTRIGGER: 0..1
++#else
++        const float t = (raw + 1.0f) * 0.5f; // GLFW gamepad trigger axes: -1..1
++#endif
++        return std::clamp(t, 0.0f, 1.0f);
++    }
++
++    float applyDeadzone(float value, float deadzone)
++    {
++        if (deadzone <= 0.0f)
++            return value;
++        const float a = value < 0.0f ? -value : value;
++        if (a <= deadzone)
++            return 0.0f;
++        const float scaled = std::min(1.0f, (a - deadzone) / (1.0f - deadzone));
++        return value < 0.0f ? -scaled : scaled;
+     }
+ 
+     uint8_t axisToPadByte(float value, float deadzone)
+     {
+-        if (deadzone > 0.0f)
+-        {
+-            const float a = value < 0.0f ? -value : value;
+-            if (a <= deadzone)
+-                value = 0.0f;
+-            else
+-            {
+-                const float scaled = std::min(1.0f, (a - deadzone) / (1.0f - deadzone));
+-                value = value < 0.0f ? -scaled : scaled;
+-            }
+-        }
+-        return static_cast<uint8_t>(128 + value * 127); // the old conversion, unchanged
++        return static_cast<uint8_t>(128 + applyDeadzone(value, deadzone) * 127); // the old conversion, unchanged
+     }
+ 
+     void evaluateInput(const InputBindings &b, const InputSource &src, uint16_t &buttons, uint8_t sticks[4])
+     {
+         buttons = 0xFFFFu;
+-        sticks[0] = sticks[1] = sticks[2] = sticks[3] = 0x80u;
+-        if (src.gamepadAvailable(src.user, b.device))
+-        {
+-            for (int i = 0; i < ButtonCount; ++i)
+-            {
+-                const CodeList &l = b.padButtons[i];
+-                for (uint8_t k = 0; k < l.count; ++k)
+-                    if (src.gamepadButtonDown(src.user, b.device, l.codes[k]))
+-                    {
+-                        buttons = static_cast<uint16_t>(buttons & ~kButtonMasks[i]);
+-                        break;
+-                    }
+-            }
+-            // Pad data order: rx, ry, lx, ly.
+-            for (int s = 0; s < 2; ++s)
+-                for (int a = 0; a < 2; ++a)
+-                    if (b.padStick[s][a] >= 0)
+-                        sticks[(s == 0 ? 2 : 0) + a] =
+-                            axisToPadByte(src.gamepadAxis(src.user, b.device, b.padStick[s][a]), b.deadzone);
+-            return;
+-        }
++        const bool pad = src.gamepadAvailable(src.user, b.device);
++        // Buttons: keyboard or gamepad (PCSX2 lets both drive the pad at once).
+         for (int i = 0; i < ButtonCount; ++i)
+-        {
+-            const CodeList &l = b.keys[i];
+-            for (uint8_t k = 0; k < l.count; ++k)
+-                if (src.keyDown(src.user, l.codes[k]))
+-                {
+-                    buttons = static_cast<uint16_t>(buttons & ~kButtonMasks[i]);
+-                    break;
+-                }
+-        }
++            if (anyDown(b.keys[i], src, false, b.device, b.triggerThreshold) ||
++                (pad && anyDown(b.padButtons[i], src, true, b.device, b.triggerThreshold)))
++                buttons = static_cast<uint16_t>(buttons & ~kButtonMasks[i]);
++
++        // Sticks, pad data order rx, ry, lx, ly: the gamepad's after its dead zone; inside it, the keyboard's.
+         for (int s = 0; s < 2; ++s)
+         {
+-            const int16_t *k = b.keyStick[s];
+-            if (k[0] == 0 && k[1] == 0 && k[2] == 0 && k[3] == 0)
+-                continue;
+-            float x = 0.0f, y = 0.0f;
+-            if (k[0] && src.keyDown(src.user, k[0]))
+-                y -= 1.0f;
+-            if (k[1] && src.keyDown(src.user, k[1]))
+-                y += 1.0f;
+-            if (k[2] && src.keyDown(src.user, k[2]))
+-                x -= 1.0f;
+-            if (k[3] && src.keyDown(src.user, k[3]))
+-                x += 1.0f;
+-            sticks[(s == 0 ? 2 : 0) + 0] = axisToPadByte(x, 0.0f);
+-            sticks[(s == 0 ? 2 : 0) + 1] = axisToPadByte(y, 0.0f);
++            float v[2] = {0.0f, 0.0f}; // x, y
++            if (pad)
++                for (int a = 0; a < 2; ++a)
++                    if (b.padStick[s][a] >= 0)
++                        v[a] = applyDeadzone(src.gamepadAxis(src.user, b.device, b.padStick[s][a]), b.deadzone[s]);
++            if (v[0] == 0.0f && v[1] == 0.0f)
++            {
++                const int16_t *k = b.keyStick[s];
++                if (k[0] && src.keyDown(src.user, k[0]))
++                    v[1] -= 1.0f;
++                if (k[1] && src.keyDown(src.user, k[1]))
++                    v[1] += 1.0f;
++                if (k[2] && src.keyDown(src.user, k[2]))
++                    v[0] -= 1.0f;
++                if (k[3] && src.keyDown(src.user, k[3]))
++                    v[0] += 1.0f;
++            }
++            sticks[(s == 0 ? 2 : 0) + 0] = axisToPadByte(v[0], 0.0f);
++            sticks[(s == 0 ? 2 : 0) + 1] = axisToPadByte(v[1], 0.0f);
+         }
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 252b0f0..d8e9c08 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -38,8 +38,8 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+         }
+     }
+ 
+-    // Host input through the bindings table (runtime/ps2_input_bindings.h): input.ini, else the defaults, which
+-    // are the mapping this function had hard-coded (gamepad 0 when present, else the keyboard).
++    // Host input through the bindings table (runtime/ps2_input_bindings.h): input.ini, else the defaults (PCSX2's
++    // keyboard and XInput mappings); keyboard and gamepad 0 both live.
+     uint16_t btns = 0xFFFFu;
+     ps2input::evaluateInput(ps2input::activeInputBindings(), s_hostInput, btns, data + 4);
+ 
+diff --git a/ps2xTest/src/ps2_input_bindings_tests.cpp b/ps2xTest/src/ps2_input_bindings_tests.cpp
+index f1efb9c..b49e848 100644
+--- a/ps2xTest/src/ps2_input_bindings_tests.cpp
++++ b/ps2xTest/src/ps2_input_bindings_tests.cpp
+@@ -8,15 +8,16 @@
+ #include <utility>
+ #include <vector>
+ 
+-// raylib values, written out so the old mapping below reads as it did in ps2_pad.cpp.
++// raylib values, written out so the spec below reads as PCSX2's tables do.
+ namespace
+ {
+     enum : int
+     {
+-        K_SPACE = 32, K_A = 65, K_C = 67, K_D = 68, K_E = 69, K_J = 74, K_K = 75, K_Q = 81, K_S = 83, K_V = 86,
+-        K_W = 87, K_X = 88, K_Z = 90, K_ESCAPE = 256, K_ENTER = 257, K_TAB = 258, K_RIGHT = 262, K_LEFT = 263,
+-        K_DOWN = 264, K_UP = 265, K_KP_0 = 320, K_KP_1 = 321, K_LEFT_SHIFT = 340, K_RIGHT_SHIFT = 344,
+-        K_LEFT_CONTROL = 341
++        K_SPACE = 32, K_ONE = 49, K_TWO = 50, K_THREE = 51, K_FOUR = 52, K_A = 65, K_C = 67, K_D = 68, K_E = 69,
++        K_F = 70, K_G = 71, K_H = 72, K_I = 73, K_J = 74, K_K = 75, K_L = 76, K_Q = 81, K_S = 83, K_T = 84,
++        K_V = 86, K_W = 87, K_X = 88, K_Z = 90, K_ESCAPE = 256, K_ENTER = 257, K_TAB = 258, K_BACKSPACE = 259,
++        K_RIGHT = 262, K_LEFT = 263, K_DOWN = 264, K_UP = 265, K_KP_0 = 320, K_KP_1 = 321, K_LEFT_SHIFT = 340,
++        K_LEFT_CONTROL = 341, K_RIGHT_SHIFT = 344
+     };
+     enum : int
+     {
+@@ -24,24 +25,41 @@ namespace
+         B_RIGHT_FACE_RIGHT, B_RIGHT_FACE_DOWN, B_RIGHT_FACE_LEFT, B_LEFT_TRIGGER_1, B_LEFT_TRIGGER_2,
+         B_RIGHT_TRIGGER_1, B_RIGHT_TRIGGER_2, B_MIDDLE_LEFT, B_MIDDLE, B_MIDDLE_RIGHT, B_LEFT_THUMB, B_RIGHT_THUMB
+     };
++    enum : int
++    {
++        A_LEFT_X = 0, A_LEFT_Y, A_RIGHT_X, A_RIGHT_Y, A_LEFT_TRIGGER, A_RIGHT_TRIGGER
++    };
+     constexpr uint16_t PAD_LEFT = 0x0080u, PAD_DOWN = 0x0040u, PAD_RIGHT = 0x0020u, PAD_UP = 0x0010u,
+                        PAD_START = 0x0008u, PAD_R3 = 0x0004u, PAD_L3 = 0x0002u, PAD_SELECT = 0x0001u,
+                        PAD_SQUARE = 0x8000u, PAD_CROSS = 0x4000u, PAD_CIRCLE = 0x2000u, PAD_TRIANGLE = 0x1000u,
+                        PAD_R1 = 0x0800u, PAD_L1 = 0x0400u, PAD_R2 = 0x0200u, PAD_L2 = 0x0100u;
+ 
+-    // The hard-coded mapping of PSPadBackend::readState before input.ini (ps2_pad.cpp at patch 0037).
+-    const std::vector<std::pair<int, uint16_t>> kOldKeys = {
+-        {K_UP, PAD_UP}, {K_W, PAD_UP}, {K_DOWN, PAD_DOWN}, {K_S, PAD_DOWN}, {K_LEFT, PAD_LEFT}, {K_A, PAD_LEFT},
+-        {K_RIGHT, PAD_RIGHT}, {K_D, PAD_RIGHT}, {K_X, PAD_CROSS}, {K_SPACE, PAD_CROSS}, {K_C, PAD_CIRCLE},
+-        {K_ESCAPE, PAD_CIRCLE}, {K_Z, PAD_SQUARE}, {K_KP_0, PAD_SQUARE}, {K_V, PAD_TRIANGLE},
+-        {K_KP_1, PAD_TRIANGLE}, {K_Q, PAD_L1}, {K_E, PAD_R1}, {K_LEFT_SHIFT, PAD_L2}, {K_RIGHT_SHIFT, PAD_R2},
+-        {K_ENTER, PAD_START}, {K_TAB, PAD_SELECT}};
+-    const std::vector<std::pair<int, uint16_t>> kOldPadButtons = {
++    // PCSX2 v2.9.134 default keyboard mapping (pcsx2/Input/InputManager.cpp:1771-1794), PS2 buttons only.
++    // "Return" = ENTER; "1".."4" = ONE..FOUR.
++    const std::vector<std::pair<int, uint16_t>> kSpecKeys = {
++        {K_UP, PAD_UP}, {K_RIGHT, PAD_RIGHT}, {K_DOWN, PAD_DOWN}, {K_LEFT, PAD_LEFT}, {K_ENTER, PAD_START},
++        {K_BACKSPACE, PAD_SELECT}, {K_I, PAD_TRIANGLE}, {K_L, PAD_CIRCLE}, {K_K, PAD_CROSS}, {K_J, PAD_SQUARE},
++        {K_Q, PAD_L1}, {K_ONE, PAD_L2}, {K_TWO, PAD_L3}, {K_E, PAD_R1}, {K_THREE, PAD_R2}, {K_FOUR, PAD_R3}};
++    // Its sticks: left W/D/S/A, right T/H/G/F (up/right/down/left). {key, stick byte index, value}: pad data
++    // order rx ry lx ly.
++    struct StickKey
++    {
++        int key;
++        int index;
++        float value;
++    };
++    const std::vector<StickKey> kSpecStickKeys = {{K_W, 3, -1.0f}, {K_S, 3, 1.0f}, {K_A, 2, -1.0f}, {K_D, 2, 1.0f},
++                                                  {K_T, 1, -1.0f}, {K_G, 1, 1.0f}, {K_F, 0, -1.0f}, {K_H, 0, 1.0f}};
++    // PCSX2's XInput mapping (pcsx2/Input/XInputSource.cpp:108-124) in raylib's names (raylib lays pads out as
++    // Xbox pads: A = RIGHT_FACE_DOWN, Back = MIDDLE_LEFT, ...). LT/RT are below (trigger axes).
++    const std::vector<std::pair<int, uint16_t>> kSpecPadButtons = {
+         {B_LEFT_FACE_UP, PAD_UP}, {B_LEFT_FACE_DOWN, PAD_DOWN}, {B_LEFT_FACE_LEFT, PAD_LEFT},
+-        {B_LEFT_FACE_RIGHT, PAD_RIGHT}, {B_RIGHT_FACE_DOWN, PAD_CROSS}, {B_RIGHT_FACE_RIGHT, PAD_CIRCLE},
+-        {B_RIGHT_FACE_LEFT, PAD_SQUARE}, {B_RIGHT_FACE_UP, PAD_TRIANGLE}, {B_LEFT_TRIGGER_1, PAD_L1},
+-        {B_RIGHT_TRIGGER_1, PAD_R1}, {B_LEFT_TRIGGER_2, PAD_L2}, {B_RIGHT_TRIGGER_2, PAD_R2},
+-        {B_MIDDLE_RIGHT, PAD_START}, {B_MIDDLE_LEFT, PAD_SELECT}, {B_LEFT_THUMB, PAD_L3}, {B_RIGHT_THUMB, PAD_R3}};
++        {B_LEFT_FACE_RIGHT, PAD_RIGHT}, {B_MIDDLE_RIGHT, PAD_START}, {B_MIDDLE_LEFT, PAD_SELECT},
++        {B_LEFT_THUMB, PAD_L3}, {B_RIGHT_THUMB, PAD_R3}, {B_LEFT_TRIGGER_1, PAD_L1}, {B_RIGHT_TRIGGER_1, PAD_R1},
++        {B_RIGHT_FACE_DOWN, PAD_CROSS}, {B_RIGHT_FACE_RIGHT, PAD_CIRCLE}, {B_RIGHT_FACE_LEFT, PAD_SQUARE},
++        {B_RIGHT_FACE_UP, PAD_TRIANGLE}, {B_LEFT_TRIGGER_2, PAD_L2}, {B_RIGHT_TRIGGER_2, PAD_R2}};
++    // Xinput.h:100-102.
++    constexpr float kLeftDz = 7849.0f / 32767.0f, kRightDz = 8689.0f / 32767.0f, kTrigger = 30.0f / 255.0f;
+ 
+     uint8_t oldAxis(float v) { return static_cast<uint8_t>(128 + v * 127); }
+ 
+@@ -50,7 +68,8 @@ namespace
+         std::set<int> keys;
+         int gamepad = -1; // available device, -1 = none
+         std::set<int> buttons;
+-        float axes[6] = {};
++        float axes[6] = {};   // raw axis values (sticks)
++        float travel[6] = {}; // trigger travel 0..1 per axis
+         int keyCalls = 0;
+ 
+         ps2input::InputSource source()
+@@ -69,7 +88,8 @@ namespace
+                     auto *f = static_cast<FakeInput *>(u);
+                     return f->gamepad == d && f->buttons.count(b) != 0;
+                 },
+-                [](void *u, int, int a) { return static_cast<FakeInput *>(u)->axes[a]; }};
++                [](void *u, int, int a) { return static_cast<FakeInput *>(u)->axes[a]; },
++                [](void *u, int, int a) { return static_cast<FakeInput *>(u)->travel[a]; }};
+         }
+     };
+ 
+@@ -100,92 +120,139 @@ namespace
+                 return true;
+         return false;
+     }
++
++    bool listIs(const ps2input::CodeList &l, std::initializer_list<int> want)
++    {
++        if (l.count != want.size())
++            return false;
++        int i = 0;
++        for (int w : want)
++            if (l.codes[i++] != w)
++                return false;
++        return true;
++    }
++
++    uint16_t maskOf(ps2input::PadButton b) { return ps2input::padButtonMask(b); }
+ }
+ 
+ void register_ps2_input_bindings_tests()
+ {
+     MiniTest::Case("InputBindings", [](TestCase &tc)
+     {
+-        tc.Run("defaults equal the old hard-coded mapping (keyboard, gamepad 0, axes, no dead zone)", [](TestCase &t)
++        tc.Run("defaults table = PCSX2 keyboard + XInput mapping + XInput dead zones, exactly", [](TestCase &t)
+         {
+             const ps2input::InputBindings b = ps2input::defaultInputBindings();
++            // The table itself: each button has exactly its spec code(s), nothing else.
++            for (const auto &[key, mask] : kSpecKeys)
++                for (int i = 0; i < ps2input::ButtonCount; ++i)
++                    if (maskOf(static_cast<ps2input::PadButton>(i)) == mask)
++                        t.IsTrue(listIs(b.keys[i], {key}),
++                                 std::string("keyboard ") + ps2input::padButtonName(static_cast<ps2input::PadButton>(i)) +
++                                     " = key " + std::to_string(key) + " only");
++            const int16_t wantStick[2][4] = {{K_W, K_S, K_A, K_D}, {K_T, K_G, K_F, K_H}};
++            for (int s = 0; s < 2; ++s)
++                for (int k = 0; k < 4; ++k)
++                    t.Equals(static_cast<int>(b.keyStick[s][k]), static_cast<int>(wantStick[s][k]),
++                             "keyboard stick " + std::to_string(s) + " key " + std::to_string(k));
++            for (const auto &[button, mask] : kSpecPadButtons)
++                for (int i = 0; i < ps2input::ButtonCount; ++i)
++                    if (maskOf(static_cast<ps2input::PadButton>(i)) == mask)
++                    {
++                        const bool trigger = mask == PAD_L2 || mask == PAD_R2;
++                        const int axis = mask == PAD_L2 ? A_LEFT_TRIGGER : A_RIGHT_TRIGGER;
++                        t.IsTrue(trigger ? listIs(b.padButtons[i], {button, ps2input::kTriggerAxisCode + axis})
++                                         : listIs(b.padButtons[i], {button}),
++                                 std::string("gamepad ") +
++                                     ps2input::padButtonName(static_cast<ps2input::PadButton>(i)) + " = button " +
++                                     std::to_string(button) + (trigger ? " + trigger axis" : " only"));
++                    }
++            t.Equals(static_cast<int>(b.padStick[0][0]), static_cast<int>(A_LEFT_X), "left stick x");
++            t.Equals(static_cast<int>(b.padStick[0][1]), static_cast<int>(A_LEFT_Y), "left stick y");
++            t.Equals(static_cast<int>(b.padStick[1][0]), static_cast<int>(A_RIGHT_X), "right stick x");
++            t.Equals(static_cast<int>(b.padStick[1][1]), static_cast<int>(A_RIGHT_Y), "right stick y");
++            t.Equals(b.device, 0, "gamepad 0");
++            t.IsTrue(b.deadzone[0] == kLeftDz, "left dead zone 7849/32767");
++            t.IsTrue(b.deadzone[1] == kRightDz, "right dead zone 8689/32767");
++            t.IsTrue(b.triggerThreshold == kTrigger, "trigger threshold 30/255");
++
++            // Behaviour: idle, each key, each stick key, each gamepad button.
+             uint8_t sticks[4];
+             FakeInput idle;
+             t.Equals(poll(b, idle, sticks), static_cast<uint16_t>(0xFFFFu), "nothing held");
+-            t.Equals(sticks[0], static_cast<uint8_t>(0x80u), "sticks centred");
+-            t.Equals(sticks[3], static_cast<uint8_t>(0x80u), "sticks centred");
+-            t.Equals(idle.keyCalls, 22, "one poll per bound key, as the old code (22 IsKeyDown)");
+-
+-            for (const auto &[key, mask] : kOldKeys)
++            for (int i = 0; i < 4; ++i)
++                t.Equals(sticks[i], static_cast<uint8_t>(0x80u), "sticks centred");
++            t.Equals(idle.keyCalls, 24, "16 button keys + 8 stick keys polled");
++            for (const auto &[key, mask] : kSpecKeys)
+             {
+                 FakeInput in;
+                 in.keys.insert(key);
+-                t.Equals(poll(b, in, sticks), static_cast<uint16_t>(0xFFFFu & ~mask),
+-                         "key " + std::to_string(key));
+-                t.Equals(sticks[2], static_cast<uint8_t>(0x80u), "no keyboard stick by default");
++                t.Equals(poll(b, in, sticks), static_cast<uint16_t>(0xFFFFu & ~mask), "key " + std::to_string(key));
+             }
+-            FakeInput unbound;
+-            unbound.keys = {K_LEFT_CONTROL, K_J, K_K, 49 /* ONE */};
+-            t.Equals(poll(b, unbound, sticks), static_cast<uint16_t>(0xFFFFu), "keys the old code ignored");
+-
+-            for (const auto &[button, mask] : kOldPadButtons)
++            for (const StickKey &sk : kSpecStickKeys)
++            {
++                FakeInput in;
++                in.keys.insert(sk.key);
++                t.Equals(poll(b, in, sticks), static_cast<uint16_t>(0xFFFFu), "stick key is no button");
++                for (int i = 0; i < 4; ++i)
++                    t.Equals(sticks[i], i == sk.index ? oldAxis(sk.value) : static_cast<uint8_t>(0x80u),
++                             "stick key " + std::to_string(sk.key) + " byte " + std::to_string(i));
++            }
++            FakeInput unbound; // the old defaults and others: no longer bound
++            unbound.keys = {K_X, K_SPACE, K_C, K_ESCAPE, K_Z, K_KP_0, K_V, K_KP_1, K_LEFT_SHIFT, K_RIGHT_SHIFT,
++                            K_TAB, K_LEFT_CONTROL};
++            t.Equals(poll(b, unbound, sticks), static_cast<uint16_t>(0xFFFFu), "old default keys unbound");
++            for (const auto &[button, mask] : kSpecPadButtons)
+             {
+                 FakeInput in;
+                 in.gamepad = 0;
+                 in.buttons.insert(button);
+-                in.keys.insert(K_X); // the keyboard is ignored while gamepad 0 is present
+                 t.Equals(poll(b, in, sticks), static_cast<uint16_t>(0xFFFFu & ~mask),
+                          "gamepad button " + std::to_string(button));
+             }
+-            FakeInput pad;
+-            pad.gamepad = 0;
+-            const float values[4] = {-1.0f, 0.2f, 0.5f, 1.0f}; // LEFT_X, LEFT_Y, RIGHT_X, RIGHT_Y
+-            for (int a = 0; a < 4; ++a)
+-                pad.axes[a] = values[a];
+-            poll(b, pad, sticks);
+-            t.Equals(sticks[2], oldAxis(-1.0f), "lx = 128 + v * 127");
+-            t.Equals(sticks[3], oldAxis(0.2f), "ly: no dead zone");
+-            t.Equals(sticks[0], oldAxis(0.5f), "rx");
+-            t.Equals(sticks[1], oldAxis(1.0f), "ry");
+-
+             FakeInput second;
+-            second.gamepad = 1; // only gamepad 0 counted before
+-            second.keys.insert(K_C);
+-            t.Equals(poll(b, second, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "gamepad 1 ignored");
++            second.gamepad = 1; // only gamepad 0 by default
++            second.buttons.insert(B_RIGHT_FACE_DOWN);
++            t.Equals(poll(b, second, sticks), static_cast<uint16_t>(0xFFFFu), "gamepad 1 ignored");
+         });
+ 
+         tc.Run("a file overrides a binding; the rest keep their defaults", [](TestCase &t)
+         {
+             ps2input::InputBindings b = ps2input::defaultInputBindings();
+             std::vector<std::string> messages;
+-            ps2input::parseInputIni("; comment\n[Keyboard]\ncross = j, KEY_K   # two keys\n"
+-                                    "stick_left = W, S, A, D\n[gamepad]\ndevice = 1\ncircle = RIGHT_FACE_DOWN\n"
+-                                    "stick_right = right_y, right_x\n",
++            ps2input::parseInputIni("; comment\n[Keyboard]\ncross = x, KEY_SPACE   # two keys\n"
++                                    "stick_left = UP, DOWN, LEFT, RIGHT\n[gamepad]\ndevice = 1\n"
++                                    "circle = RIGHT_FACE_DOWN\nstick_right = right_y, right_x\n"
++                                    "square = GAMEPAD_AXIS_RIGHT_TRIGGER\n",
+                                     b, messages);
+             t.Equals(messages.size(), static_cast<size_t>(0), "no bad lines");
+             uint8_t sticks[4];
+-            FakeInput j;
+-            j.keys = {K_J};
+-            t.Equals(poll(b, j, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "J = cross");
+             FakeInput x;
+             x.keys = {K_X};
+-            t.Equals(poll(b, x, sticks), static_cast<uint16_t>(0xFFFFu), "X no longer cross");
+-            FakeInput c;
+-            c.keys = {K_C};
+-            t.Equals(poll(b, c, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "C still circle");
++            t.Equals(poll(b, x, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "X = cross");
++            FakeInput k;
++            k.keys = {K_K};
++            t.Equals(poll(b, k, sticks), static_cast<uint16_t>(0xFFFFu), "K no longer cross");
++            FakeInput l;
++            l.keys = {K_L};
++            t.Equals(poll(b, l, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "L still circle");
++            FakeInput up;
++            up.keys = {K_UP, K_RIGHT};
++            t.Equals(poll(b, up, sticks), static_cast<uint16_t>(0xFFFFu & ~(PAD_UP | PAD_RIGHT)), "arrows: d-pad");
++            t.Equals(sticks[3], oldAxis(-1.0f), "and UP = left stick up");
++            t.Equals(sticks[2], oldAxis(1.0f), "RIGHT = left stick right");
+             FakeInput w;
+-            w.keys = {K_W, K_D};
+-            const uint16_t wb = poll(b, w, sticks);
+-            t.Equals(wb, static_cast<uint16_t>(0xFFFFu & ~(PAD_UP | PAD_RIGHT)), "W/D still the d-pad");
+-            t.Equals(sticks[3], oldAxis(-1.0f), "W = left stick up");
+-            t.Equals(sticks[2], oldAxis(1.0f), "D = left stick right");
++            w.keys = {K_W};
++            poll(b, w, sticks);
++            t.Equals(sticks[3], static_cast<uint8_t>(0x80u), "W no longer the left stick");
+             FakeInput pad;
+             pad.gamepad = 1;
+             pad.buttons = {B_RIGHT_FACE_DOWN};
+-            pad.axes[2] = 1.0f;  // RIGHT_X
+-            pad.axes[3] = -1.0f; // RIGHT_Y
+-            t.Equals(poll(b, pad, sticks), static_cast<uint16_t>(0xFFFFu & ~(PAD_CROSS | PAD_CIRCLE)),
+-                     "device 1; RIGHT_FACE_DOWN = cross (default) and circle (file)");
++            pad.axes[A_RIGHT_X] = 1.0f;
++            pad.axes[A_RIGHT_Y] = -1.0f;
++            pad.travel[A_RIGHT_TRIGGER] = 1.0f;
++            t.Equals(poll(b, pad, sticks),
++                     static_cast<uint16_t>(0xFFFFu & ~(PAD_CROSS | PAD_CIRCLE | PAD_SQUARE | PAD_R2)),
++                     "device 1; RIGHT_FACE_DOWN = cross (default) and circle (file); RT = R2 and square (file)");
+             t.Equals(sticks[0], oldAxis(-1.0f), "rx from RIGHT_Y (swapped in the file)");
+             t.Equals(sticks[1], oldAxis(1.0f), "ry from RIGHT_X");
+ 
+@@ -193,14 +260,14 @@ void register_ps2_input_bindings_tests()
+             const std::string path = std::string(PS2X_TEST_BINARY_DIR) + "/input-bindings-test.ini";
+             {
+                 std::ofstream f(path, std::ios::binary);
+-                f << "[keyboard]\r\nstart = K\r\n";
++                f << "[keyboard]\r\nstart = Z\r\n";
+             }
+             setEnv("PS2X_INPUT_INI", path.c_str());
+             t.IsTrue(ps2input::loadInputBindingsAtStartup(), "file read");
+-            FakeInput k;
+-            k.keys = {K_K};
+-            t.Equals(poll(ps2input::activeInputBindings(), k, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_START),
+-                     "active table: K = start");
++            FakeInput z;
++            z.keys = {K_Z};
++            t.Equals(poll(ps2input::activeInputBindings(), z, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_START),
++                     "active table: Z = start");
+             setEnv("PS2X_INPUT_INI", "Z:/no/such/input.ini");
+             t.IsFalse(ps2input::loadInputBindingsAtStartup(), "missing file: not read");
+             setEnv("PS2X_INPUT_INI", "");
+@@ -211,51 +278,55 @@ void register_ps2_input_bindings_tests()
+         {
+             ps2input::InputBindings b = ps2input::defaultInputBindings();
+             std::vector<std::string> messages;
+-            ps2input::parseInputIni("[keyboard]\n"            // 1
+-                                    "cross = J, NOPE\n"       // 2 unknown key: cross stays X, SPACE
+-                                    "circle = J\n"            // 3 fine
+-                                    "triangle\n"              // 4 no '='
+-                                    "jump = X\n"              // 5 unknown entry
+-                                    "stick_left = W, S\n"     // 6 needs four keys
+-                                    "[gamepad]\n"             // 7
+-                                    "deadzone = 1.5\n"        // 8 out of range
+-                                    "device = two\n"          // 9 not a number
+-                                    "square = LEFT_FACE_UPP\n" // 10 unknown button
+-                                    "[mouse]\n"               // 11 unknown section
+-                                    "cross = LEFT\n",         // 12 ignored with its section
++            ps2input::parseInputIni("[keyboard]\n"                 // 1
++                                    "cross = X, NOPE\n"            // 2 unknown key: cross stays K
++                                    "circle = X\n"                 // 3 fine
++                                    "triangle\n"                   // 4 no '='
++                                    "jump = X\n"                   // 5 unknown entry
++                                    "stick_left = W, S\n"          // 6 needs four keys
++                                    "[gamepad]\n"                  // 7
++                                    "deadzone = 1.5\n"             // 8 out of range
++                                    "device = two\n"               // 9 not a number
++                                    "square = LEFT_FACE_UPP\n"     // 10 unknown button
++                                    "l2 = LEFT_X\n"                // 11 a stick axis is no trigger
++                                    "deadzone_right = -0.1\n"      // 12 out of range
++                                    "trigger_threshold = half\n"   // 13 not a number
++                                    "[mouse]\n"                    // 14 unknown section
++                                    "cross = LEFT\n",              // 15 ignored with its section
+                                     b, messages);
+-            t.Equals(messages.size(), static_cast<size_t>(8), "one message per bad line");
+-            for (int line : {2, 4, 5, 6, 8, 9, 10, 11})
++            t.Equals(messages.size(), static_cast<size_t>(11), "one message per bad line");
++            for (int line : {2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14})
+                 t.IsTrue(hasLine(messages, line), "line " + std::to_string(line) + " reported");
+             t.IsFalse(hasLine(messages, 3), "good line not reported");
+             uint8_t sticks[4];
++            FakeInput k;
++            k.keys = {K_K};
++            t.Equals(poll(b, k, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "cross keeps K");
+             FakeInput x;
+             x.keys = {K_X};
+-            t.Equals(poll(b, x, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "cross keeps X");
+-            FakeInput j;
+-            j.keys = {K_J};
+-            t.Equals(poll(b, j, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "J = circle (good line)");
+-            t.IsTrue(b.deadzone == 0.0f, "deadzone kept");
++            t.Equals(poll(b, x, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CIRCLE), "X = circle (good line)");
++            t.IsTrue(b.deadzone[0] == kLeftDz && b.deadzone[1] == kRightDz, "dead zones kept");
++            t.IsTrue(b.triggerThreshold == kTrigger, "trigger threshold kept");
+             t.Equals(b.device, 0, "device kept");
+-            t.Equals(static_cast<int>(b.keyStick[0][0]), 0, "stick_left kept (none)");
+-            t.Equals(static_cast<int>(b.padButtons[ps2input::Square].count), 1, "square kept");
+-            t.Equals(static_cast<int>(b.padButtons[ps2input::Square].codes[0]), static_cast<int>(B_RIGHT_FACE_LEFT),
+-                     "square kept");
++            t.Equals(static_cast<int>(b.keyStick[0][0]), static_cast<int>(K_W), "stick_left kept (W S A D)");
++            t.IsTrue(listIs(b.padButtons[ps2input::Square], {B_RIGHT_FACE_LEFT}), "square kept");
++            t.IsTrue(listIs(b.padButtons[ps2input::L2], {B_LEFT_TRIGGER_2, ps2input::kTriggerAxisCode + A_LEFT_TRIGGER}),
++                     "l2 kept");
+         });
+ 
+-        tc.Run("deadzone applies to the gamepad axes", [](TestCase &t)
++        tc.Run("deadzone sets both sticks per axis, the rest rescaled", [](TestCase &t)
+         {
+             ps2input::InputBindings b = ps2input::defaultInputBindings();
+             std::vector<std::string> messages;
+             ps2input::parseInputIni("[gamepad]\ndeadzone = 0.25\n", b, messages);
+             t.Equals(messages.size(), static_cast<size_t>(0), "no bad lines");
+-            t.IsTrue(b.deadzone == 0.25f, "read");
++            t.IsTrue(b.deadzone[0] == 0.25f && b.deadzone[1] == 0.25f, "read into both");
+             FakeInput pad;
+             pad.gamepad = 0;
+-            pad.axes[0] = 0.2f;    // LEFT_X inside the dead zone
+-            pad.axes[1] = -0.625f; // LEFT_Y: (0.625 - 0.25) / 0.75 = 0.5
+-            pad.axes[2] = 1.0f;    // RIGHT_X: full stays full
+-            pad.axes[3] = -0.25f;  // RIGHT_Y: on the edge = centre
++            pad.axes[A_LEFT_X] = 0.2f;     // inside the dead zone
++            pad.axes[A_LEFT_Y] = -0.625f;  // (0.625 - 0.25) / 0.75 = 0.5
++            pad.axes[A_RIGHT_X] = 1.0f;    // full stays full
++            pad.axes[A_RIGHT_Y] = -0.25f;  // on the edge = centre
+             uint8_t sticks[4];
+             poll(b, pad, sticks);
+             t.Equals(sticks[2], static_cast<uint8_t>(128u), "lx centred");
+@@ -264,5 +335,109 @@ void register_ps2_input_bindings_tests()
+             t.Equals(sticks[1], static_cast<uint8_t>(128u), "ry centred");
+             t.Equals(ps2input::axisToPadByte(0.2f, 0.0f), oldAxis(0.2f), "deadzone 0 = the old conversion");
+         });
++
++        tc.Run("XInput dead zones per stick and trigger threshold; ini overrides", [](TestCase &t)
++        {
++            const ps2input::InputBindings b = ps2input::defaultInputBindings();
++            uint8_t sticks[4];
++            FakeInput pad;
++            pad.gamepad = 0;
++            pad.axes[A_LEFT_X] = 0.25f;  // just outside the left dead zone (0.2395)
++            pad.axes[A_RIGHT_X] = 0.25f; // inside the right one (0.2652)
++            pad.axes[A_LEFT_Y] = 0.23f;  // inside the left one
++            pad.axes[A_RIGHT_Y] = 0.27f; // just outside the right one
++            poll(b, pad, sticks);
++            t.Equals(sticks[2], oldAxis(ps2input::applyDeadzone(0.25f, kLeftDz)), "lx: past the left dead zone");
++            t.IsTrue(sticks[2] > 128u, "lx moves");
++            t.Equals(sticks[0], static_cast<uint8_t>(128u), "rx: 0.25 inside the right dead zone");
++            t.Equals(sticks[3], oldAxis(ps2input::applyDeadzone(0.23f, kLeftDz)), "ly");
++            t.Equals(sticks[1], oldAxis(ps2input::applyDeadzone(0.27f, kRightDz)), "ry: past the right dead zone");
++
++            FakeInput trig;
++            trig.gamepad = 0;
++            trig.travel[A_LEFT_TRIGGER] = 0.11f;  // below 30/255
++            trig.travel[A_RIGHT_TRIGGER] = 0.13f; // above
++            t.Equals(poll(b, trig, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_R2), "LT 0.11 up, RT 0.13 = R2");
++            trig.travel[A_LEFT_TRIGGER] = 0.5f;
++            trig.travel[A_RIGHT_TRIGGER] = 0.0f;
++            t.Equals(poll(b, trig, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_L2), "LT half = L2");
++            FakeInput synth; // raylib's own LEFT_TRIGGER_2 button (no axis travel seen) still works
++            synth.gamepad = 0;
++            synth.buttons = {B_LEFT_TRIGGER_2};
++            t.Equals(poll(b, synth, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_L2), "LEFT_TRIGGER_2 button = L2");
++
++            // raylib desktop trigger axes run -1 (released) .. 1 (pulled).
++            t.IsTrue(ps2input::raylibTriggerTravel(-1.0f) == 0.0f, "released = 0");
++            t.IsTrue(ps2input::raylibTriggerTravel(1.0f) == 1.0f, "pulled = 1");
++            t.IsTrue(ps2input::raylibTriggerTravel(0.0f) == 0.5f, "half");
++            t.IsTrue(ps2input::raylibTriggerTravel(-2.0f) == 0.0f && ps2input::raylibTriggerTravel(2.0f) == 1.0f,
++                     "clamped");
++
++            ps2input::InputBindings o = ps2input::defaultInputBindings();
++            std::vector<std::string> messages;
++            ps2input::parseInputIni("[gamepad]\ndeadzone_left = 0.5\ndeadzone = 0.1\ntrigger_threshold = 0.5\n", o,
++                                    messages);
++            t.Equals(messages.size(), static_cast<size_t>(0), "no bad lines");
++            t.IsTrue(o.deadzone[0] == 0.5f, "deadzone_left overrides deadzone (even before it)");
++            t.IsTrue(o.deadzone[1] == 0.1f, "deadzone sets the right stick");
++            t.IsTrue(o.triggerThreshold == 0.5f, "trigger_threshold read");
++            ps2input::parseInputIni("[gamepad]\ndeadzone_right = 0.3\n", o, messages);
++            t.IsTrue(o.deadzone[0] == 0.5f && o.deadzone[1] == 0.3f, "deadzone_right alone");
++            FakeInput t2;
++            t2.gamepad = 0;
++            t2.travel[A_LEFT_TRIGGER] = 0.4f;
++            t2.travel[A_RIGHT_TRIGGER] = 0.6f;
++            t.Equals(poll(o, t2, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_R2), "threshold 0.5: 0.4 no, 0.6 yes");
++        });
++
++        tc.Run("keyboard and gamepad both live: buttons merge, sticks fall back to the keyboard", [](TestCase &t)
++        {
++            const ps2input::InputBindings b = ps2input::defaultInputBindings();
++            uint8_t sticks[4];
++            FakeInput both;
++            both.gamepad = 0;
++            both.keys = {K_K};                      // cross from the keyboard
++            both.buttons = {B_RIGHT_FACE_RIGHT};    // circle from the pad
++            t.Equals(poll(b, both, sticks), static_cast<uint16_t>(0xFFFFu & ~(PAD_CROSS | PAD_CIRCLE)),
++                     "a button is down if either source has it down");
++            FakeInput keyOnly;
++            keyOnly.gamepad = 0;
++            keyOnly.keys = {K_ENTER};
++            t.Equals(poll(b, keyOnly, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_START),
++                     "keyboard works with a gamepad connected");
++            FakeInput same;
++            same.gamepad = 0;
++            same.keys = {K_UP};
++            same.buttons = {B_LEFT_FACE_UP};
++            t.Equals(poll(b, same, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_UP), "both hold up = up");
++
++            FakeInput drift; // pad sticks resting inside their dead zones (drift), keyboard W and H held
++            drift.gamepad = 0;
++            drift.axes[A_LEFT_X] = 0.1f;
++            drift.axes[A_LEFT_Y] = -0.2f;
++            drift.axes[A_RIGHT_X] = -0.15f;
++            drift.keys = {K_W, K_H};
++            poll(b, drift, sticks);
++            t.Equals(sticks[3], oldAxis(-1.0f), "ly from W");
++            t.Equals(sticks[2], static_cast<uint8_t>(128u), "lx: keyboard's (none)");
++            t.Equals(sticks[0], oldAxis(1.0f), "rx from H");
++            t.Equals(sticks[1], static_cast<uint8_t>(128u), "ry: keyboard's (none)");
++
++            FakeInput moved; // pad left stick out of its dead zone wins over the keyboard
++            moved.gamepad = 0;
++            moved.axes[A_LEFT_Y] = 1.0f;
++            moved.axes[A_RIGHT_X] = -1.0f;
++            moved.keys = {K_W, K_A, K_H};
++            poll(b, moved, sticks);
++            t.Equals(sticks[3], oldAxis(1.0f), "ly: gamepad's");
++            t.Equals(sticks[2], static_cast<uint8_t>(128u), "lx: gamepad's (0), not the keyboard's A");
++            t.Equals(sticks[0], oldAxis(-1.0f), "rx: gamepad's, not H");
++
++            FakeInput noPad; // gamepad absent: keyboard only, pad values not read
++            noPad.axes[A_LEFT_Y] = -1.0f;
++            noPad.keys = {K_S, K_K};
++            t.Equals(poll(b, noPad, sticks), static_cast<uint16_t>(0xFFFFu & ~PAD_CROSS), "keyboard alone");
++            t.Equals(sticks[3], oldAxis(1.0f), "ly from S");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

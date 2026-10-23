@@ -1,56 +1,67 @@
-; input.ini - host input bindings for the runner (PS2Recomp patch 0038, runtime/ps2_input_bindings.h).
+; input.ini - host input bindings for the runner (PS2Recomp patches 0038/0040, runtime/ps2_input_bindings.h).
 ;
 ; Copy to input.ini beside ps2EntryRunner.exe (C:\ob\r\ps2xRuntime\input.ini), or point PS2X_INPUT_INI at a file.
-; Read once at start-up. Without a file the defaults below apply; they are the mapping the runner always had.
-; A bad line is printed once as "[input] line N: ..." and that entry keeps its default.
+; Read once at start-up. Without a file the defaults below apply (this file lists them all; copied as is it gives the
+; same bindings, dead zones to 6 digits). A bad line is printed once as "[input] line N: ..." and that entry keeps its default.
 ;
 ; Names are raylib's without the prefix (KEY_, GAMEPAD_BUTTON_, GAMEPAD_AXIS_), any case. Several codes per button
 ; are comma-separated (up to 8). An empty value or NONE unbinds the button.
 ; Buttons: up down left right cross circle square triangle l1 r1 l2 r2 l3 r3 start select
-; The gamepad (index `device`), when connected, is the only input; otherwise the keyboard is.
+; Keyboard and gamepad (index `device`) both work at once, as in PCSX2: a button is down if either holds it; a stick
+; follows the gamepad unless the gamepad stick rests inside its dead zone, then the keyboard.
 ; ';' or '#' starts a comment.
 
 [keyboard]
-up       = UP, W
-down     = DOWN, S
-left     = LEFT, A
-right    = RIGHT, D
-cross    = X, SPACE
-circle   = C, ESCAPE
-square   = Z, KP_0
-triangle = V, KP_1
-l1       = Q
-r1       = E
-l2       = LEFT_SHIFT
-r2       = RIGHT_SHIFT
-l3       = NONE
-r3       = NONE
-start    = ENTER
-select   = TAB
-; Analog sticks from four keys: up, down, left, right (default: none). For example, to walk with IJKL:
-; stick_left = I, K, J, L
-stick_left  = NONE
-stick_right = NONE
+; PCSX2 v2.9.134's default keyboard mapping (pcsx2/Input/InputManager.cpp:1771-1794).
+up       = UP           ; PCSX2 DPadUp = Up
+down     = DOWN         ; DPadDown = Down
+left     = LEFT         ; DPadLeft = Left
+right    = RIGHT        ; DPadRight = Right
+cross    = K            ; Cross = K
+circle   = L            ; Circle = L
+square   = J            ; Square = J
+triangle = I            ; Triangle = I
+l1       = Q            ; L1 = Q
+r1       = E            ; R1 = E
+l2       = ONE          ; L2 = 1
+r2       = THREE        ; R2 = 3
+l3       = TWO          ; L3 = 2
+r3       = FOUR         ; R3 = 4
+start    = ENTER        ; Start = Return
+select   = BACKSPACE    ; Select = Backspace
+; Analog sticks from four keys: up, down, left, right.
+stick_left  = W, S, A, D   ; LeftStickUp/Down/Left/Right = W/S/A/D
+stick_right = T, G, F, H   ; RightStickUp/Down/Left/Right = T/G/F/H
 
 [gamepad]
-device   = 0          ; raylib gamepad index 0..3
-deadzone = 0          ; 0..1 per axis; below it = centre, the rest rescaled to the full range
-up       = LEFT_FACE_UP
-down     = LEFT_FACE_DOWN
-left     = LEFT_FACE_LEFT
-right    = LEFT_FACE_RIGHT
-cross    = RIGHT_FACE_DOWN
-circle   = RIGHT_FACE_RIGHT
-square   = RIGHT_FACE_LEFT
-triangle = RIGHT_FACE_UP
-l1       = LEFT_TRIGGER_1
-r1       = RIGHT_TRIGGER_1
-l2       = LEFT_TRIGGER_2
-r2       = RIGHT_TRIGGER_2
-l3       = LEFT_THUMB
-r3       = RIGHT_THUMB
-start    = MIDDLE_RIGHT
-select   = MIDDLE_LEFT
+; PCSX2's XInput mapping (pcsx2/Input/XInputSource.cpp:41-47 axes, 108-124 buttons) in raylib's names; raylib
+; lays every pad out as an Xbox pad (RIGHT_FACE_DOWN = A, MIDDLE_LEFT = Back, ...).
+device   = 0                ; raylib gamepad index 0..3
+; Dead zones: Microsoft's XInput recommendations (Xinput.h XINPUT_GAMEPAD_LEFT/RIGHT_THUMB_DEADZONE = 7849 and
+; 8689 of 32767). PCSX2's own default is 0.00 (PadDualshock2.cpp); we use Microsoft's because Xbox sticks drift.
+; Per axis: below it = centre, the rest rescaled to the full range. `deadzone = X` sets both sticks;
+; deadzone_left / deadzone_right override it.
+deadzone_left     = 0.239540  ; 7849 / 32767
+deadzone_right    = 0.265175  ; 8689 / 32767
+trigger_threshold = 0.117647  ; XINPUT_GAMEPAD_TRIGGER_THRESHOLD = 30 / 255 of trigger travel
+up       = LEFT_FACE_UP     ; D-pad up
+down     = LEFT_FACE_DOWN   ; D-pad down
+left     = LEFT_FACE_LEFT   ; D-pad left
+right    = LEFT_FACE_RIGHT  ; D-pad right
+cross    = RIGHT_FACE_DOWN  ; A
+circle   = RIGHT_FACE_RIGHT ; B
+square   = RIGHT_FACE_LEFT  ; X
+triangle = RIGHT_FACE_UP    ; Y
+l1       = LEFT_TRIGGER_1   ; LB
+r1       = RIGHT_TRIGGER_1  ; RB
+; LT/RT: raylib reports them as axes (the threshold above applies) and also as LEFT/RIGHT_TRIGGER_2 buttons past
+; 55% travel. A button list may name the trigger axes LEFT_TRIGGER / RIGHT_TRIGGER.
+l2       = LEFT_TRIGGER_2, LEFT_TRIGGER    ; LT
+r2       = RIGHT_TRIGGER_2, RIGHT_TRIGGER  ; RT
+l3       = LEFT_THUMB       ; left stick click
+r3       = RIGHT_THUMB      ; right stick click
+start    = MIDDLE_RIGHT     ; Start
+select   = MIDDLE_LEFT      ; Back
 ; Two axes each: x, y (LEFT_X LEFT_Y RIGHT_X RIGHT_Y LEFT_TRIGGER RIGHT_TRIGGER).
 stick_left  = LEFT_X, LEFT_Y
 stick_right = RIGHT_X, RIGHT_Y
