@@ -11,3 +11,5 @@
 - **REOB HD texture pack** -- by **NoBigDeal La**, used under its author's terms. Made for the US
   release; most textures match the Japanese one too (packs are keyed by texture content). Not
   stored in this repository (about 3 GB); get it from its author.
+- **Sean Barrett** -- [stb](https://github.com/nothings/stb) `stb_image_write.h` / `stb_image.h` (public domain or
+  MIT), used by the diagnostics plugin `native/ob_diag` for PNG frame dumps; taken from raylib's bundled copy.

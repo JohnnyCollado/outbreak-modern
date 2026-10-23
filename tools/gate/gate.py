@@ -352,6 +352,7 @@ def stamp_entries():
     out.append(("pcsx2:diff", hashlib.sha256(git("diff", "HEAD", repo=pcsx2)).hexdigest()))
     add_tree("repo/native/pcsx2_gs", os.path.join(REPO, "native", "pcsx2_gs"))
     add_tree("repo/native/pcsx2_vu", os.path.join(REPO, "native", "pcsx2_vu"))
+    add_tree("repo/native/ob_diag", os.path.join(REPO, "native", "ob_diag"))
     for rel in sorted(x for x in git("ls-files", "--others", "--exclude-standard", "-z").decode("utf-8", "replace").split("\0") if x):
         add_file(f"up:untracked/{rel}", os.path.join(up, rel))
     build_dirs = {".git", ".vs", "build", "out"}

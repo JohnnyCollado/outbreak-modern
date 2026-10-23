@@ -1,0 +1,543 @@
+From 7116d655a353cd100c8f8205dc80e458c7e810e2 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 04:50:08 -0400
+Subject: [PATCH] Runtime: external GS snapshot only on demand
+
+Every VBlankStart called PS2ExternalGS::snapshot(), and the PCSX2 adapter's
+snapshot flushes the GS and reads the display rect back (a GPU-to-CPU sync per
+vsync on Vulkan), although only the frame dump and script capture steps use
+the frame. The external GS presents into its own window and never needs it.
+
+- gs_external.h: ps2SetExternalGSFrameDemand(fn) / ps2ExternalGSFrameWanted(tick).
+  The scheduler calls snapshot() only when the demand function wants that tick;
+  null (the default) = no snapshot. The snapshot now runs after the script step,
+  so a capture step that begins at a tick gets that tick's frame.
+- GS::publishExternalFrame(frame, tick) and latchedHostPresentationTick(): the
+  published frame carries the vsync it was taken at.
+- Ps2InputScript::captureWanted() (demand while a capture step needs frames);
+  takeCapture refuses frames older than the capture step's first tick.
+- UploadFrame with an external GS: no latch, copy or texture upload unless a
+  frame consumer exists (PS2X_FRAME_DUMP_DIR); consumers get the frame's own tick.
+- initialize: script with capture steps -> demand = captureWanted; plain
+  PS2X_FRAME_DUMP_DIR -> every frame.
+
+Tests: no demand, 6 vsyncs -> 0 snapshots; demand for ticks 2 and 4 -> exactly
+those snapshots, latched frame tick 4; script capture demand and stale-frame
+refusal.
+---
+ ps2xRuntime/include/runtime/gs/gs_external.h  |   8 +-
+ ps2xRuntime/include/runtime/gs/gs_frontend.h  |   7 +-
+ .../include/runtime/ps2_input_script.h        |   4 +
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp    |  17 ++-
+ ps2xRuntime/src/lib/gs/gs_external.cpp        |  16 +++
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp        |  13 ++-
+ ps2xRuntime/src/lib/ps2_input_script.cpp      |  10 +-
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 101 ++++++++++++------
+ ps2xTest/src/ps2_gs_external_tests.cpp        |  78 ++++++++++++++
+ ps2xTest/src/ps2_input_script_tests.cpp       |  22 ++++
+ 10 files changed, 238 insertions(+), 38 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_external.h b/ps2xRuntime/include/runtime/gs/gs_external.h
+index 4810028..ce602d2 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_external.h
++++ b/ps2xRuntime/include/runtime/gs/gs_external.h
+@@ -19,7 +19,7 @@ public:
+   virtual void vsync(uint64_t tick, const GSRegisters &regs) = 0; // VBlankStart, after the CSR FIELD set/clear, before script->onVSync
+   virtual uint32_t readLocalToHost(uint8_t *dst, uint32_t maxBytes) = 0; // replaces the backend's ConsumeLocalToHostBytes when a hook is set
+   virtual void reset() = 0; // GS::reset() and CSR RESET bit writes
+-  virtual bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0; // called right after vsync; RGBA8
++  virtual bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0; // VBlankStart, only when ps2ExternalGSFrameWanted(tick); RGBA8
+   virtual void attachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible) {} // main thread, after InitWindow; the GS presents into it
+   virtual void windowResized(uint32_t w, uint32_t h) {} // main thread, on a host window resize
+ };
+@@ -27,6 +27,12 @@ PS2ExternalGS *ps2ExternalGS();           // null = CPU GS
+ void ps2SetExternalGS(PS2ExternalGS *gs); // tests and startup
+ void ps2ExternalGSAttachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible); // no-op without an external GS
+ void ps2ExternalGSWindowResized(uint32_t w, uint32_t h);                                   // no-op without an external GS
++// Frame demand: the scheduler calls snapshot() at a VBlankStart only when the demand function returns true for
++// that tick (a consumer, such as a capture step or a frame dump, wants the frame). Null, the default = no
++// consumer: no snapshot and no GS readback. The window never needs it: the external GS presents itself.
++using PS2ExternalGSFrameDemandFn = bool (*)(uint64_t tick);
++void ps2SetExternalGSFrameDemand(PS2ExternalGSFrameDemandFn fn);
++bool ps2ExternalGSFrameWanted(uint64_t tick); // false without a demand function
+ #ifdef PS2X_EXTERNAL_GS
+ PS2ExternalGS *ps2CreateExternalGS(const char *mode); // defined by the external library; null = failure
+ #endif
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index c2d50db..992aa08 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -147,7 +147,10 @@ public:
+     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
+     // Frame from an external GS (gs_external.h); latchHostPresentationFrame
+     // latches it instead of the backend's Present while a hook is set.
+-    void publishExternalFrame(PresentationFrame &&frame);
++    // tick = the VBlankStart it was taken at (snapshots run only on demand).
++    void publishExternalFrame(PresentationFrame &&frame, uint64_t tick = 0u);
++    // Tick of the latched external frame (0 for the CPU backend's frame).
++    uint64_t latchedHostPresentationTick() const;
+ 
+     void refreshDisplaySnapshot();
+ 
+@@ -236,6 +239,8 @@ private:
+     bool m_hostPresentationUsedPreferred = false;
+     bool m_hasHostPresentationFrame = false;
+     PresentationFrame m_externalFrame; // guarded by m_presentationMutex
++    uint64_t m_externalFrameTick = 0;  // guarded by m_presentationMutex
++    uint64_t m_hostPresentationTick = 0;
+     uint64_t m_nativeImageUploadCount = 0;
+     uint64_t m_nativePackedGIFPacketCount = 0;
+ 
+diff --git a/ps2xRuntime/include/runtime/ps2_input_script.h b/ps2xRuntime/include/runtime/ps2_input_script.h
+index a836873..3e3ef95 100644
+--- a/ps2xRuntime/include/runtime/ps2_input_script.h
++++ b/ps2xRuntime/include/runtime/ps2_input_script.h
+@@ -76,8 +76,11 @@ public:
+     // Main thread: when a capture step is active and <latchedTick> is new, reserves frame k and
+     // returns true with the file name "<screen>-<k>.png"; commitCapture(true) counts the frame as
+     // written, commitCapture(false) gives k back for the next tick.
++    // Frames older than the capture step's first tick are refused (an external GS frame can be stale).
+     bool takeCapture(uint64_t latchedTick, std::string &fileName, std::string &screen, uint32_t &k);
+     void commitCapture(bool written);
++    // Any thread: a capture step is active and still needs frames (the external GS snapshot demand).
++    bool captureWanted() const;
+ 
+     // Main thread: wall-clock timeout, measured from start(). On timeout, message holds
+     // "[script] TIMEOUT step <i> line <L>: <text>".
+@@ -114,6 +117,7 @@ private:
+     uint32_t m_captureTaken = 0;
+     uint32_t m_captureWritten = 0;
+     uint64_t m_lastCaptureTick = 0;
++    uint64_t m_captureStartTick = 0;
+     bool m_hasCaptureTick = false;
+ 
+     std::atomic<uint16_t> m_buttons{0xFFFFu};
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 71c10a5..96e389a 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1937,6 +1937,7 @@ void EeScheduler::processEvent(const EeEvent &event)
+         requestStop();
+         break;
+     case EeEventType::VBlankStart:
++    {
+         ++m_vsyncTick;
+         if (m_frameTimeLogEnabled)
+             logFrameTime();
+@@ -1949,13 +1950,11 @@ void EeScheduler::processEvent(const EeEvent &event)
+         {
+             m_runtime.memory().gs().csr.fetch_and(~0x2000ull, std::memory_order_acq_rel);
+         }
+-        if (PS2ExternalGS *externalGS = ps2ExternalGS())
++        PS2ExternalGS *const externalGS = ps2ExternalGS();
++        if (externalGS)
+         {
+             ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
+             externalGS->vsync(m_vsyncTick, m_runtime.memory().gs());
+-            PresentationFrame frame{};
+-            if (externalGS->snapshot(frame.pixels, frame.width, frame.height))
+-                m_runtime.gs().publishExternalFrame(std::move(frame));
+         }
+         writeGuestU32(m_vsyncFlagAddress, 1u);
+         if (m_vsyncTickAddress != 0u)
+@@ -1983,6 +1982,15 @@ void EeScheduler::processEvent(const EeEvent &event)
+                             },
+                             std::cout);
+         }
++        // Snapshot (a GS readback) only when a consumer wants this frame; after the script step, so a capture
++        // step that begins at this tick gets this tick's frame.
++        if (externalGS && ps2ExternalGSFrameWanted(m_vsyncTick))
++        {
++            ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
++            PresentationFrame frame{};
++            if (externalGS->snapshot(frame.pixels, frame.width, frame.height))
++                m_runtime.gs().publishExternalFrame(std::move(frame), m_vsyncTick);
++        }
+         completeVSync(m_vsyncTick);
+         if (m_gsVSyncCallback != 0u && m_runtime.hasFunction(m_gsVSyncCallback))
+         {
+@@ -1997,6 +2005,7 @@ void EeScheduler::processEvent(const EeEvent &event)
+         }
+         dispatchIrq(false, 2u);
+         break;
++    }
+     case EeEventType::ExternalWake:
+         completeExternalWait(event.id, event.value, KE_OK);
+         break;
+diff --git a/ps2xRuntime/src/lib/gs/gs_external.cpp b/ps2xRuntime/src/lib/gs/gs_external.cpp
+index 5d75e65..1d042a5 100644
+--- a/ps2xRuntime/src/lib/gs/gs_external.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_external.cpp
+@@ -28,3 +28,19 @@ void ps2ExternalGSWindowResized(uint32_t w, uint32_t h)
+     if (PS2ExternalGS *gs = ps2ExternalGS())
+         gs->windowResized(w, h);
+ }
++
++namespace
++{
++    std::atomic<PS2ExternalGSFrameDemandFn> s_frameDemand{nullptr};
++}
++
++void ps2SetExternalGSFrameDemand(PS2ExternalGSFrameDemandFn fn)
++{
++    s_frameDemand.store(fn, std::memory_order_release);
++}
++
++bool ps2ExternalGSFrameWanted(uint64_t tick)
++{
++    const PS2ExternalGSFrameDemandFn fn = s_frameDemand.load(std::memory_order_acquire);
++    return fn != nullptr && fn(tick);
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 3f979ca..5bfa9ce 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -179,6 +179,8 @@ void GS::reset()
+         m_hostPresentationUsedPreferred = false;
+         m_hasHostPresentationFrame = false;
+         m_externalFrame = {};
++        m_externalFrameTick = 0u;
++        m_hostPresentationTick = 0u;
+     }
+ 
+     m_debugHistoryWrite = 0;
+@@ -549,6 +551,7 @@ void GS::latchHostPresentationFrame()
+         m_hostPresentationDisplayFbp = m_externalFrame.displayFbp;
+         m_hostPresentationSourceFbp = m_externalFrame.sourceFbp;
+         m_hostPresentationUsedPreferred = m_externalFrame.usedPreferred;
++        m_hostPresentationTick = m_externalFrameTick;
+         m_hasHostPresentationFrame = hasExt;
+         return;
+     }
+@@ -592,6 +595,7 @@ void GS::latchHostPresentationFrame()
+         m_hostPresentationDisplayFbp = displayFbp;
+         m_hostPresentationSourceFbp = sourceFbp;
+         m_hostPresentationUsedPreferred = usedPreferred;
++        m_hostPresentationTick = 0u;
+         m_hasHostPresentationFrame = hasFrame;
+     }
+ 
+@@ -1671,10 +1675,17 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+     return bytes;
+ }
+ 
+-void GS::publishExternalFrame(PresentationFrame &&frame)
++void GS::publishExternalFrame(PresentationFrame &&frame, uint64_t tick)
+ {
+     std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+     m_externalFrame = std::move(frame);
++    m_externalFrameTick = tick;
++}
++
++uint64_t GS::latchedHostPresentationTick() const
++{
++    std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
++    return m_hostPresentationTick;
+ }
+ 
+ void GS::useNullBackendForExternalGS()
+diff --git a/ps2xRuntime/src/lib/ps2_input_script.cpp b/ps2xRuntime/src/lib/ps2_input_script.cpp
+index 1100f85..131caa6 100644
+--- a/ps2xRuntime/src/lib/ps2_input_script.cpp
++++ b/ps2xRuntime/src/lib/ps2_input_script.cpp
+@@ -298,6 +298,7 @@ void Ps2InputScript::beginStep(uint64_t tick, const ReadMem &read, std::ostream
+         m_captureTaken = 0;
+         m_captureWritten = 0;
+         m_hasCaptureTick = false;
++        m_captureStartTick = tick;
+         break;
+     case Op::Watch:
+     {
+@@ -385,7 +386,8 @@ bool Ps2InputScript::takeCapture(uint64_t latchedTick, std::string &fileName, st
+     if (!m_captureActive || m_index >= m_steps.size())
+         return false;
+     const Step &step = m_steps[m_index];
+-    if (m_captureTaken >= step.count || (m_hasCaptureTick && m_lastCaptureTick == latchedTick))
++    if (m_captureTaken >= step.count || latchedTick < m_captureStartTick ||
++        (m_hasCaptureTick && m_lastCaptureTick == latchedTick))
+         return false;
+     k = m_captureTaken++;
+     m_lastCaptureTick = latchedTick;
+@@ -395,6 +397,12 @@ bool Ps2InputScript::takeCapture(uint64_t latchedTick, std::string &fileName, st
+     return true;
+ }
+ 
++bool Ps2InputScript::captureWanted() const
++{
++    std::lock_guard<std::mutex> lock(m_mutex);
++    return m_captureActive && m_index < m_steps.size() && m_captureWritten < m_steps[m_index].count;
++}
++
+ void Ps2InputScript::commitCapture(bool written)
+ {
+     std::lock_guard<std::mutex> lock(m_mutex);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index ed7b291..b83ccda 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -381,8 +381,72 @@ namespace
+     }
+ }
+ 
++// Hands one presented frame (tick = the vsync it shows) to the frame consumers: a capture step of the input
++// script, or PS2X_FRAME_DUMP_DIR's every-frame dump. Main thread.
++static void DeliverFrameToConsumers(const char *dumpDir, uint64_t tick, const uint8_t *rgba, uint32_t width,
++                                    uint32_t height)
++{
++    if (Ps2InputScript *script = ps2ActiveInputScript())
++    {
++        // Script mode: dump only while a capture step is active, one <screen>-<k>.png per frame tick.
++        std::string fileName;
++        std::string screen;
++        uint32_t k = 0u;
++        if (dumpDir != nullptr && script->takeCapture(tick, fileName, screen, k))
++        {
++            const bool written = ps2DumpPresentedFrameNamed(dumpDir, fileName.c_str(), rgba, width, height);
++            script->commitCapture(written);
++            if (written)
++                std::cout << "[script] capture " << screen << " k=" << k << " tick=" << tick << std::endl;
++            else
++                std::cerr << "[script] capture " << screen << " k=" << k << " write failed" << std::endl;
++        }
++    }
++    else if (dumpDir != nullptr)
++    {
++        ps2DumpPresentedFrame(dumpDir, tick, rgba, width, height);
++    }
++}
++
++// External GS frame demand (gs_external.h): a script wants frames only during a capture step; a plain
++// PS2X_FRAME_DUMP_DIR wants every frame.
++static bool ScriptCaptureFrameDemand(uint64_t)
++{
++    const Ps2InputScript *script = ps2ActiveInputScript();
++    return script != nullptr && script->captureWanted();
++}
++
++static bool EveryFrameDemand(uint64_t)
++{
++    return true;
++}
++
+ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+ {
++    static const char *s_frameDumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
++    if (ps2ExternalGS())
++    {
++        // The external GS presents into its own child window: no texture upload, and frames are copied only for
++        // a consumer, from the snapshots the scheduler takes on demand.
++        static uint64_t s_lastExternalTick = std::numeric_limits<uint64_t>::max();
++        static uint64_t s_lastExternalFrameTick = std::numeric_limits<uint64_t>::max();
++        static std::vector<uint8_t> s_externalScratch;
++        const uint64_t tick = rt->eeScheduler().currentVSyncTick();
++        if (s_frameDumpDir == nullptr || tick == s_lastExternalTick)
++            return;
++        s_lastExternalTick = tick;
++        rt->gs().latchHostPresentationFrame();
++        const uint64_t frameTick = rt->gs().latchedHostPresentationTick();
++        uint32_t width = 0u;
++        uint32_t height = 0u;
++        if (frameTick == s_lastExternalFrameTick ||
++            !rt->gs().copyLatchedHostPresentationFrame(s_externalScratch, width, height))
++            return;
++        s_lastExternalFrameTick = frameTick;
++        DeliverFrameToConsumers(s_frameDumpDir, frameTick, s_externalScratch.data(), width, height);
++        return;
++    }
++
+     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
+     static bool s_hasLatchedInitialFrame = false;
+     static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();
+@@ -458,36 +522,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     s_lastWidth = width;
+     s_lastHeight = height;
+ 
+-    static const char *s_frameDumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
+-    if (Ps2InputScript *script = ps2ActiveInputScript())
+-    {
+-        // Script mode: dump only while a capture step is active, one <screen>-<k>.png per latched tick.
+-        std::string fileName;
+-        std::string screen;
+-        uint32_t k = 0u;
+-        if (s_frameDumpDir != nullptr && script->takeCapture(currentTick, fileName, screen, k))
+-        {
+-            const bool written = ps2DumpPresentedFrameNamed(s_frameDumpDir, fileName.c_str(), s_scratch.data(), width, height);
+-            script->commitCapture(written);
+-            if (written)
+-                std::cout << "[script] capture " << screen << " k=" << k << " tick=" << currentTick << std::endl;
+-            else
+-                std::cerr << "[script] capture " << screen << " k=" << k << " write failed" << std::endl;
+-        }
+-    }
+-    else if (s_frameDumpDir != nullptr)
+-    {
+-        ps2DumpPresentedFrame(s_frameDumpDir, currentTick, s_scratch.data(), width, height);
+-    }
+-
+-    if (ps2ExternalGS())
+-    {
+-        // The external GS presents into its own child window; the raylib texture is never drawn.
+-        outWidth = width;
+-        outHeight = height;
+-        s_hasUploadedFrame = true;
+-        return;
+-    }
++    DeliverFrameToConsumers(s_frameDumpDir, currentTick, s_scratch.data(), width, height);
+ 
+     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
+     if (!s_scratch.empty() && width != 0u && height != 0u)
+@@ -911,9 +946,15 @@ bool PS2Runtime::initialize(const char *title)
+         }
+         s_inputScript.start(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+         ps2SetActiveInputScript(&s_inputScript);
++        if (s_inputScript.hasCaptureSteps())
++            ps2SetExternalGSFrameDemand(ScriptCaptureFrameDemand);
+         std::cout << "[script] loaded " << scriptPath << " steps=" << s_inputScript.steps().size()
+                   << " timeout=" << s_inputScript.timeoutSeconds() << "s" << std::endl;
+     }
++    else if (const char *dumpDir = std::getenv("PS2X_FRAME_DUMP_DIR"); dumpDir && *dumpDir)
++    {
++        ps2SetExternalGSFrameDemand(EveryFrameDemand); // dump every presented frame
++    }
+ 
+     try
+     {
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index c43c496..0636f92 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -78,6 +78,50 @@ namespace
+         ~ExternalGSScope() { ps2SetExternalGS(nullptr); }
+     };
+ 
++    struct FrameDemandScope
++    {
++        explicit FrameDemandScope(PS2ExternalGSFrameDemandFn fn) { ps2SetExternalGSFrameDemand(fn); }
++        ~FrameDemandScope() { ps2SetExternalGSFrameDemand(nullptr); }
++    };
++
++    bool demandEveryFrame(uint64_t) { return true; }
++    bool demandTicks2And4(uint64_t tick) { return tick == 2u || tick == 4u; }
++
++    // Snapshot demand: the guest waits kDemandVSyncs vsyncs (resuming at itself), then stops.
++    constexpr uint32_t kDemandDrivePc = 0x00172000u;
++    constexpr uint32_t kDemandVSyncs = 6u;
++    uint32_t s_demandVSyncsSeen = 0u;
++
++    void demandDrive(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        if (s_demandVSyncsSeen++ >= kDemandVSyncs)
++        {
++            ctx->pc = 0u;
++            runtime->requestStop();
++            return;
++        }
++        ctx->pc = kDemandDrivePc;
++        runtime->eeScheduler().waitVSync(runtime->eeScheduler().currentVSyncTick());
++    }
++
++    // Runs demandDrive with a recording external GS; returns its events, and the latched frame tick.
++    std::vector<ExternalGSEvent> runDemandVSyncs(uint64_t &latchedTick)
++    {
++        std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++        PS2Runtime runtime;
++        runtime.registerFunction(kDemandDrivePc, demandDrive);
++        s_demandVSyncsSeen = 0u;
++        RecordingExternalGS rec;
++        ExternalGSScope scope(&rec);
++        R5900Context mainContext{};
++        mainContext.pc = kDemandDrivePc;
++        runtime.eeScheduler().reset(rdram.data(), mainContext);
++        runtime.eeScheduler().run();
++        runtime.gs().latchHostPresentationFrame();
++        latchedTick = runtime.gs().latchedHostPresentationTick();
++        return rec.events;
++    }
++
+     constexpr uint32_t kDrivePc = 0x00170000u;
+     constexpr uint32_t kResumePc = 0x00170010u;
+     constexpr uint32_t kGsPmode = 0x12000000u;
+@@ -371,6 +415,7 @@ void register_ps2_gs_external_tests()
+ 
+             RecordingExternalGS rec;
+             ExternalGSScope scope(&rec);
++            FrameDemandScope demand(demandEveryFrame);
+             R5900Context mainContext{};
+             mainContext.pc = kDrivePc;
+             runtime.eeScheduler().reset(rdram.data(), mainContext);
+@@ -416,6 +461,39 @@ void register_ps2_gs_external_tests()
+             t.Equals(readback[7], static_cast<uint8_t>(0x5Au), "readback bytes");
+         });
+ 
++        tc.Run("external GS snapshot: no frame consumer, N vsyncs give 0 snapshots", [](TestCase &t)
++        {
++            uint64_t latchedTick = 99u;
++            const std::vector<ExternalGSEvent> ev = runDemandVSyncs(latchedTick);
++            size_t vsyncs = 0u, snapshots = 0u;
++            for (const ExternalGSEvent &e : ev)
++            {
++                vsyncs += e.kind == 'v';
++                snapshots += e.kind == 's';
++            }
++            t.IsTrue(vsyncs >= kDemandVSyncs, "the guest saw its vsyncs");
++            t.Equals(snapshots, static_cast<size_t>(0u), "no snapshot (GS readback) without a consumer");
++            t.Equals(latchedTick, 0ull, "nothing published");
++        });
++
++        tc.Run("external GS snapshot: a consumer gets exactly the frames it asks for, tagged with their tick", [](TestCase &t)
++        {
++            FrameDemandScope demand(demandTicks2And4);
++            uint64_t latchedTick = 0u;
++            const std::vector<ExternalGSEvent> ev = runDemandVSyncs(latchedTick);
++            std::vector<uint64_t> snapshotTicks;
++            uint64_t lastVsync = 0u;
++            for (const ExternalGSEvent &e : ev)
++            {
++                if (e.kind == 'v')
++                    lastVsync = e.b;
++                else if (e.kind == 's')
++                    snapshotTicks.push_back(lastVsync);
++            }
++            t.IsTrue(snapshotTicks == std::vector<uint64_t>{2u, 4u}, "snapshots at ticks 2 and 4 only");
++            t.Equals(latchedTick, 4ull, "the latched frame carries the tick it was taken at");
++        });
++
+         tc.Run("native GIF DMA chains run with an external GS hook and tee their GIF bytes in order", [](TestCase &t)
+         {
+             const NativeChainRun cpu = runNativeGifChains(false);
+diff --git a/ps2xTest/src/ps2_input_script_tests.cpp b/ps2xTest/src/ps2_input_script_tests.cpp
+index 7b49b1b..fb98d9d 100644
+--- a/ps2xTest/src/ps2_input_script_tests.cpp
++++ b/ps2xTest/src/ps2_input_script_tests.cpp
+@@ -190,6 +190,28 @@ void register_ps2_input_script_tests()
+             script.onVSync(12, read, log);
+             t.IsTrue(script.quitRequested(), "capture completes after n written frames"); });
+ 
++        tc.Run("capture wants frames only during its step and refuses frames older than the step", [](TestCase &t)
++               {
++            Ps2InputScript script;
++            t.IsTrue(parseOk(script, "wait vsync 2\ncapture title 1\nquit\n"), "parse");
++            FakeMemory mem;
++            std::ostringstream log;
++            const auto read = mem.reader();
++            std::string fileName;
++            std::string screen;
++            uint32_t k = 0u;
++            script.onVSync(1, read, log);
++            t.IsFalse(script.captureWanted(), "no frames wanted while waiting");
++            script.onVSync(3, read, log);
++            t.IsTrue(script.captureWanted(), "frames wanted once the capture step begins (tick 3)");
++            t.IsFalse(script.takeCapture(2, fileName, screen, k), "a frame from before the step is refused");
++            t.IsTrue(script.takeCapture(3, fileName, screen, k), "the step's own frame is taken");
++            script.commitCapture(true);
++            t.IsFalse(script.captureWanted(), "no more frames wanted once n are written");
++            script.onVSync(4, read, log);
++            t.IsTrue(script.quitRequested(), "script moves on");
++            t.IsFalse(script.captureWanted(), "none wanted after the step"); });
++
+         tc.Run("timeout with injected clock", [](TestCase &t)
+                {
+             Ps2InputScript script;
+-- 
+2.46.2.windows.1
+

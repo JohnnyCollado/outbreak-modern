@@ -4,10 +4,12 @@
 # recomp-cycle.sh, ovl-cycle.sh, build-runner.bat, boot-frames-26.ps1).
 #
 #   tools/ob.sh tools                        configure + build the tools tree ($OB_T)
-#   tools/ob.sh test                         ps2x_tests, IOP tests, gs_cache tests: "<suite>: <pass>/<total>"
+#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag tests: "<suite>: <pass>/<total>"
 #   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
-#   tools/ob.sh boot --script F [--tag T]    hidden scripted boot (PS2X_INPUT_SCRIPT, patch 0020); ends by
+#                    [--no-diag] [--hidden]  --no-diag: without the ob_diag plugin (a play build; no script, dumps,
+#                                            frame-time CSV); --hidden: PS2X_HIDDEN=1 without a script
+#   tools/ob.sh boot --script F [--tag T]    hidden scripted boot (PS2X_INPUT_SCRIPT, ob_diag plugin); ends by
 #                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
 #   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
 #   tools/ob.sh pcsx2-gs                     PCSX2 GS static lib (native/pcsx2_gs): clone/deps if missing, build, smoke
@@ -19,7 +21,7 @@
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
 # OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat;
 # OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build,
-# OB_PCSX2_VU_BUILD=C:/ob/pcsx2-vu-build.
+# OB_PCSX2_VU_BUILD=C:/ob/pcsx2-vu-build, OB_DIAG_BUILD=C:/ob/diag-build (ob_diag.dll, ob_diag_tests.exe).
 # Writes nothing inside the repo; logs go to $OB_LOGS. cmake/ctest/MSVC steps run via tools/ob/vc.bat
 # (its path must contain no spaces: cmd /c quoting).
 set -u
@@ -28,6 +30,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 : "${OB_SRC:=$OB_ROOT/src}" "${OB_T:=$OB_ROOT/t}" "${OB_R:=$OB_ROOT/r}" "${OB_WORK:=$OB_ROOT/work}"
 : "${OB_OVL:=$OB_ROOT/ovl}" "${OB_LOGS:=$OB_ROOT/logs}" "${OB_SPLAT:=$OB_ROOT/splat/SLPM_654.28}"
 : "${OB_RUN:=$REPO/game_files}"
+: "${OB_DIAG_BUILD:=$OB_ROOT/diag-build}"
 : "${OB_VCVARS:=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 export OB_VCVARS
 PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
@@ -53,6 +56,21 @@ ctest_count() {
     local f t; f=$(echo "$line" | sed -E 's/.* ([0-9]+) tests failed out of ([0-9]+).*/\1/')
     t=$(echo "$line" | sed -E 's/.*out of ([0-9]+).*/\1/')
     echo "$((t - f))/$t"
+}
+
+# diag_build: configure (once) + build native/ob_diag (the diagnostics plugin ob_diag.dll and ob_diag_tests.exe)
+# into $OB_DIAG_BUILD. Headers from $OB_SRC (runtime/ps2_diag_hooks.h, ps2_vu1.h, MiniTest.h), stb from $OB_T.
+diag_build() {
+    local log="$OB_LOGS/ob-diag-build.log" rc start
+    start=$(date +%s)
+    mkdir -p "$OB_DIAG_BUILD"
+    { { [ -f "$OB_DIAG_BUILD/build.ninja" ] ||
+          vc cmake -S "$REPO/native/ob_diag" -B "$OB_DIAG_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_SRC="$OB_SRC" -DOB_T="$OB_T"; } &&
+      vc cmake --build "$OB_DIAG_BUILD" -j $JOBS; } > "$log" 2>&1
+    rc=$?
+    echo "ob_diag: build exit $rc in $(( $(date +%s) - start )) s ($log)"
+    [ $rc = 0 ] || tail -5 "$log"
+    return $rc
 }
 
 cmd_test() {
@@ -82,6 +100,16 @@ cmd_test() {
     log="$OB_LOGS/ob-test-gs_cache.log"
     vc ctest --test-dir "$OB_T/ps2xTest/gs_cache" --output-on-failure > "$log" 2>&1 || red=1
     echo "gs_cache: $(ctest_count "$log")"
+    # ob_diag plugin tests (native/ob_diag): the diagnostics that moved out of the engine.
+    log="$OB_LOGS/ob-test-ob_diag.log"
+    if diag_build > /dev/null && [ -f "$OB_DIAG_BUILD/ob_diag_tests.exe" ]; then
+        (cd "$OB_DIAG_BUILD" && ./ob_diag_tests.exe) > "$log" 2>&1
+        p=$(sed -n 's/^Passed: \([0-9]*\).*/\1/p' "$log" | tail -1); t=$(sed -n 's/^Total Tests: \([0-9]*\).*/\1/p' "$log" | tail -1)
+        echo "ob_diag: ${p:-0}/${t:-0}"
+        [ -n "$t" ] && [ "$p" = "$t" ] && [ "$t" -gt 0 ] || { red=1; grep -a 'Failed\]' "$log" | head -20; }
+    else
+        echo "ob_diag: 0/0 (build failed: $OB_LOGS/ob-diag-build.log)"; red=1
+    fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
 }
@@ -148,21 +176,33 @@ cmd_recompile() {
     rm -rf "$rd/resources/shaders" && mkdir -p "$rd/resources" &&
         cp -r "$px/bin/resources/shaders" "$rd/resources/" &&
         cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$rd/" || { echo "runner: pcsx2 staging failed"; return 1; }
+    diag_build || return 1
     [ $bad = 0 ] || { echo "recompile errors > 0"; return 1; }
 }
 
 cmd_boot() {
-    local secs=200 tag=latest script=
+    local secs=200 tag=latest script= diag=1
     while [ $# -gt 0 ]; do
         case $1 in
             --secs) secs=$2; shift 2 ;;
             --tag) tag=$2; shift 2 ;;
             --script) script=$2; shift 2 ;;
+            --no-diag) diag=0; shift ;;
+            --hidden) export PS2X_HIDDEN=1; shift ;;
             *) echo "boot: unknown arg $1"; return 2 ;;
         esac
     done
     local logs; logs=$(cygpath -w "$OB_LOGS")
     local frames="$OB_ROOT/frames"
+    # Diagnostics plugin (native/ob_diag): scripts, frame dumps, PS2X_FRAME_TIME/PC_SAMPLE/VU1_CAPTURE need it.
+    # --no-diag runs the engine alone, as a play build (the plugin is never staged beside the exe).
+    if [ $diag = 1 ]; then
+        [ -f "$OB_DIAG_BUILD/ob_diag.dll" ] || { echo "boot: $OB_DIAG_BUILD/ob_diag.dll missing (ob.sh recompile)"; return 2; }
+        export PS2X_DIAG; PS2X_DIAG=$(cygpath -w "$OB_DIAG_BUILD/ob_diag.dll")
+    else
+        [ -z "$script" ] || { echo "boot: --script needs the diagnostics plugin (drop --no-diag)"; return 2; }
+        unset PS2X_DIAG
+    fi
     if [ -n "$script" ]; then
         # Scripted boot: hidden window, script owns the pad, dumps only in capture steps to frames-<tag>.
         # The script's own timeout ends the run (exit 3); --secs (default 900 here) is only a safety kill.
@@ -311,5 +351,5 @@ case ${1:-} in
     pcsx2-gs) cmd_pcsx2_gs ;;
     vucompare) shift; cmd_vucompare "$@" ;;
     depcheck) cmd_depcheck ;;
-    *) sed -n '6,17p' "$0"; exit 2 ;;
+    *) sed -n '6,19p' "$0"; exit 2 ;;
 esac

@@ -1,0 +1,2843 @@
+From abb45ea98d7cb5acd9d0b6e3b291e14561a4f0e4 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:22:27 -0400
+Subject: [PATCH] Runtime: remove the in-engine diagnostics (now the ob_diag
+ plugin)
+
+The engine keeps only the hook points of runtime/ps2_diag_hooks.h. Removed,
+with their environment variables: the scripted input player
+(PS2X_INPUT_SCRIPT, ps2_input_script), the frame dump (PS2X_FRAME_DUMP_DIR,
+ps2_frame_dump), the frame-time log (PS2X_FRAME_TIME, EeScheduler), the guest
+PC sampler (PS2X_PC_SAMPLE, ps2_pc_sampler) and the VU1 capture
+(PS2X_VU1_CAPTURE, ps2_vu1_capture with its PATH1 tap). The plugin implements
+them over the hooks; without a plugin the variables do nothing.
+
+- EeScheduler: no frame-time file or sampler; sums its idle (pacing) wait only
+  when a plugin is loaded, for onVsync.
+- PS2Runtime: frames reach the plugin's onFrame only (external GS: copied only
+  when a plugin is loaded); the external GS frame demand is the plugin's
+  wantsFrame; the host loop asks onHostFrame/onShutdown; the window is hidden
+  only by PS2X_HIDDEN=1 (a script no longer implies it).
+- Pad: a plugin that owns the pad replaces the host pad; nothing else.
+- Tests: the input script, frame dump, frame-time, PC sampler and VU1 capture
+  tests move to the plugin's own test program; new tests check that, without a
+  plugin, PS2X_FRAME_TIME/PS2X_PC_SAMPLE write no file and PS2X_VU1_CAPTURE
+  creates no directory.
+---
+ ps2xRuntime/CMakeLists.txt                    |   4 -
+ ps2xRuntime/include/runtime/ee_scheduler.h    |  19 +-
+ ps2xRuntime/include/runtime/ps2_frame_dump.h  |  14 -
+ .../include/runtime/ps2_input_script.h        | 131 -----
+ ps2xRuntime/include/runtime/ps2_pc_sampler.h  |  92 ----
+ ps2xRuntime/include/runtime/ps2_vu1_capture.h | 185 -------
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp    |  87 +---
+ ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp    |   2 -
+ ps2xRuntime/src/lib/ps2_frame_dump.cpp        |  45 --
+ ps2xRuntime/src/lib/ps2_input_script.cpp      | 472 ------------------
+ ps2xRuntime/src/lib/ps2_pad.cpp               |  10 -
+ ps2xRuntime/src/lib/ps2_pc_sampler.cpp        | 142 ------
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 165 +-----
+ ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp    | 305 -----------
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp       |   4 -
+ ps2xTest/CMakeLists.txt                       |   2 -
+ ps2xTest/src/main.cpp                         |   4 -
+ ps2xTest/src/ps2_frame_dump_tests.cpp         |  61 ---
+ ps2xTest/src/ps2_gs_external_tests.cpp        | 194 +------
+ ps2xTest/src/ps2_input_script_tests.cpp       | 243 ---------
+ ps2xTest/src/ps2_vu1_tests.cpp                |  81 +--
+ 21 files changed, 65 insertions(+), 2197 deletions(-)
+ delete mode 100644 ps2xRuntime/include/runtime/ps2_frame_dump.h
+ delete mode 100644 ps2xRuntime/include/runtime/ps2_input_script.h
+ delete mode 100644 ps2xRuntime/include/runtime/ps2_pc_sampler.h
+ delete mode 100644 ps2xRuntime/include/runtime/ps2_vu1_capture.h
+ delete mode 100644 ps2xRuntime/src/lib/ps2_frame_dump.cpp
+ delete mode 100644 ps2xRuntime/src/lib/ps2_input_script.cpp
+ delete mode 100644 ps2xRuntime/src/lib/ps2_pc_sampler.cpp
+ delete mode 100644 ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp
+ delete mode 100644 ps2xTest/src/ps2_frame_dump_tests.cpp
+ delete mode 100644 ps2xTest/src/ps2_input_script_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index c411915..a567270 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -390,9 +390,6 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
+     src/lib/ps2_diag.cpp
+-    src/lib/ps2_frame_dump.cpp
+-    src/lib/ps2_pc_sampler.cpp
+-    src/lib/ps2_input_script.cpp
+     src/lib/gs/ps2_gs_memory.cpp
+     src/lib/gs/gs_frontend.cpp
+     src/lib/gs/gs_cpu_backend.cpp
+@@ -404,7 +401,6 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_vfs.cpp
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
+-    src/lib/vu/ps2_vu1_capture.cpp
+     src/lib/vu/ps2_vu1_external.cpp
+     src/lib/vu/ps2_vu1_core.cpp
+     src/lib/vu/ps2_vu1_upper.cpp
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 580effa..8dbf65d 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -1,7 +1,6 @@
+ #pragma once
+ 
+ #include "ps2_runtime.h"
+-#include "runtime/ps2_pc_sampler.h"
+ 
+ class PS2DiagHooks;
+ 
+@@ -458,20 +457,8 @@ private:
+     EeKernelSnapshot m_snapshot;
+     uint64_t m_snapshotSequence = 0;
+ 
+-    // PS2X_FRAME_TIME=<path> (read once in reset): one CSV line per VBlankStart,
+-    // "tick,wall_us,busy_us", wall = since the previous VBlankStart, busy = wall
+-    // minus the time spent blocked in the pacing wait. Unset: one bool check.
+-    void logFrameTime();
+-    bool m_frameTimeLogEnabled = false;
+-    std::ofstream m_frameTimeLog;
+-    uint64_t m_pacingWaitNs = 0;
+-    uint64_t m_frameTimePrevWaitNs = 0;
+-    std::chrono::steady_clock::time_point m_frameTimePrevVBlank{};
+-    bool m_frameTimeHavePrev = false;
+-
+-    // PS2X_PC_SAMPLE=<path> (read once in reset): guest PC sampler, null when unset.
+-    std::unique_ptr<ps2x::pcsample::Sampler> m_pcSampler;
+-
+-    // Diagnostics plugin hooks (runtime/ps2_diag_hooks.h), read once in reset; null = no plugin.
++    // Diagnostics plugin hooks (runtime/ps2_diag_hooks.h), read once in reset; null = no plugin. With a plugin
++    // the scheduler sums its idle (pacing) wait for PS2DiagHooks::onVsync.
+     PS2DiagHooks *m_diag = nullptr;
++    uint64_t m_pacingWaitNs = 0;
+ };
+diff --git a/ps2xRuntime/include/runtime/ps2_frame_dump.h b/ps2xRuntime/include/runtime/ps2_frame_dump.h
+deleted file mode 100644
+index 639c17a..0000000
+--- a/ps2xRuntime/include/runtime/ps2_frame_dump.h
++++ /dev/null
+@@ -1,14 +0,0 @@
+-#ifndef PS2_FRAME_DUMP_H
+-#define PS2_FRAME_DUMP_H
+-
+-#include <cstdint>
+-
+-// Writes one presented RGBA8 frame as <dir>/frame-<vsyncTick, 8 digits>.png at its native size.
+-// Returns false on a null or empty dir, null pixels, a zero size, or a failed write.
+-bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height);
+-
+-// Writes one presented RGBA8 frame as <dir>/<fileName> at its native size (creates dir).
+-// Returns false on a null or empty dir or fileName, null pixels, a zero size, or a failed write.
+-bool ps2DumpPresentedFrameNamed(const char *dir, const char *fileName, const uint8_t *rgba, uint32_t width, uint32_t height);
+-
+-#endif
+diff --git a/ps2xRuntime/include/runtime/ps2_input_script.h b/ps2xRuntime/include/runtime/ps2_input_script.h
+deleted file mode 100644
+index 3e3ef95..0000000
+--- a/ps2xRuntime/include/runtime/ps2_input_script.h
++++ /dev/null
+@@ -1,131 +0,0 @@
+-#ifndef PS2_INPUT_SCRIPT_H
+-#define PS2_INPUT_SCRIPT_H
+-
+-#include <atomic>
+-#include <cstdint>
+-#include <functional>
+-#include <mutex>
+-#include <ostream>
+-#include <string>
+-#include <vector>
+-
+-// Scripted pad input (PS2X_INPUT_SCRIPT=<file>). One step per line, '#' comments, numbers dec or 0x:
+-//   timeout <secs>                        header, whole-script wall clock (default 600)
+-//   wait vsync <n>
+-//   wait mem <ref> <1|2|4> <==|!=> <value>  ref = <addr> or *<ptraddr>+<off> (null pointer = not satisfied)
+-//   press <btn[+btn..]> <held vsyncs>       then released for 1 vsync before the next step
+-//   capture <screen> <n>                  completes after n frames dumped as <screen>-<k>.png
+-//   watch <ref> <1|2|4>                   non-blocking; logs every change for the rest of the run
+-//   log <text>
+-//   quit
+-// Threads: onVSync (vsync thread) steps; buttons() (game thread) reads; takeCapture/commitCapture and
+-// timedOut (main thread). No raylib dependency.
+-class Ps2InputScript
+-{
+-public:
+-    enum class Op
+-    {
+-        WaitVsync,
+-        WaitMem,
+-        Press,
+-        Capture,
+-        Watch,
+-        Log,
+-        Quit
+-    };
+-
+-    struct MemRef
+-    {
+-        uint32_t addr = 0;
+-        bool deref = false;
+-        uint32_t offset = 0;
+-    };
+-
+-    struct Step
+-    {
+-        Op op = Op::Log;
+-        int line = 0;
+-        std::string text;
+-        MemRef ref;
+-        uint32_t width = 4;
+-        bool equal = true;
+-        uint32_t value = 0;
+-        uint16_t mask = 0;     // press: pressed buttons (bits of the active-low pad word)
+-        uint32_t count = 0;    // wait vsync n, press held vsyncs, capture n
+-        std::string name;      // capture screen, log text
+-    };
+-
+-    // Reads <width> bytes of guest memory at a guest address; false when out of range.
+-    using ReadMem = std::function<bool(uint32_t addr, uint32_t width, uint32_t &out)>;
+-
+-    // Parses a whole script; on failure returns false with "line <L>: <reason>" in error.
+-    bool parse(const std::string &text, std::string &error);
+-    bool loadFile(const std::string &path, std::string &error);
+-
+-    const std::vector<Step> &steps() const { return m_steps; }
+-    double timeoutSeconds() const { return m_timeoutSeconds; }
+-    bool hasCaptureSteps() const;
+-
+-    // Vsync thread: advance the script at guest vsync <tick>.
+-    void onVSync(uint64_t tick, const ReadMem &read, std::ostream &log);
+-
+-    // Game thread: active-low pad button word (0xFFFF = nothing held).
+-    uint16_t buttons() const { return m_buttons.load(std::memory_order_acquire); }
+-    bool quitRequested() const { return m_quit.load(std::memory_order_acquire); }
+-
+-    // Main thread: when a capture step is active and <latchedTick> is new, reserves frame k and
+-    // returns true with the file name "<screen>-<k>.png"; commitCapture(true) counts the frame as
+-    // written, commitCapture(false) gives k back for the next tick.
+-    // Frames older than the capture step's first tick are refused (an external GS frame can be stale).
+-    bool takeCapture(uint64_t latchedTick, std::string &fileName, std::string &screen, uint32_t &k);
+-    void commitCapture(bool written);
+-    // Any thread: a capture step is active and still needs frames (the external GS snapshot demand).
+-    bool captureWanted() const;
+-
+-    // Main thread: wall-clock timeout, measured from start(). On timeout, message holds
+-    // "[script] TIMEOUT step <i> line <L>: <text>".
+-    void start(double nowSeconds);
+-    bool timedOut(double nowSeconds, std::string &message) const;
+-
+-    // Main thread, after the run loop ends: 0 once quit was reached; otherwise 4 with message
+-    // "[script] game ended before quit at step <i> line <L>: <text>".
+-    int loopEndExitCode(std::string &message) const;
+-
+-private:
+-    struct Watch
+-    {
+-        MemRef ref;
+-        uint32_t width = 4;
+-        bool valid = false;
+-        uint32_t value = 0;
+-        std::string label;
+-    };
+-
+-    bool readRef(const MemRef &ref, uint32_t width, const ReadMem &read, uint32_t &out) const;
+-    void beginStep(uint64_t tick, const ReadMem &read, std::ostream &log);
+-
+-    std::vector<Step> m_steps;
+-    double m_timeoutSeconds = 600.0;
+-    double m_startSeconds = 0.0;
+-
+-    mutable std::mutex m_mutex;
+-    size_t m_index = 0;
+-    bool m_begun = false;
+-    uint64_t m_stepTick = 0;
+-    std::vector<Watch> m_watches;
+-    bool m_captureActive = false;
+-    uint32_t m_captureTaken = 0;
+-    uint32_t m_captureWritten = 0;
+-    uint64_t m_lastCaptureTick = 0;
+-    uint64_t m_captureStartTick = 0;
+-    bool m_hasCaptureTick = false;
+-
+-    std::atomic<uint16_t> m_buttons{0xFFFFu};
+-    std::atomic<bool> m_quit{false};
+-};
+-
+-// The process-wide script (nullptr without PS2X_INPUT_SCRIPT).
+-Ps2InputScript *ps2ActiveInputScript();
+-void ps2SetActiveInputScript(Ps2InputScript *script);
+-
+-#endif
+diff --git a/ps2xRuntime/include/runtime/ps2_pc_sampler.h b/ps2xRuntime/include/runtime/ps2_pc_sampler.h
+deleted file mode 100644
+index a6e45c1..0000000
+--- a/ps2xRuntime/include/runtime/ps2_pc_sampler.h
++++ /dev/null
+@@ -1,92 +0,0 @@
+-#pragma once
+-
+-// PS2X_PC_SAMPLE=<path.csv>: guest PC sampling profiler.
+-//
+-// When the variable is set, EeScheduler::reset starts a host thread that samples, at ~1 kHz
+-// (the host sleep granularity: 1 ms once the process runs with a 1 ms timer, as raylib sets),
+-// the pc of the guest context the EE executor is running, the guest thread id, the vsync tick,
+-// and which of a few runtime sections the executor is inside (flags below). The aggregate is
+-// written as CSV "tick,tid,pc,count,vu1,iop,gs,gsvsync": one row per (tick bucket, thread, pc),
+-// tick = first vsync of a kTickBucket-wide bucket, count = samples, the flag columns = how
+-// many of those samples had the flag set. pc 0 / tid 0 = the executor was not inside guest
+-// code (scheduler, event processing, idle wait). The file is rewritten every ~2 s (via
+-// <path>.tmp + rename) and at stop, so a killed run loses at most the last two seconds.
+-//
+-// Reads of ctx->pc race with the generated code's plain stores; that is accepted for a
+-// profiler (a sample may see a stale pc). The read itself goes through std::atomic_ref so it is
+-// a real load each time. Unset: no thread; each flag site costs one relaxed bool load.
+-
+-#include <atomic>
+-#include <cstdint>
+-#include <memory>
+-#include <string>
+-
+-struct R5900Context;
+-
+-namespace ps2x::pcsample
+-{
+-    enum Flag : uint32_t
+-    {
+-        Vu1 = 0,     // VU1Interpreter::run (VU1 microcode)
+-        Iop = 1,     // IOP subsystem calls on the EE executor (RPC, SIF transfer, runEeCycles)
+-        Gs = 2,      // PS2ExternalGS::gifPacket from the GIF arbiter (PCSX2 GS)
+-        GsVsync = 3, // PS2ExternalGS::vsync + snapshot from the scheduler's VBlankStart (PCSX2 GS)
+-        kFlagCount = 4
+-    };
+-
+-    constexpr uint64_t kTickBucket = 64u;
+-
+-    struct State
+-    {
+-        std::atomic<bool> enabled{false};
+-        std::atomic<R5900Context *> context{nullptr}; // guest context being executed, or null
+-        std::atomic<int32_t> threadId{0};
+-        std::atomic<const std::atomic<uint64_t> *> tick{nullptr};
+-        std::atomic<int32_t> depth[kFlagCount]{};
+-    };
+-
+-    State &state() noexcept;
+-
+-    // RAII flag: counts nesting, so overlapping scopes of one flag are fine.
+-    class Scope
+-    {
+-    public:
+-        explicit Scope(Flag flag) noexcept
+-            : m_flag(flag), m_on(state().enabled.load(std::memory_order_relaxed))
+-        {
+-            if (m_on)
+-                state().depth[m_flag].fetch_add(1, std::memory_order_relaxed);
+-        }
+-        ~Scope()
+-        {
+-            if (m_on)
+-                state().depth[m_flag].fetch_sub(1, std::memory_order_relaxed);
+-        }
+-        Scope(const Scope &) = delete;
+-        Scope &operator=(const Scope &) = delete;
+-
+-    private:
+-        Flag m_flag;
+-        bool m_on;
+-    };
+-
+-    class Sampler
+-    {
+-    public:
+-        // Starts the sampling thread writing to path; tickSource is read for the vsync tick.
+-        Sampler(std::string path, const std::atomic<uint64_t> *tickSource);
+-        ~Sampler(); // stop()
+-        void stop(); // joins the thread and writes the final CSV; idempotent
+-
+-        Sampler(const Sampler &) = delete;
+-        Sampler &operator=(const Sampler &) = delete;
+-
+-        struct Impl;
+-
+-    private:
+-        std::unique_ptr<Impl> m_impl;
+-    };
+-
+-    // Reads PS2X_PC_SAMPLE; returns a running sampler or null when unset/empty.
+-    std::unique_ptr<Sampler> startFromEnvironment(const std::atomic<uint64_t> *tickSource);
+-}
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1_capture.h b/ps2xRuntime/include/runtime/ps2_vu1_capture.h
+deleted file mode 100644
+index edbf8b9..0000000
+--- a/ps2xRuntime/include/runtime/ps2_vu1_capture.h
++++ /dev/null
+@@ -1,185 +0,0 @@
+-#pragma once
+-
+-// PS2X_VU1_CAPTURE=<dir>[,N[,K]]: VU1 microprogram capture.
+-//
+-// When the variable names a directory, every VU1 run started by VIF1 MSCAL/MSCALF/MSCNT
+-// (PS2Runtime's two callbacks) is offered to a Recorder. A run is written when
+-//   - fewer than N files were written so far (default 200),
+-//   - its key (kind, start pc, hash of the 16 KB micro memory) has fewer than K files (default 4),
+-//   - no run with the same inputs (key + data memory + VU1 state + TOP/ITOP/FBRST) was written.
+-// One file per written run, "<dir>/vu1-<index6>-<pc4>.cap", little-endian:
+-//   FileHeader | code[codeBytes] | dataBefore[dataBytes] | StateRecord before |
+-//   dataAfter[dataBytes] | StateRecord after | packetCount x { u32 size, size bytes }
+-// The packets are every PATH1 packet (XGKICK) the run sent, in order. "<dir>/summary.txt" is
+-// rewritten every 4096 runs and at each written file: totals plus one line per key seen
+-// (pc, code hash, code generation first seen, runs, interpreter cycles), so the stream of
+-// unwritten runs is still accounted for. Unset: no Recorder, the callbacks cost one null check.
+-//
+-// The PATH1 tap below is also how an offline tool collects the interpreter's packets.
+-
+-#include <cstdint>
+-#include <cstring>
+-#include <memory>
+-#include <string>
+-
+-#include "runtime/ps2_vu1.h"
+-
+-namespace ps2x::vu1capture
+-{
+-    constexpr char kMagic[8] = {'O', 'B', 'V', 'U', '1', 'C', 'A', 'P'};
+-    constexpr uint32_t kVersion = 1u;
+-
+-    enum Kind : uint32_t
+-    {
+-        Mscal = 0, // MSCAL / MSCALF: VU1Interpreter::execute(startPC)
+-        Mscnt = 1  // MSCNT: VU1Interpreter::resume (continues at state.pc)
+-    };
+-
+-    enum HeaderFlags : uint32_t
+-    {
+-        FlagBudgetHit = 1u << 0 // the run used its whole cycle budget (program not ended)
+-    };
+-
+-    // VU1State with floats as raw bits and a fixed layout.
+-    struct StateRecord
+-    {
+-        uint32_t vf[32][4];
+-        int32_t vi[16];
+-        uint32_t acc[4];
+-        uint32_t q, p, i, r;
+-        uint32_t pc, mac, clip, status;
+-        uint64_t cycles;
+-        uint8_t ebit, haltAfterDelaySlot, dBitEnabled, tBitEnabled;
+-        uint8_t stoppedByD, stoppedByT, branchPending, reserved0;
+-        uint32_t top, itop, branchTarget, branchDelay;
+-    };
+-    static_assert(sizeof(StateRecord) == 512 + 64 + 16 + 16 + 16 + 8 + 8 + 16, "StateRecord layout");
+-
+-    struct FileHeader
+-    {
+-        char magic[8];
+-        uint32_t version;
+-        uint32_t headerBytes;   // sizeof(FileHeader)
+-        uint32_t kind;          // Kind
+-        uint32_t flags;         // HeaderFlags
+-        uint32_t runIndex;      // 0-based count of VU1 runs seen before this one
+-        uint32_t startPC;       // MSCAL: byte address passed to execute; MSCNT: state.pc on entry
+-        uint32_t top, itop;     // VIF1 TOP/ITOP passed to the run
+-        uint32_t fbrst;         // EE-side VU0 FBRST (D enable bit 10, T enable bit 11)
+-        uint32_t vpuStatBefore; // EE-side VPU_STAT before / after the callback
+-        uint32_t vpuStatAfter;
+-        uint32_t maxCycles;     // cycle budget passed to the run
+-        uint64_t cyclesRun;     // interpreter cycles the run took (state.cycles after - before)
+-        uint64_t codeGeneration;// PS2Memory::getVU1CodeGeneration() at the run
+-        uint64_t codeHash;      // hash64 of the 16 KB micro memory
+-        uint64_t inputHash;     // dedupe hash of all inputs
+-        uint32_t codeBytes, dataBytes, stateBytes, packetCount;
+-    };
+-    static_assert(sizeof(FileHeader) == 104, "FileHeader layout");
+-
+-    inline uint32_t floatBits(float f)
+-    {
+-        uint32_t u;
+-        std::memcpy(&u, &f, 4);
+-        return u;
+-    }
+-    inline float bitsFloat(uint32_t u)
+-    {
+-        float f;
+-        std::memcpy(&f, &u, 4);
+-        return f;
+-    }
+-
+-    inline StateRecord toRecord(const VU1State &s)
+-    {
+-        StateRecord r{};
+-        for (int reg = 0; reg < 32; ++reg)
+-            for (int lane = 0; lane < 4; ++lane)
+-                r.vf[reg][lane] = floatBits(s.vf[reg][lane]);
+-        for (int k = 0; k < 16; ++k)
+-            r.vi[k] = s.vi[k];
+-        for (int lane = 0; lane < 4; ++lane)
+-            r.acc[lane] = floatBits(s.acc[lane]);
+-        r.q = floatBits(s.q);
+-        r.p = floatBits(s.p);
+-        r.i = floatBits(s.i);
+-        r.r = s.r;
+-        r.pc = s.pc;
+-        r.mac = s.mac;
+-        r.clip = s.clip;
+-        r.status = s.status;
+-        r.cycles = s.cycles;
+-        r.ebit = s.ebit;
+-        r.haltAfterDelaySlot = s.haltAfterDelaySlot;
+-        r.dBitEnabled = s.dBitEnabled;
+-        r.tBitEnabled = s.tBitEnabled;
+-        r.stoppedByD = s.stoppedByD;
+-        r.stoppedByT = s.stoppedByT;
+-        r.branchPending = s.branchPending;
+-        r.top = s.top;
+-        r.itop = s.itop;
+-        r.branchTarget = s.branchTarget;
+-        r.branchDelay = s.branchDelay;
+-        return r;
+-    }
+-
+-    inline void fromRecord(const StateRecord &r, VU1State &s)
+-    {
+-        for (int reg = 0; reg < 32; ++reg)
+-            for (int lane = 0; lane < 4; ++lane)
+-                s.vf[reg][lane] = bitsFloat(r.vf[reg][lane]);
+-        for (int k = 0; k < 16; ++k)
+-            s.vi[k] = r.vi[k];
+-        for (int lane = 0; lane < 4; ++lane)
+-            s.acc[lane] = bitsFloat(r.acc[lane]);
+-        s.q = bitsFloat(r.q);
+-        s.p = bitsFloat(r.p);
+-        s.i = bitsFloat(r.i);
+-        s.r = r.r;
+-        s.pc = r.pc;
+-        s.mac = r.mac;
+-        s.clip = r.clip;
+-        s.status = r.status;
+-        s.cycles = r.cycles;
+-        s.ebit = r.ebit != 0;
+-        s.haltAfterDelaySlot = r.haltAfterDelaySlot != 0;
+-        s.dBitEnabled = r.dBitEnabled != 0;
+-        s.tBitEnabled = r.tBitEnabled != 0;
+-        s.stoppedByD = r.stoppedByD != 0;
+-        s.stoppedByT = r.stoppedByT != 0;
+-        s.branchPending = r.branchPending != 0;
+-        s.top = r.top;
+-        s.itop = r.itop;
+-        s.branchTarget = r.branchTarget;
+-        s.branchDelay = r.branchDelay;
+-    }
+-
+-    uint64_t hash64(const void *data, size_t bytes, uint64_t seed = 0x9E3779B97F4A7C15ull);
+-
+-    // PATH1 tap: VU1Interpreter::finishXgkick calls notifyPath1 for every XGKICK packet it sends.
+-    using Path1TapFn = void (*)(void *ctx, const uint8_t *data, uint32_t size);
+-    void setPath1Tap(Path1TapFn fn, void *ctx);
+-    void notifyPath1(const uint8_t *data, uint32_t size);
+-
+-    class Recorder
+-    {
+-    public:
+-        // Null unless PS2X_VU1_CAPTURE names a directory (created if missing).
+-        static std::shared_ptr<Recorder> fromEnv();
+-        Recorder(std::string dir, uint32_t maxFiles, uint32_t maxPerKey);
+-        ~Recorder();
+-
+-        // Around one VU1 run. begin() decides whether the run is written; end() writes it.
+-        void begin(Kind kind, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst,
+-                   uint32_t vpuStat, uint32_t maxCycles, uint64_t codeGeneration,
+-                   const uint8_t *code, const uint8_t *data, const VU1State &state);
+-        void end(const uint8_t *data, const VU1State &state, uint32_t vpuStat);
+-
+-        uint32_t filesWritten() const;
+-        uint64_t runsSeen() const;
+-
+-    private:
+-        struct Impl;
+-        std::unique_ptr<Impl> m_impl;
+-    };
+-}
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c5e824a..9f8ace9 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -4,8 +4,6 @@
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_diag_hooks.h"
+-#include "runtime/ps2_input_script.h"
+-#include "runtime/ps2_pc_sampler.h"
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -87,8 +85,6 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
+ EeScheduler::~EeScheduler()
+ {
+     requestStop();
+-    if (m_frameTimeLog.is_open())
+-        m_frameTimeLog.flush();
+ }
+ 
+ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+@@ -142,27 +138,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     m_runtime.memory().gs().vsyncTick.store(0u, std::memory_order_release);
+     m_runtime.memory().resetEeTimers();
+ 
+-    // PS2X_FRAME_TIME=<path>: per-vsync frame timing CSV. Read once here.
+-    if (m_frameTimeLog.is_open())
+-        m_frameTimeLog.close();
+-    m_frameTimeLogEnabled = false;
++    // Diagnostics plugin (runtime/ps2_diag_hooks.h): read once here.
+     m_pacingWaitNs = 0u;
+-    m_frameTimePrevWaitNs = 0u;
+-    m_frameTimeHavePrev = false;
+-    if (const char *frameTimePath = std::getenv("PS2X_FRAME_TIME"); frameTimePath && *frameTimePath)
+-    {
+-        m_frameTimeLog.open(frameTimePath, std::ios::out | std::ios::trunc);
+-        if (m_frameTimeLog.is_open())
+-        {
+-            m_frameTimeLog << "tick,wall_us,busy_us\n";
+-            m_frameTimeLog.flush();
+-            m_frameTimeLogEnabled = true;
+-        }
+-    }
+-
+-    // PS2X_PC_SAMPLE=<path>: guest PC sampling profiler (runtime/ps2_pc_sampler.h). Read once here.
+-    m_pcSampler.reset();
+-    m_pcSampler = ps2x::pcsample::startFromEnvironment(&m_runtime.memory().gs().vsyncTick);
+     m_diag = ps2DiagHooks();
+ 
+     GuestThread main{};
+@@ -328,16 +305,9 @@ void EeScheduler::run()
+         {
+             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+             m_guestExecuting.store(true, std::memory_order_release);
+-            if (m_pcSampler)
+-            {
+-                ps2x::pcsample::state().threadId.store(running->id, std::memory_order_relaxed);
+-                ps2x::pcsample::state().context.store(&context, std::memory_order_release);
+-            }
+             if (m_diag)
+                 m_diag->onGuestEnter(&context.pc, running->id);
+             function(m_rdram, &context, &m_runtime);
+-            if (m_pcSampler)
+-                ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
+             if (m_diag)
+                 m_diag->onGuestLeave();
+             m_guestExecuting.store(false, std::memory_order_release);
+@@ -345,8 +315,6 @@ void EeScheduler::run()
+         }
+         catch (const EeDispatcherTransfer &)
+         {
+-            if (m_pcSampler)
+-                ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
+             if (m_diag)
+                 m_diag->onGuestLeave();
+             m_guestExecuting.store(false, std::memory_order_release);
+@@ -354,8 +322,6 @@ void EeScheduler::run()
+         }
+         catch (...)
+         {
+-            if (m_pcSampler)
+-                ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
+             if (m_diag)
+                 m_diag->onGuestLeave();
+             m_guestExecuting.store(false, std::memory_order_release);
+@@ -378,8 +344,6 @@ void EeScheduler::run()
+ 
+     m_guestExecuting.store(false, std::memory_order_release);
+     m_running.store(false, std::memory_order_release);
+-    if (m_pcSampler)
+-        m_pcSampler->stop(); // writes the final CSV; the process may exit before destruction
+     if (m_diag)
+         m_diag->onRunEnd();
+     copyMainContextToRuntime();
+@@ -1859,7 +1823,7 @@ void EeScheduler::processDueDeadlines()
+                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
+                                      { return !m_events.empty() ||
+                                               m_stopRequested.load(std::memory_order_acquire); });
+-                if (m_frameTimeLogEnabled || m_diag)
++                if (m_diag)
+                 {
+                     // Time blocked here is pacing, not cost: logFrameTime subtracts it.
+                     m_pacingWaitNs += static_cast<uint64_t>(
+@@ -1921,26 +1885,6 @@ void EeScheduler::processDueDeadlines()
+     }
+ }
+ 
+-void EeScheduler::logFrameTime()
+-{
+-    const auto now = std::chrono::steady_clock::now();
+-    uint64_t wallUs = 0u;
+-    uint64_t busyUs = 0u;
+-    if (m_frameTimeHavePrev)
+-    {
+-        const uint64_t wallNs = static_cast<uint64_t>(
+-            std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_frameTimePrevVBlank).count());
+-        const uint64_t waitNs = m_pacingWaitNs - m_frameTimePrevWaitNs;
+-        wallUs = wallNs / 1000u;
+-        busyUs = (wallNs > waitNs ? wallNs - waitNs : 0u) / 1000u;
+-    }
+-    m_frameTimeLog << m_vsyncTick << ',' << wallUs << ',' << busyUs << '\n';
+-    m_frameTimeLog.flush();
+-    m_frameTimePrevVBlank = now;
+-    m_frameTimePrevWaitNs = m_pacingWaitNs;
+-    m_frameTimeHavePrev = true;
+-}
+-
+ void EeScheduler::processEvent(const EeEvent &event)
+ {
+     switch (event.type)
+@@ -1951,8 +1895,6 @@ void EeScheduler::processEvent(const EeEvent &event)
+     case EeEventType::VBlankStart:
+     {
+         ++m_vsyncTick;
+-        if (m_frameTimeLogEnabled)
+-            logFrameTime();
+         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+         if ((m_vsyncTick & 1u) != 0u)
+         {
+@@ -1965,7 +1907,6 @@ void EeScheduler::processEvent(const EeEvent &event)
+         PS2ExternalGS *const externalGS = ps2ExternalGS();
+         if (externalGS)
+         {
+-            ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
+             PS2DiagSectionScope diagGsVsync(PS2DiagSection::GsVsync);
+             externalGS->vsync(m_vsyncTick, m_runtime.memory().gs());
+         }
+@@ -1980,28 +1921,12 @@ void EeScheduler::processEvent(const EeEvent &event)
+         }
+         m_vsyncFlagAddress = 0u;
+         m_vsyncTickAddress = 0u;
+-        if (Ps2InputScript *script = ps2ActiveInputScript())
+-        {
+-            const uint8_t *rdram = m_rdram;
+-            script->onVSync(m_vsyncTick,
+-                            [rdram](uint32_t addr, uint32_t width, uint32_t &out)
+-                            {
+-                                const uint32_t physical = addr & 0x01FFFFFFu;
+-                                if (!rdram || physical > PS2_RAM_SIZE - width)
+-                                    return false;
+-                                out = 0u;
+-                                std::memcpy(&out, rdram + physical, width);
+-                                return true;
+-                            },
+-                            std::cout);
+-        }
+         if (m_diag)
+             m_diag->onVsync(m_vsyncTick, m_pacingWaitNs);
+-        // Snapshot (a GS readback) only when a consumer wants this frame; after the script step, so a capture
+-        // step that begins at this tick gets this tick's frame.
++        // Snapshot (a GS readback) only when a consumer wants this frame; after onVsync, so a capture step that
++        // begins at this tick gets this tick's frame.
+         if (externalGS && ps2ExternalGSFrameWanted(m_vsyncTick))
+         {
+-            ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
+             PS2DiagSectionScope diagGsVsync(PS2DiagSection::GsVsync);
+             PresentationFrame frame{};
+             if (externalGS->snapshot(frame.pixels, frame.width, frame.height))
+@@ -2129,7 +2054,7 @@ void EeScheduler::waitForEvent()
+     {
+         m_eventCv.wait(lock, [this]()
+                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+-        if (m_frameTimeLogEnabled || m_diag)
++        if (m_diag)
+         {
+             m_pacingWaitNs += static_cast<uint64_t>(
+                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStart).count());
+@@ -2166,7 +2091,7 @@ void EeScheduler::waitForEvent()
+     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                                { return !m_events.empty() ||
+                                                         m_stopRequested.load(std::memory_order_acquire); });
+-    if (m_frameTimeLogEnabled || m_diag)
++    if (m_diag)
+     {
+         m_pacingWaitNs += static_cast<uint64_t>(
+             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStart).count());
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index 16f5fe6..acaac6f 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -1,7 +1,6 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_diag_hooks.h"
+-#include "runtime/ps2_pc_sampler.h"
+ #include <algorithm>
+ #include <cstring>
+ 
+@@ -62,7 +61,6 @@ void GifArbiter::drain()
+         {
+             if (externalGS)
+             {
+-                ps2x::pcsample::Scope gsScope(ps2x::pcsample::Gs);
+                 PS2DiagSectionScope diagGs(PS2DiagSection::Gs);
+                 externalGS->gifPacket(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+             }
+diff --git a/ps2xRuntime/src/lib/ps2_frame_dump.cpp b/ps2xRuntime/src/lib/ps2_frame_dump.cpp
+deleted file mode 100644
+index daba872..0000000
+--- a/ps2xRuntime/src/lib/ps2_frame_dump.cpp
++++ /dev/null
+@@ -1,45 +0,0 @@
+-#include "runtime/ps2_frame_dump.h"
+-#include "ps2_host_backend.h"
+-
+-#include <cstdio>
+-#include <filesystem>
+-#include <string>
+-#include <system_error>
+-
+-bool ps2DumpPresentedFrameNamed(const char *dir, const char *fileName, const uint8_t *rgba, uint32_t width, uint32_t height)
+-{
+-    if (dir == nullptr || dir[0] == '\0' || fileName == nullptr || fileName[0] == '\0' || rgba == nullptr ||
+-        width == 0u || height == 0u)
+-    {
+-        return false;
+-    }
+-
+-    static std::string s_createdDir;
+-    if (s_createdDir != dir)
+-    {
+-        std::error_code ec;
+-        std::filesystem::create_directories(dir, ec);
+-        if (ec)
+-        {
+-            return false;
+-        }
+-        s_createdDir = dir;
+-    }
+-
+-    const std::string path = (std::filesystem::path(dir) / fileName).string();
+-
+-    Image image{};
+-    image.data = const_cast<uint8_t *>(rgba);
+-    image.width = static_cast<int>(width);
+-    image.height = static_cast<int>(height);
+-    image.mipmaps = 1;
+-    image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+-    return ExportImage(image, path.c_str());
+-}
+-
+-bool ps2DumpPresentedFrame(const char *dir, uint64_t vsyncTick, const uint8_t *rgba, uint32_t width, uint32_t height)
+-{
+-    char name[32];
+-    std::snprintf(name, sizeof(name), "frame-%08llu.png", static_cast<unsigned long long>(vsyncTick));
+-    return ps2DumpPresentedFrameNamed(dir, name, rgba, width, height);
+-}
+diff --git a/ps2xRuntime/src/lib/ps2_input_script.cpp b/ps2xRuntime/src/lib/ps2_input_script.cpp
+deleted file mode 100644
+index 131caa6..0000000
+--- a/ps2xRuntime/src/lib/ps2_input_script.cpp
++++ /dev/null
+@@ -1,472 +0,0 @@
+-#include "runtime/ps2_input_script.h"
+-
+-#include <cctype>
+-#include <fstream>
+-#include <limits>
+-#include <sstream>
+-
+-namespace
+-{
+-    struct ButtonName
+-    {
+-        const char *name;
+-        uint16_t mask;
+-    };
+-
+-    // Active-low pad bits, as ps2_pad.cpp.
+-    constexpr ButtonName kButtons[] = {
+-        {"up", 0x0010u},
+-        {"down", 0x0040u},
+-        {"left", 0x0080u},
+-        {"right", 0x0020u},
+-        {"start", 0x0008u},
+-        {"select", 0x0001u},
+-        {"cross", 0x4000u},
+-        {"circle", 0x2000u},
+-        {"square", 0x8000u},
+-        {"triangle", 0x1000u},
+-        {"l1", 0x0400u},
+-        {"r1", 0x0800u},
+-        {"l2", 0x0100u},
+-        {"r2", 0x0200u},
+-        {"l3", 0x0002u},
+-        {"r3", 0x0004u},
+-    };
+-
+-    bool parseNumber(const std::string &text, uint32_t &out)
+-    {
+-        if (text.empty())
+-            return false;
+-        uint64_t value = 0;
+-        size_t pos = 0;
+-        unsigned base = 10;
+-        if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+-        {
+-            base = 16;
+-            pos = 2;
+-        }
+-        for (; pos < text.size(); ++pos)
+-        {
+-            const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(text[pos])));
+-            unsigned digit = 0;
+-            if (c >= '0' && c <= '9')
+-                digit = static_cast<unsigned>(c - '0');
+-            else if (base == 16 && c >= 'a' && c <= 'f')
+-                digit = static_cast<unsigned>(c - 'a' + 10);
+-            else
+-                return false;
+-            value = value * base + digit;
+-            if (value > std::numeric_limits<uint32_t>::max())
+-                return false;
+-        }
+-        out = static_cast<uint32_t>(value);
+-        return true;
+-    }
+-
+-    bool parseRef(const std::string &text, Ps2InputScript::MemRef &ref)
+-    {
+-        ref = {};
+-        if (!text.empty() && text[0] == '*')
+-        {
+-            ref.deref = true;
+-            const std::string body = text.substr(1);
+-            const size_t plus = body.find('+');
+-            if (plus == std::string::npos)
+-                return parseNumber(body, ref.addr);
+-            return parseNumber(body.substr(0, plus), ref.addr) && parseNumber(body.substr(plus + 1), ref.offset);
+-        }
+-        return parseNumber(text, ref.addr);
+-    }
+-
+-    bool parseWidth(const std::string &text, uint32_t &width)
+-    {
+-        return parseNumber(text, width) && (width == 1u || width == 2u || width == 4u);
+-    }
+-
+-    bool parseButtons(const std::string &text, uint16_t &mask)
+-    {
+-        mask = 0;
+-        size_t start = 0;
+-        while (start <= text.size())
+-        {
+-            const size_t plus = text.find('+', start);
+-            const std::string name = text.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
+-            bool found = false;
+-            for (const ButtonName &button : kButtons)
+-            {
+-                if (name == button.name)
+-                {
+-                    mask |= button.mask;
+-                    found = true;
+-                    break;
+-                }
+-            }
+-            if (!found)
+-                return false;
+-            if (plus == std::string::npos)
+-                break;
+-            start = plus + 1;
+-        }
+-        return mask != 0;
+-    }
+-
+-    std::string hex(uint32_t value)
+-    {
+-        std::ostringstream out;
+-        out << "0x" << std::hex << value;
+-        return out.str();
+-    }
+-}
+-
+-bool Ps2InputScript::parse(const std::string &text, std::string &error)
+-{
+-    m_steps.clear();
+-    m_timeoutSeconds = 600.0;
+-    bool sawTimeout = false;
+-
+-    std::istringstream input(text);
+-    std::string raw;
+-    int lineNo = 0;
+-    while (std::getline(input, raw))
+-    {
+-        ++lineNo;
+-        const size_t hash = raw.find('#');
+-        std::string line = hash == std::string::npos ? raw : raw.substr(0, hash);
+-        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+-            line.pop_back();
+-        size_t first = 0;
+-        while (first < line.size() && std::isspace(static_cast<unsigned char>(line[first])))
+-            ++first;
+-        line = line.substr(first);
+-        if (line.empty())
+-            continue;
+-
+-        std::istringstream words(line);
+-        std::vector<std::string> tok;
+-        for (std::string w; words >> w;)
+-            tok.push_back(w);
+-
+-        auto fail = [&](const std::string &why)
+-        {
+-            error = "line " + std::to_string(lineNo) + ": " + why + ": " + line;
+-            m_steps.clear();
+-            return false;
+-        };
+-
+-        Step step;
+-        step.line = lineNo;
+-        step.text = line;
+-        const std::string &cmd = tok[0];
+-        if (cmd == "timeout")
+-        {
+-            uint32_t secs = 0;
+-            if (tok.size() != 2 || !parseNumber(tok[1], secs) || secs == 0u)
+-                return fail("expected 'timeout <secs>'");
+-            if (sawTimeout || !m_steps.empty())
+-                return fail("timeout must be a single header before the first step");
+-            sawTimeout = true;
+-            m_timeoutSeconds = static_cast<double>(secs);
+-            continue;
+-        }
+-        if (cmd == "wait" && tok.size() == 3 && tok[1] == "vsync")
+-        {
+-            step.op = Op::WaitVsync;
+-            if (!parseNumber(tok[2], step.count))
+-                return fail("bad vsync count");
+-        }
+-        else if (cmd == "wait" && tok.size() == 6 && tok[1] == "mem")
+-        {
+-            step.op = Op::WaitMem;
+-            if (!parseRef(tok[2], step.ref))
+-                return fail("bad address");
+-            if (!parseWidth(tok[3], step.width))
+-                return fail("width must be 1, 2 or 4");
+-            if (tok[4] != "==" && tok[4] != "!=")
+-                return fail("operator must be == or !=");
+-            step.equal = tok[4] == "==";
+-            if (!parseNumber(tok[5], step.value))
+-                return fail("bad value");
+-            if (step.width < 4u && step.value >= (1u << (step.width * 8u)))
+-                return fail("value does not fit the width");
+-        }
+-        else if (cmd == "wait")
+-        {
+-            return fail("expected 'wait vsync <n>' or 'wait mem <addr> <width> <op> <value>'");
+-        }
+-        else if (cmd == "press")
+-        {
+-            step.op = Op::Press;
+-            if (tok.size() != 3)
+-                return fail("expected 'press <btn[+btn..]> <held vsyncs>'");
+-            if (!parseButtons(tok[1], step.mask))
+-                return fail("unknown button");
+-            if (!parseNumber(tok[2], step.count))
+-                return fail("bad held vsync count");
+-        }
+-        else if (cmd == "capture")
+-        {
+-            step.op = Op::Capture;
+-            if (tok.size() != 3)
+-                return fail("expected 'capture <screen> <n>'");
+-            step.name = tok[1];
+-            if (step.name.find_first_of("/\\:") != std::string::npos)
+-                return fail("screen name must not contain path separators");
+-            if (!parseNumber(tok[2], step.count) || step.count == 0u)
+-                return fail("bad frame count");
+-        }
+-        else if (cmd == "watch")
+-        {
+-            step.op = Op::Watch;
+-            if (tok.size() != 3)
+-                return fail("expected 'watch <addr|*ptr+off> <width>'");
+-            if (!parseRef(tok[1], step.ref))
+-                return fail("bad address");
+-            if (!parseWidth(tok[2], step.width))
+-                return fail("width must be 1, 2 or 4");
+-            step.name = tok[1];
+-        }
+-        else if (cmd == "log")
+-        {
+-            step.op = Op::Log;
+-            step.name = line.size() > 3 ? line.substr(4) : std::string();
+-        }
+-        else if (cmd == "quit")
+-        {
+-            step.op = Op::Quit;
+-            if (tok.size() != 1)
+-                return fail("quit takes no arguments");
+-        }
+-        else
+-        {
+-            return fail("unknown command '" + cmd + "'");
+-        }
+-        m_steps.push_back(step);
+-    }
+-    error.clear();
+-    return true;
+-}
+-
+-bool Ps2InputScript::loadFile(const std::string &path, std::string &error)
+-{
+-    std::ifstream file(path, std::ios::binary);
+-    if (!file)
+-    {
+-        error = "cannot open " + path;
+-        return false;
+-    }
+-    std::ostringstream text;
+-    text << file.rdbuf();
+-    return parse(text.str(), error);
+-}
+-
+-bool Ps2InputScript::hasCaptureSteps() const
+-{
+-    for (const Step &step : m_steps)
+-    {
+-        if (step.op == Op::Capture)
+-            return true;
+-    }
+-    return false;
+-}
+-
+-bool Ps2InputScript::readRef(const MemRef &ref, uint32_t width, const ReadMem &read, uint32_t &out) const
+-{
+-    uint32_t addr = ref.addr;
+-    if (ref.deref)
+-    {
+-        uint32_t pointer = 0;
+-        if (!read(ref.addr, 4u, pointer) || pointer == 0u)
+-            return false;
+-        addr = pointer + ref.offset;
+-    }
+-    return read(addr, width, out);
+-}
+-
+-void Ps2InputScript::beginStep(uint64_t tick, const ReadMem &read, std::ostream &log)
+-{
+-    const Step &step = m_steps[m_index];
+-    log << "[script] step " << m_index << " line " << step.line << " begin tick=" << tick << std::endl;
+-    m_begun = true;
+-    m_stepTick = tick;
+-    switch (step.op)
+-    {
+-    case Op::Press:
+-        m_buttons.store(static_cast<uint16_t>(0xFFFFu & ~step.mask), std::memory_order_release);
+-        break;
+-    case Op::Capture:
+-        m_captureActive = true;
+-        m_captureTaken = 0;
+-        m_captureWritten = 0;
+-        m_hasCaptureTick = false;
+-        m_captureStartTick = tick;
+-        break;
+-    case Op::Watch:
+-    {
+-        Watch watch;
+-        watch.ref = step.ref;
+-        watch.width = step.width;
+-        watch.label = step.name;
+-        watch.valid = readRef(watch.ref, watch.width, read, watch.value);
+-        m_watches.push_back(watch);
+-        break;
+-    }
+-    case Op::Log:
+-        log << "[script] log " << step.name << std::endl;
+-        break;
+-    case Op::Quit:
+-        m_quit.store(true, std::memory_order_release);
+-        break;
+-    default:
+-        break;
+-    }
+-}
+-
+-void Ps2InputScript::onVSync(uint64_t tick, const ReadMem &read, std::ostream &log)
+-{
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-
+-    for (Watch &watch : m_watches)
+-    {
+-        uint32_t value = 0;
+-        if (!readRef(watch.ref, watch.width, read, value))
+-            continue;
+-        if (watch.valid && value != watch.value)
+-        {
+-            log << "[script] watch " << watch.label << ' ' << hex(watch.value) << "->" << hex(value)
+-                << " tick=" << tick << std::endl;
+-        }
+-        watch.value = value;
+-        watch.valid = true;
+-    }
+-
+-    while (m_index < m_steps.size())
+-    {
+-        if (!m_begun)
+-            beginStep(tick, read, log);
+-        const Step &step = m_steps[m_index];
+-        const uint64_t elapsed = tick - m_stepTick;
+-        bool done = false;
+-        switch (step.op)
+-        {
+-        case Op::WaitVsync:
+-            done = elapsed >= step.count;
+-            break;
+-        case Op::WaitMem:
+-        {
+-            uint32_t value = 0;
+-            done = readRef(step.ref, step.width, read, value) && ((value == step.value) == step.equal);
+-            break;
+-        }
+-        case Op::Press:
+-            if (elapsed >= step.count)
+-                m_buttons.store(0xFFFFu, std::memory_order_release);
+-            done = elapsed >= static_cast<uint64_t>(step.count) + 1u;
+-            break;
+-        case Op::Capture:
+-            done = m_captureWritten >= step.count;
+-            if (done)
+-                m_captureActive = false;
+-            break;
+-        case Op::Quit:
+-            return;
+-        default:
+-            done = true;
+-            break;
+-        }
+-        if (!done)
+-            return;
+-        ++m_index;
+-        m_begun = false;
+-    }
+-}
+-
+-bool Ps2InputScript::takeCapture(uint64_t latchedTick, std::string &fileName, std::string &screen, uint32_t &k)
+-{
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    if (!m_captureActive || m_index >= m_steps.size())
+-        return false;
+-    const Step &step = m_steps[m_index];
+-    if (m_captureTaken >= step.count || latchedTick < m_captureStartTick ||
+-        (m_hasCaptureTick && m_lastCaptureTick == latchedTick))
+-        return false;
+-    k = m_captureTaken++;
+-    m_lastCaptureTick = latchedTick;
+-    m_hasCaptureTick = true;
+-    screen = step.name;
+-    fileName = step.name + "-" + std::to_string(k) + ".png";
+-    return true;
+-}
+-
+-bool Ps2InputScript::captureWanted() const
+-{
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    return m_captureActive && m_index < m_steps.size() && m_captureWritten < m_steps[m_index].count;
+-}
+-
+-void Ps2InputScript::commitCapture(bool written)
+-{
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    if (written)
+-        ++m_captureWritten;
+-    else if (m_captureTaken > 0u)
+-        --m_captureTaken;
+-}
+-
+-void Ps2InputScript::start(double nowSeconds)
+-{
+-    m_startSeconds = nowSeconds;
+-}
+-
+-bool Ps2InputScript::timedOut(double nowSeconds, std::string &message) const
+-{
+-    if (nowSeconds - m_startSeconds < m_timeoutSeconds)
+-        return false;
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    std::ostringstream out;
+-    if (m_index < m_steps.size())
+-    {
+-        const Step &step = m_steps[m_index];
+-        out << "[script] TIMEOUT step " << m_index << " line " << step.line << ": " << step.text;
+-    }
+-    else
+-    {
+-        out << "[script] TIMEOUT step " << m_index << " line 0: end of script without quit";
+-    }
+-    message = out.str();
+-    return true;
+-}
+-
+-int Ps2InputScript::loopEndExitCode(std::string &message) const
+-{
+-    message.clear();
+-    if (quitRequested())
+-        return 0;
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    std::ostringstream out;
+-    if (m_index < m_steps.size())
+-    {
+-        const Step &step = m_steps[m_index];
+-        out << "[script] game ended before quit at step " << m_index << " line " << step.line << ": " << step.text;
+-    }
+-    else
+-    {
+-        out << "[script] game ended before quit at step " << m_index << " line 0: end of script without quit";
+-    }
+-    message = out.str();
+-    return 4;
+-}
+-
+-namespace
+-{
+-    std::atomic<Ps2InputScript *> g_activeScript{nullptr};
+-}
+-
+-Ps2InputScript *ps2ActiveInputScript()
+-{
+-    return g_activeScript.load(std::memory_order_acquire);
+-}
+-
+-void ps2SetActiveInputScript(Ps2InputScript *script)
+-{
+-    g_activeScript.store(script, std::memory_order_release);
+-}
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 44071a1..5a74a69 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,6 +1,5 @@
+ #include "runtime/ps2_pad.h"
+ #include "runtime/ps2_diag_hooks.h"
+-#include "runtime/ps2_input_script.h"
+ #include "ps2_host_backend.h"
+ #include <cstring>
+ 
+@@ -39,15 +38,6 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+     data[3] = 0xFF;
+     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+ 
+-    // PS2X_INPUT_SCRIPT owns the pad: only the script's held buttons, no host pad or keys.
+-    if (const Ps2InputScript *script = ps2ActiveInputScript())
+-    {
+-        const uint16_t scripted = script->buttons();
+-        data[2] = static_cast<uint8_t>(scripted & 0xFF);
+-        data[3] = static_cast<uint8_t>(scripted >> 8);
+-        return true;
+-    }
+-
+     // A diagnostics plugin that owns the pad (a scripted run): only its buttons, no host pad or keys.
+     if (PS2DiagHooks *diag = ps2DiagHooks())
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_pc_sampler.cpp b/ps2xRuntime/src/lib/ps2_pc_sampler.cpp
+deleted file mode 100644
+index 010ae28..0000000
+--- a/ps2xRuntime/src/lib/ps2_pc_sampler.cpp
++++ /dev/null
+@@ -1,142 +0,0 @@
+-#include "runtime/ps2_pc_sampler.h"
+-
+-#include "ps2_runtime_api.h"
+-
+-#include <chrono>
+-#include <cstdlib>
+-#include <filesystem>
+-#include <fstream>
+-#include <map>
+-#include <thread>
+-#include <tuple>
+-
+-namespace ps2x::pcsample
+-{
+-    State &state() noexcept
+-    {
+-        static State s;
+-        return s;
+-    }
+-
+-    struct Sampler::Impl
+-    {
+-        struct Key
+-        {
+-            uint64_t tick = 0u;
+-            int32_t tid = 0;
+-            uint32_t pc = 0u;
+-            bool operator<(const Key &o) const
+-            {
+-                return std::tie(tick, tid, pc) < std::tie(o.tick, o.tid, o.pc);
+-            }
+-        };
+-        struct Counts
+-        {
+-            uint64_t count = 0u;
+-            uint64_t flags[kFlagCount]{};
+-        };
+-
+-        std::string path;
+-        std::thread thread;
+-        std::atomic<bool> stopRequested{false};
+-        bool stopped = false;
+-        std::map<Key, Counts> counts; // sampler thread only (the final write runs after join)
+-
+-        void sampleOnce()
+-        {
+-            State &st = state();
+-            Key key{};
+-            const std::atomic<uint64_t> *tick = st.tick.load(std::memory_order_relaxed);
+-            if (tick)
+-                key.tick = (tick->load(std::memory_order_relaxed) / kTickBucket) * kTickBucket;
+-            if (R5900Context *ctx = st.context.load(std::memory_order_acquire))
+-            {
+-                key.pc = std::atomic_ref<uint32_t>(ctx->pc).load(std::memory_order_relaxed);
+-                key.tid = st.threadId.load(std::memory_order_relaxed);
+-            }
+-            Counts &c = counts[key];
+-            ++c.count;
+-            for (uint32_t f = 0; f < kFlagCount; ++f)
+-                if (st.depth[f].load(std::memory_order_relaxed) > 0)
+-                    ++c.flags[f];
+-        }
+-
+-        void write() const
+-        {
+-            const std::string tmp = path + ".tmp";
+-            {
+-                std::ofstream out(tmp, std::ios::out | std::ios::trunc);
+-                if (!out.is_open())
+-                    return;
+-                out << "tick,tid,pc,count,vu1,iop,gs,gsvsync\n";
+-                for (const auto &[key, c] : counts)
+-                {
+-                    out << key.tick << ',' << key.tid << ",0x" << std::hex << key.pc << std::dec << ',' << c.count;
+-                    for (uint32_t f = 0; f < kFlagCount; ++f)
+-                        out << ',' << c.flags[f];
+-                    out << '\n';
+-                }
+-            }
+-            std::error_code ec;
+-            std::filesystem::rename(tmp, path, ec);
+-        }
+-
+-        void loop()
+-        {
+-            using clock = std::chrono::steady_clock;
+-            auto nextWrite = clock::now() + std::chrono::seconds(2);
+-            while (!stopRequested.load(std::memory_order_acquire))
+-            {
+-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+-                sampleOnce();
+-                if (clock::now() >= nextWrite)
+-                {
+-                    write();
+-                    nextWrite = clock::now() + std::chrono::seconds(2);
+-                }
+-            }
+-        }
+-    };
+-
+-    Sampler::Sampler(std::string path, const std::atomic<uint64_t> *tickSource)
+-        : m_impl(std::make_unique<Impl>())
+-    {
+-        m_impl->path = std::move(path);
+-        State &st = state();
+-        st.context.store(nullptr, std::memory_order_relaxed);
+-        st.threadId.store(0, std::memory_order_relaxed);
+-        st.tick.store(tickSource, std::memory_order_relaxed);
+-        for (auto &d : st.depth)
+-            d.store(0, std::memory_order_relaxed);
+-        st.enabled.store(true, std::memory_order_release);
+-        m_impl->thread = std::thread([impl = m_impl.get()] { impl->loop(); });
+-    }
+-
+-    Sampler::~Sampler()
+-    {
+-        stop();
+-    }
+-
+-    void Sampler::stop()
+-    {
+-        if (!m_impl || m_impl->stopped)
+-            return;
+-        m_impl->stopped = true;
+-        m_impl->stopRequested.store(true, std::memory_order_release);
+-        if (m_impl->thread.joinable())
+-            m_impl->thread.join();
+-        State &st = state();
+-        st.enabled.store(false, std::memory_order_release);
+-        st.context.store(nullptr, std::memory_order_relaxed);
+-        st.tick.store(nullptr, std::memory_order_relaxed);
+-        m_impl->write();
+-    }
+-
+-    std::unique_ptr<Sampler> startFromEnvironment(const std::atomic<uint64_t> *tickSource)
+-    {
+-        const char *path = std::getenv("PS2X_PC_SAMPLE");
+-        if (!path || !*path)
+-            return nullptr;
+-        return std::make_unique<Sampler>(path, tickSource);
+-    }
+-}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f388c6b..cde0b0b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,7 +1,5 @@
+ #include "ps2_runtime.h"
+ #include "ps2_log.h"
+-#include "runtime/ps2_pc_sampler.h"
+-#include "runtime/ps2_vu1_capture.h"
+ #include "runtime/ps2_vu1_external.h"
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+@@ -10,8 +8,6 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ee_scheduler.h"
+-#include "runtime/ps2_frame_dump.h"
+-#include "runtime/ps2_input_script.h"
+ #include "runtime/ps2_fps_counter.h"
+ #include "runtime/ps2_diag_hooks.h"
+ #include "ThreadNaming.h"
+@@ -383,45 +379,9 @@ namespace
+     }
+ }
+ 
+-// Hands one presented frame (tick = the vsync it shows) to the frame consumers: a capture step of the input
+-// script, or PS2X_FRAME_DUMP_DIR's every-frame dump. Main thread.
+-static void DeliverFrameToConsumers(const char *dumpDir, uint64_t tick, const uint8_t *rgba, uint32_t width,
+-                                    uint32_t height)
++// External GS frame demand (gs_external.h): the diagnostics plugin decides which frames it wants.
++static bool DiagFrameDemand(uint64_t tick)
+ {
+-    if (Ps2InputScript *script = ps2ActiveInputScript())
+-    {
+-        // Script mode: dump only while a capture step is active, one <screen>-<k>.png per frame tick.
+-        std::string fileName;
+-        std::string screen;
+-        uint32_t k = 0u;
+-        if (dumpDir != nullptr && script->takeCapture(tick, fileName, screen, k))
+-        {
+-            const bool written = ps2DumpPresentedFrameNamed(dumpDir, fileName.c_str(), rgba, width, height);
+-            script->commitCapture(written);
+-            if (written)
+-                std::cout << "[script] capture " << screen << " k=" << k << " tick=" << tick << std::endl;
+-            else
+-                std::cerr << "[script] capture " << screen << " k=" << k << " write failed" << std::endl;
+-        }
+-    }
+-    else if (dumpDir != nullptr)
+-    {
+-        ps2DumpPresentedFrame(dumpDir, tick, rgba, width, height);
+-    }
+-    if (PS2DiagHooks *diag = ps2DiagHooks())
+-        diag->onFrame(tick, rgba, width, height);
+-}
+-
+-// External GS frame demand (gs_external.h): a script wants frames only during a capture step; a plain
+-// PS2X_FRAME_DUMP_DIR wants every frame; a diagnostics plugin decides for itself (wantsFrame).
+-static bool s_dumpEveryFrame = false;
+-
+-static bool EngineFrameDemand(uint64_t tick)
+-{
+-    if (s_dumpEveryFrame)
+-        return true;
+-    if (const Ps2InputScript *script = ps2ActiveInputScript(); script && script->captureWanted())
+-        return true;
+     PS2DiagHooks *diag = ps2DiagHooks();
+     return diag != nullptr && diag->wantsFrame(tick);
+ }
+@@ -433,16 +393,16 @@ static bool s_windowHidden = false;
+ 
+ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+ {
+-    static const char *s_frameDumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
++    PS2DiagHooks *const diag = ps2DiagHooks();
+     if (ps2ExternalGS())
+     {
+         // The external GS presents into its own child window: no texture upload, and frames are copied only for
+-        // a consumer, from the snapshots the scheduler takes on demand.
++        // the diagnostics plugin, from the snapshots the scheduler takes on demand.
+         static uint64_t s_lastExternalTick = std::numeric_limits<uint64_t>::max();
+         static uint64_t s_lastExternalFrameTick = std::numeric_limits<uint64_t>::max();
+         static std::vector<uint8_t> s_externalScratch;
+         const uint64_t tick = rt->eeScheduler().currentVSyncTick();
+-        if ((s_frameDumpDir == nullptr && ps2DiagHooks() == nullptr) || tick == s_lastExternalTick)
++        if (diag == nullptr || tick == s_lastExternalTick)
+             return;
+         s_lastExternalTick = tick;
+         rt->gs().latchHostPresentationFrame();
+@@ -453,7 +413,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+             !rt->gs().copyLatchedHostPresentationFrame(s_externalScratch, width, height))
+             return;
+         s_lastExternalFrameTick = frameTick;
+-        DeliverFrameToConsumers(s_frameDumpDir, frameTick, s_externalScratch.data(), width, height);
++        diag->onFrame(frameTick, s_externalScratch.data(), width, height);
+         return;
+     }
+ 
+@@ -532,7 +492,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     s_lastWidth = width;
+     s_lastHeight = height;
+ 
+-    DeliverFrameToConsumers(s_frameDumpDir, currentTick, s_scratch.data(), width, height);
++    if (diag)
++        diag->onFrame(currentTick, s_scratch.data(), width, height);
+ 
+     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
+     if (!s_scratch.empty() && width != 0u && height != 0u)
+@@ -684,7 +645,6 @@ bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
+ 
+ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
+ {
+-    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
+     PS2DiagSectionScope diagIop(PS2DiagSection::Iop);
+     auto scope = m_iopHost->enterCall(ctx, rdram);
+     request.callToken = scope.token();
+@@ -693,7 +653,6 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
+ 
+ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
+ {
+-    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
+     PS2DiagSectionScope diagIop(PS2DiagSection::Iop);
+     auto scope = m_iopHost->enterCall(nullptr, rdram);
+     m_iopSubsystem->onSifTransfer(transfer);
+@@ -701,7 +660,6 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
+ 
+ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+ {
+-    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
+     PS2DiagSectionScope diagIop(PS2DiagSection::Iop);
+     m_iopSubsystem->runEeCycles(eeCycles);
+ }
+@@ -800,47 +758,36 @@ bool PS2Runtime::syncCoreSubsystems()
+     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                     { m_gs.processGIFPacket(data, size); });
+     m_memory.setGifArbiter(&m_gifArbiter);
+-    // PS2X_VU1_CAPTURE (runtime/ps2_vu1_capture.h): null unless set; read when the callbacks bind.
+-    std::shared_ptr<ps2x::vu1capture::Recorder> vu1Capture = ps2x::vu1capture::Recorder::fromEnv();
+     // External VU1 (PS2X_VU1, runtime/ps2_vu1_external.h): runs instead of m_vu1 and holds the only VU1
+-    // state; the capture reads that state through readState. Same VPU_STAT D/T update as the interpreter.
+-    auto runExternalVu1 = [this, vu1Capture](PS2ExternalVu1 &externalVu1, R5900Context &cpuContext, bool mscal,
++    // state; the diagnostics hooks read that state through readState. Same VPU_STAT D/T update as the interpreter.
++    auto runExternalVu1 = [this](PS2ExternalVu1 &externalVu1, R5900Context &cpuContext, bool mscal,
+                                              uint32_t startPC, uint32_t top, uint32_t itop)
+     {
+         const uint32_t fbrst = cpuContext.vu0_fbrst;
+         PS2DiagHooks *const diag = ps2DiagHooks();
+-        if (vu1Capture || diag)
++        if (diag)
+         {
+             VU1State before{};
+             externalVu1.readState(before);
+-            if (vu1Capture)
+-                vu1Capture->begin(mscal ? ps2x::vu1capture::Mscal : ps2x::vu1capture::Mscnt, mscal ? startPC : before.pc,
+-                                  top, itop, fbrst, cpuContext.vu0_vpu_stat, 65536, m_memory.getVU1CodeGeneration(),
+-                                  m_memory.getVU1Code(), m_memory.getVU1Data(), before);
+-            if (diag)
+-                DiagVu1Begin(*diag, mscal ? 0u : 1u, mscal ? startPC : before.pc, top, itop, fbrst,
+-                             cpuContext.vu0_vpu_stat, m_memory, before);
++            DiagVu1Begin(*diag, mscal ? 0u : 1u, mscal ? startPC : before.pc, top, itop, fbrst,
++                         cpuContext.vu0_vpu_stat, m_memory, before);
+         }
+         PS2Vu1RunResult result;
+         {
+-            ps2x::pcsample::Scope vu1Scope(ps2x::pcsample::Vu1);
+             PS2DiagSectionScope diagVu1(PS2DiagSection::Vu1);
+             result = mscal ? externalVu1.mscal(m_memory, startPC, top, itop, fbrst)
+                            : externalVu1.mscnt(m_memory, top, itop, fbrst);
+         }
+         cpuContext.vu0_vpu_stat = (cpuContext.vu0_vpu_stat & ~0x0600u) | (result.stoppedByD ? 0x0200u : 0u) |
+                                   (result.stoppedByT ? 0x0400u : 0u);
+-        if (vu1Capture || diag)
++        if (diag)
+         {
+             VU1State after{};
+             externalVu1.readState(after);
+-            if (vu1Capture)
+-                vu1Capture->end(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
+-            if (diag)
+-                diag->onVu1End(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
++            diag->onVu1End(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
+         }
+     };
+-    m_memory.setVu1MscalCallback([this, vu1Capture, runExternalVu1](uint32_t startPC, uint32_t top, uint32_t itop)
++    m_memory.setVu1MscalCallback([this, runExternalVu1](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                      if (!cpuContext)
+@@ -856,11 +803,6 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
+                                      m_vu1.state().tBitEnabled =
+                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+-                                     if (vu1Capture)
+-                                         vu1Capture->begin(ps2x::vu1capture::Mscal, startPC, top, itop,
+-                                                           cpuContext->vu0_fbrst, cpuContext->vu0_vpu_stat, 65536,
+-                                                           m_memory.getVU1CodeGeneration(), m_memory.getVU1Code(),
+-                                                           m_memory.getVU1Data(), m_vu1.state());
+                                      PS2DiagHooks *const diag = ps2DiagHooks();
+                                      if (diag)
+                                          DiagVu1Begin(*diag, 0u, startPC, top, itop, cpuContext->vu0_fbrst,
+@@ -872,11 +814,9 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+-                                     if (vu1Capture)
+-                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat);
+                                      if (diag)
+                                          diag->onVu1End(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
+-    m_memory.setVu1MscntCallback([this, vu1Capture, runExternalVu1](uint32_t top, uint32_t itop)
++    m_memory.setVu1MscntCallback([this, runExternalVu1](uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                      if (!cpuContext)
+@@ -892,11 +832,6 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
+                                      m_vu1.state().tBitEnabled =
+                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+-                                     if (vu1Capture)
+-                                         vu1Capture->begin(ps2x::vu1capture::Mscnt, m_vu1.state().pc, top, itop,
+-                                                           cpuContext->vu0_fbrst, cpuContext->vu0_vpu_stat, 65536,
+-                                                           m_memory.getVU1CodeGeneration(), m_memory.getVU1Code(),
+-                                                           m_memory.getVU1Data(), m_vu1.state());
+                                      PS2DiagHooks *const diag = ps2DiagHooks();
+                                      if (diag)
+                                          DiagVu1Begin(*diag, 1u, m_vu1.state().pc, top, itop, cpuContext->vu0_fbrst,
+@@ -908,8 +843,6 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+-                                     if (vu1Capture)
+-                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat);
+                                      if (diag)
+                                          diag->onVu1End(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
+     resetIop();
+@@ -998,36 +931,7 @@ bool PS2Runtime::initialize(const char *title)
+             std::_Exit(code);
+         }
+         if (ps2DiagHooks())
+-            ps2SetExternalGSFrameDemand(EngineFrameDemand);
+-    }
+-
+-    if (const char *scriptPath = std::getenv("PS2X_INPUT_SCRIPT"))
+-    {
+-        static Ps2InputScript s_inputScript;
+-        std::string error;
+-        if (!s_inputScript.loadFile(scriptPath, error))
+-        {
+-            std::cerr << "[script] parse error in " << scriptPath << ": " << error << std::endl;
+-            std::cerr.flush();
+-            std::_Exit(2);
+-        }
+-        if (s_inputScript.hasCaptureSteps() && std::getenv("PS2X_FRAME_DUMP_DIR") == nullptr)
+-        {
+-            std::cerr << "[script] capture steps need PS2X_FRAME_DUMP_DIR" << std::endl;
+-            std::cerr.flush();
+-            std::_Exit(2);
+-        }
+-        s_inputScript.start(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+-        ps2SetActiveInputScript(&s_inputScript);
+-        if (s_inputScript.hasCaptureSteps())
+-            ps2SetExternalGSFrameDemand(EngineFrameDemand);
+-        std::cout << "[script] loaded " << scriptPath << " steps=" << s_inputScript.steps().size()
+-                  << " timeout=" << s_inputScript.timeoutSeconds() << "s" << std::endl;
+-    }
+-    else if (const char *dumpDir = std::getenv("PS2X_FRAME_DUMP_DIR"); dumpDir && *dumpDir)
+-    {
+-        s_dumpEveryFrame = true; // dump every presented frame
+-        ps2SetExternalGSFrameDemand(EngineFrameDemand);
++            ps2SetExternalGSFrameDemand(DiagFrameDemand);
+     }
+ 
+     try
+@@ -1047,7 +951,7 @@ bool PS2Runtime::initialize(const char *title)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+         const char *hiddenEnv = std::getenv("PS2X_HIDDEN");
+-        const bool hidden = ps2ActiveInputScript() != nullptr || (hiddenEnv != nullptr && std::strcmp(hiddenEnv, "1") == 0);
++        const bool hidden = hiddenEnv != nullptr && std::strcmp(hiddenEnv, "1") == 0;
+         const unsigned int windowFlags = hidden ? (FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN) : FLAG_WINDOW_RESIZABLE;
+         SetConfigFlags(windowFlags);
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+@@ -2867,24 +2771,6 @@ void PS2Runtime::run()
+                 std::cout << "[fps] " << Ps2FpsCounter::title("tick " + std::to_string(m_eeScheduler->currentVSyncTick()), s_fps.fps()) << std::endl;
+         }
+ 
+-        if (const Ps2InputScript *script = ps2ActiveInputScript())
+-        {
+-            std::string timeoutMessage;
+-            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+-            if (script->timedOut(now, timeoutMessage))
+-            {
+-                std::cout.flush();
+-                std::cerr << timeoutMessage << std::endl;
+-                std::cerr.flush();
+-                std::_Exit(3);
+-            }
+-            if (script->quitRequested())
+-            {
+-                RUNTIME_LOG("[run] script quit, breaking out of loop");
+-                requestStop();
+-                break;
+-            }
+-        }
+         if (PS2DiagHooks *diag = ps2DiagHooks())
+         {
+             // The plugin may end the run (1) or the process (>= 2, e.g. a script timeout).
+@@ -2911,19 +2797,6 @@ void PS2Runtime::run()
+         }
+     }
+ 
+-    if (const Ps2InputScript *script = ps2ActiveInputScript())
+-    {
+-        std::string endMessage;
+-        const int code = script->loopEndExitCode(endMessage);
+-        if (code != 0)
+-        {
+-            std::cout.flush();
+-            std::cerr << endMessage << std::endl;
+-            std::cerr.flush();
+-            std::_Exit(code);
+-        }
+-    }
+-
+     if (PS2DiagHooks *diag = ps2DiagHooks())
+     {
+         const int code = diag->onShutdown();
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp
+deleted file mode 100644
+index 12d3486..0000000
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_capture.cpp
++++ /dev/null
+@@ -1,305 +0,0 @@
+-#include "runtime/ps2_vu1_capture.h"
+-#include "runtime/ps2_memory.h"
+-
+-#include <atomic>
+-#include <cstdio>
+-#include <cstdlib>
+-#include <filesystem>
+-#include <iostream>
+-#include <map>
+-#include <mutex>
+-#include <tuple>
+-#include <unordered_set>
+-#include <vector>
+-
+-namespace ps2x::vu1capture
+-{
+-    namespace
+-    {
+-        std::atomic<Path1TapFn> g_tapFn{nullptr};
+-        std::atomic<void *> g_tapCtx{nullptr};
+-
+-        constexpr uint32_t kSummaryEvery = 4096u;
+-    }
+-
+-    uint64_t hash64(const void *data, size_t bytes, uint64_t seed)
+-    {
+-        // 8 bytes per step multiply-xorshift; not cryptographic, only for dedupe/keys.
+-        const uint8_t *p = static_cast<const uint8_t *>(data);
+-        uint64_t h = seed ^ (bytes * 0xFF51AFD7ED558CCDull);
+-        size_t i = 0;
+-        for (; i + 8 <= bytes; i += 8)
+-        {
+-            uint64_t v;
+-            std::memcpy(&v, p + i, 8);
+-            h ^= v;
+-            h *= 0x9FB21C651E98DF25ull;
+-            h ^= h >> 29;
+-        }
+-        for (; i < bytes; ++i)
+-        {
+-            h ^= p[i];
+-            h *= 0x100000001B3ull;
+-        }
+-        h ^= h >> 32;
+-        return h;
+-    }
+-
+-    void setPath1Tap(Path1TapFn fn, void *ctx)
+-    {
+-        g_tapCtx.store(ctx, std::memory_order_relaxed);
+-        g_tapFn.store(fn, std::memory_order_release);
+-    }
+-
+-    void notifyPath1(const uint8_t *data, uint32_t size)
+-    {
+-        if (Path1TapFn fn = g_tapFn.load(std::memory_order_acquire))
+-            fn(g_tapCtx.load(std::memory_order_relaxed), data, size);
+-    }
+-
+-    struct Recorder::Impl
+-    {
+-        std::string dir;
+-        uint32_t maxFiles = 200;
+-        uint32_t maxPerKey = 4;
+-
+-        struct KeyStats
+-        {
+-            uint64_t firstGeneration = 0;
+-            uint64_t runs = 0;
+-            uint64_t cycles = 0;
+-            uint32_t files = 0;
+-        };
+-        using Key = std::tuple<uint32_t, uint32_t, uint64_t>; // kind, startPC, codeHash
+-        std::map<Key, KeyStats> keys;
+-        std::unordered_set<uint64_t> inputs;
+-
+-        uint64_t runsSeen = 0;
+-        uint64_t budgetHits = 0;
+-        uint64_t bytesWritten = 0;
+-        uint32_t filesWritten = 0;
+-        uint32_t lastSummaryFiles = 0;
+-
+-        uint64_t cachedGeneration = ~0ull;
+-        const uint8_t *cachedCode = nullptr;
+-        uint64_t cachedCodeHash = 0;
+-
+-        // The run in flight.
+-        bool active = false;
+-        bool recording = false;
+-        Key key{};
+-        FileHeader header{};
+-        std::vector<uint8_t> code, dataBefore;
+-        StateRecord before{};
+-        std::vector<std::vector<uint8_t>> packets;
+-
+-        static void tap(void *ctx, const uint8_t *data, uint32_t size)
+-        {
+-            Impl *self = static_cast<Impl *>(ctx);
+-            if (self->recording)
+-                self->packets.emplace_back(data, data + size);
+-        }
+-
+-        void writeSummary()
+-        {
+-            const std::string path = dir + "/summary.txt";
+-            const std::string tmp = path + ".tmp";
+-            FILE *f = std::fopen(tmp.c_str(), "wb");
+-            if (!f)
+-                return;
+-            std::fprintf(f, "runs %llu\nfiles %u\nbytes %llu\nkeys %zu\nbudget_hits %llu\n",
+-                         static_cast<unsigned long long>(runsSeen), filesWritten,
+-                         static_cast<unsigned long long>(bytesWritten), keys.size(),
+-                         static_cast<unsigned long long>(budgetHits));
+-            std::fprintf(f, "kind pc code_hash first_gen runs cycles files\n");
+-            for (const auto &[k, s] : keys)
+-                std::fprintf(f, "%s 0x%04x %016llx %llu %llu %llu %u\n",
+-                             std::get<0>(k) == Mscal ? "mscal" : "mscnt", std::get<1>(k),
+-                             static_cast<unsigned long long>(std::get<2>(k)),
+-                             static_cast<unsigned long long>(s.firstGeneration),
+-                             static_cast<unsigned long long>(s.runs),
+-                             static_cast<unsigned long long>(s.cycles), s.files);
+-            std::fclose(f);
+-            std::error_code ec;
+-            std::filesystem::rename(tmp, path, ec);
+-            if (ec)
+-            {
+-                std::filesystem::remove(path, ec);
+-                std::filesystem::rename(tmp, path, ec);
+-            }
+-        }
+-    };
+-
+-    std::shared_ptr<Recorder> Recorder::fromEnv()
+-    {
+-        const char *env = std::getenv("PS2X_VU1_CAPTURE");
+-        if (!env || !*env)
+-            return nullptr;
+-        std::string spec(env);
+-        uint32_t maxFiles = 200u, maxPerKey = 4u;
+-        const size_t c1 = spec.find(',');
+-        std::string dir = spec.substr(0, c1);
+-        if (c1 != std::string::npos)
+-        {
+-            const std::string rest = spec.substr(c1 + 1);
+-            const size_t c2 = rest.find(',');
+-            maxFiles = static_cast<uint32_t>(std::strtoul(rest.substr(0, c2).c_str(), nullptr, 10));
+-            if (c2 != std::string::npos)
+-                maxPerKey = static_cast<uint32_t>(std::strtoul(rest.substr(c2 + 1).c_str(), nullptr, 10));
+-        }
+-        std::error_code ec;
+-        std::filesystem::create_directories(dir, ec);
+-        if (!std::filesystem::is_directory(dir, ec))
+-        {
+-            std::cerr << "[vu1-capture] not a directory: " << dir << std::endl;
+-            return nullptr;
+-        }
+-        std::cerr << "[vu1-capture] dir=" << dir << " max_files=" << maxFiles
+-                  << " max_per_key=" << maxPerKey << std::endl;
+-        return std::make_shared<Recorder>(dir, maxFiles, maxPerKey);
+-    }
+-
+-    Recorder::Recorder(std::string dir, uint32_t maxFiles, uint32_t maxPerKey)
+-        : m_impl(std::make_unique<Impl>())
+-    {
+-        m_impl->dir = std::move(dir);
+-        m_impl->maxFiles = maxFiles;
+-        m_impl->maxPerKey = maxPerKey;
+-        setPath1Tap(&Impl::tap, m_impl.get());
+-    }
+-
+-    Recorder::~Recorder()
+-    {
+-        if (g_tapCtx.load(std::memory_order_relaxed) == m_impl.get())
+-            setPath1Tap(nullptr, nullptr);
+-        m_impl->writeSummary();
+-    }
+-
+-    uint32_t Recorder::filesWritten() const { return m_impl->filesWritten; }
+-    uint64_t Recorder::runsSeen() const { return m_impl->runsSeen; }
+-
+-    void Recorder::begin(Kind kind, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst,
+-                         uint32_t vpuStat, uint32_t maxCycles, uint64_t codeGeneration,
+-                         const uint8_t *code, const uint8_t *data, const VU1State &state)
+-    {
+-        Impl &m = *m_impl;
+-        if (m.cachedCode != code || m.cachedGeneration != codeGeneration)
+-        {
+-            m.cachedCodeHash = hash64(code, PS2_VU1_CODE_SIZE);
+-            m.cachedCode = code;
+-            m.cachedGeneration = codeGeneration;
+-        }
+-        m.active = true;
+-        m.recording = false;
+-        m.key = Impl::Key{kind, startPC, m.cachedCodeHash};
+-        Impl::KeyStats &ks = m.keys[m.key];
+-        if (ks.runs == 0)
+-            ks.firstGeneration = codeGeneration;
+-
+-        FileHeader &h = m.header;
+-        h = FileHeader{};
+-        std::memcpy(h.magic, kMagic, sizeof(kMagic));
+-        h.version = kVersion;
+-        h.headerBytes = sizeof(FileHeader);
+-        h.kind = kind;
+-        h.runIndex = static_cast<uint32_t>(m.runsSeen);
+-        h.startPC = startPC;
+-        h.top = top;
+-        h.itop = itop;
+-        h.fbrst = fbrst;
+-        h.vpuStatBefore = vpuStat;
+-        h.maxCycles = maxCycles;
+-        h.codeGeneration = codeGeneration;
+-        h.codeHash = m.cachedCodeHash;
+-        h.codeBytes = PS2_VU1_CODE_SIZE;
+-        h.dataBytes = PS2_VU1_DATA_SIZE;
+-        h.stateBytes = sizeof(StateRecord);
+-        m.before = toRecord(state);
+-
+-        if (m.filesWritten >= m.maxFiles || ks.files >= m.maxPerKey)
+-            return;
+-        const uint32_t params[5] = {kind, startPC, top, itop, fbrst};
+-        uint64_t in = hash64(params, sizeof(params), m.cachedCodeHash);
+-        in = hash64(data, PS2_VU1_DATA_SIZE, in);
+-        // The cycle counter always differs; MSCAL also overwrites pc/branch/stop state (execute()).
+-        StateRecord inputState = m.before;
+-        inputState.cycles = 0;
+-        if (kind == Mscal)
+-        {
+-            inputState.pc = inputState.branchTarget = inputState.branchDelay = 0;
+-            inputState.ebit = inputState.haltAfterDelaySlot = inputState.branchPending = 0;
+-            inputState.stoppedByD = inputState.stoppedByT = 0;
+-            inputState.top = inputState.itop = 0;
+-        }
+-        in = hash64(&inputState, sizeof(inputState), in);
+-        if (!m.inputs.insert(in).second)
+-            return;
+-        h.inputHash = in;
+-        m.code.assign(code, code + PS2_VU1_CODE_SIZE);
+-        m.dataBefore.assign(data, data + PS2_VU1_DATA_SIZE);
+-        m.packets.clear();
+-        m.recording = true;
+-    }
+-
+-    void Recorder::end(const uint8_t *data, const VU1State &state, uint32_t vpuStat)
+-    {
+-        Impl &m = *m_impl;
+-        if (!m.active)
+-            return;
+-        m.active = false;
+-        FileHeader &h = m.header;
+-        h.cyclesRun = state.cycles - m.before.cycles;
+-        if (h.cyclesRun >= h.maxCycles)
+-        {
+-            h.flags |= FlagBudgetHit;
+-            ++m.budgetHits;
+-        }
+-        h.vpuStatAfter = vpuStat;
+-        Impl::KeyStats &ks = m.keys[m.key];
+-        ++ks.runs;
+-        ks.cycles += h.cyclesRun;
+-        ++m.runsSeen;
+-
+-        if (m.recording)
+-        {
+-            m.recording = false;
+-            h.packetCount = static_cast<uint32_t>(m.packets.size());
+-            const StateRecord after = toRecord(state);
+-            char name[64];
+-            std::snprintf(name, sizeof(name), "/vu1-%06u-%04x.cap", m.filesWritten, h.startPC);
+-            const std::string path = m.dir + name;
+-            FILE *f = std::fopen(path.c_str(), "wb");
+-            if (f)
+-            {
+-                uint64_t bytes = 0;
+-                auto put = [&](const void *p, size_t n)
+-                {
+-                    std::fwrite(p, 1, n, f);
+-                    bytes += n;
+-                };
+-                put(&h, sizeof(h));
+-                put(m.code.data(), m.code.size());
+-                put(m.dataBefore.data(), m.dataBefore.size());
+-                put(&m.before, sizeof(m.before));
+-                put(data, PS2_VU1_DATA_SIZE);
+-                put(&after, sizeof(after));
+-                for (const auto &pk : m.packets)
+-                {
+-                    const uint32_t size = static_cast<uint32_t>(pk.size());
+-                    put(&size, sizeof(size));
+-                    put(pk.data(), pk.size());
+-                }
+-                std::fclose(f);
+-                ++m.filesWritten;
+-                ++ks.files;
+-                m.bytesWritten += bytes;
+-            }
+-            m.packets.clear();
+-        }
+-        if (m.filesWritten != m.lastSummaryFiles || (m.runsSeen % kSummaryEvery) == 0)
+-        {
+-            m.lastSummaryFiles = m.filesWritten;
+-            m.writeSummary();
+-        }
+-    }
+-}
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index a751a51..a85645e 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -2,8 +2,6 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_diag_hooks.h"
+-#include "runtime/ps2_pc_sampler.h"
+-#include "runtime/ps2_vu1_capture.h"
+ #include "runtime/ps2_memory.h"
+ #include "ps2_vu1_detail.h"
+ 
+@@ -922,7 +920,6 @@ void VU1Interpreter::finishXgkick()
+     if (!m_xgkick.active)
+         return;
+ 
+-    ps2x::vu1capture::notifyPath1(m_xgkick.packet.data(), m_xgkick.totalBytes);
+     if (PS2DiagHooks *diag = ps2DiagHooks())
+         diag->onVu1Path1(m_xgkick.packet.data(), m_xgkick.totalBytes);
+     if (m_activeMemory)
+@@ -1630,7 +1627,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+ {
+-    ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Vu1);
+     PS2DiagSectionScope diagVu1(PS2DiagSection::Vu1);
+     m_activeVuData = vuData;
+     m_activeVuDataSize = dataSize;
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index cb6832b..7bc07c0 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -38,8 +38,6 @@ add_library(ps2_test_lib STATIC
+     src/ps2_recompiler_tests.cpp
+     src/ps2_runtime_expansion_tests.cpp
+     src/ps2_float_semantics_tests.cpp
+-    src/ps2_frame_dump_tests.cpp
+-    src/ps2_input_script_tests.cpp
+     src/ps2_gs_external_tests.cpp
+     src/ps2_runtime_api_tests.cpp
+     src/ps2_fps_counter_tests.cpp
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 8fe5c7a..340e2f1 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -19,8 +19,6 @@ void register_ps2_sif_dma_tests();
+ void register_ps2_recompiler_tests();
+ void register_ps2_runtime_expansion_tests();
+ void register_ps2_float_semantics_tests();
+-void register_ps2_frame_dump_tests();
+-void register_ps2_input_script_tests();
+ void register_ps2_gs_external_tests();
+ void register_ps2_runtime_api_tests();
+ void register_ps2_fps_counter_tests();
+@@ -48,8 +46,6 @@ int main()
+     register_ps2_recompiler_tests();
+     register_ps2_runtime_expansion_tests();
+     register_ps2_float_semantics_tests();
+-    register_ps2_frame_dump_tests();
+-    register_ps2_input_script_tests();
+     register_ps2_gs_external_tests();
+     register_ps2_runtime_api_tests();
+     register_ps2_fps_counter_tests();
+diff --git a/ps2xTest/src/ps2_frame_dump_tests.cpp b/ps2xTest/src/ps2_frame_dump_tests.cpp
+deleted file mode 100644
+index 48c4273..0000000
+--- a/ps2xTest/src/ps2_frame_dump_tests.cpp
++++ /dev/null
+@@ -1,61 +0,0 @@
+-#include "MiniTest.h"
+-#include "runtime/ps2_frame_dump.h"
+-#include "ps2_host_backend.h"
+-
+-#include <array>
+-#include <cstdint>
+-#include <cstring>
+-#include <filesystem>
+-#include <string>
+-
+-namespace
+-{
+-    std::filesystem::path frameDumpTestDir()
+-    {
+-        return std::filesystem::path(PS2X_TEST_BINARY_DIR) / "frame_dump_test";
+-    }
+-}
+-
+-void register_ps2_frame_dump_tests()
+-{
+-    MiniTest::Case("FrameDump", [](TestCase &tc)
+-                   {
+-        tc.Run("writes frame-<tick>.png with the presented pixels", [](TestCase &t)
+-               {
+-            const std::filesystem::path dir = frameDumpTestDir();
+-            std::error_code ec;
+-            std::filesystem::remove_all(dir, ec);
+-
+-            const std::array<uint8_t, 3u * 2u * 4u> pixels = {
+-                255u, 0u, 0u, 255u, 0u, 255u, 0u, 255u, 0u, 0u, 255u, 255u,
+-                10u, 20u, 30u, 255u, 40u, 50u, 60u, 128u, 70u, 80u, 90u, 0u};
+-            const std::string dirText = dir.string();
+-            t.IsTrue(ps2DumpPresentedFrame(dirText.c_str(), 42u, pixels.data(), 3u, 2u), "dump succeeds");
+-
+-            const std::filesystem::path file = dir / "frame-00000042.png";
+-            t.IsTrue(std::filesystem::exists(file), "frame-00000042.png exists");
+-
+-            Image image = LoadImage(file.string().c_str());
+-            t.IsTrue(image.data != nullptr, "png loads");
+-            t.Equals(image.width, 3, "width");
+-            t.Equals(image.height, 2, "height");
+-            if (image.data != nullptr)
+-            {
+-                ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+-                t.IsTrue(std::memcmp(image.data, pixels.data(), pixels.size()) == 0, "pixels equal");
+-            }
+-            UnloadImage(image); });
+-
+-        tc.Run("null dir returns false and writes nothing", [](TestCase &t)
+-               {
+-            const std::filesystem::path dir = frameDumpTestDir() / "null_dir";
+-            std::error_code ec;
+-            std::filesystem::remove_all(dir, ec);
+-
+-            const std::array<uint8_t, 4u> pixel = {1u, 2u, 3u, 4u};
+-            t.IsFalse(ps2DumpPresentedFrame(nullptr, 7u, pixel.data(), 1u, 1u), "null dir fails");
+-            t.IsFalse(ps2DumpPresentedFrame("", 7u, pixel.data(), 1u, 1u), "empty dir fails");
+-            t.IsFalse(std::filesystem::exists("frame-00000007.png"), "nothing written to the working dir");
+-            t.IsFalse(std::filesystem::exists(dir), "nothing written to the test dir"); });
+-    });
+-}
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index 0636f92..b5d9f04 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -330,72 +330,6 @@ namespace
+ #endif
+     }
+ 
+-    struct FrameTimeRun
+-    {
+-        uint64_t vsyncTick = 0u;
+-        bool logOpened = false;
+-        std::vector<std::string> lines; // non-empty lines, header first
+-    };
+-
+-    // Runs frameTimeDrive under PS2X_FRAME_TIME and returns the log's lines.
+-    FrameTimeRun runFrameTimeLog()
+-    {
+-        FrameTimeRun run;
+-        const std::filesystem::path path =
+-            std::filesystem::temp_directory_path() /
+-            ("ps2x-frame-time-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
+-        std::error_code ec;
+-        std::filesystem::remove(path, ec);
+-        const std::string pathStr = path.string();
+-        setFrameTimeEnv(pathStr.c_str());
+-        {
+-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+-            PS2Runtime runtime;
+-            runtime.registerFunction(kDrivePc, frameTimeDrive);
+-            s_frameTimeVSyncsSeen = 0u;
+-            R5900Context mainContext{};
+-            mainContext.pc = kDrivePc;
+-            runtime.eeScheduler().reset(rdram.data(), mainContext);
+-            runtime.eeScheduler().run();
+-            run.vsyncTick = runtime.eeScheduler().currentVSyncTick();
+-        }
+-        setFrameTimeEnv("");
+-
+-        std::ifstream in(path);
+-        run.logOpened = in.is_open();
+-        for (std::string line; std::getline(in, line);)
+-            if (!line.empty())
+-                run.lines.push_back(line);
+-        in.close();
+-        std::filesystem::remove(path, ec);
+-        return run;
+-    }
+-
+-    // PS2X_PC_SAMPLE: the guest spins for kPcSampleSpinMs with ctx->pc at kPcSampleLoopPc, then stops.
+-    constexpr uint32_t kPcSampleEntryPc = 0x00171000u;
+-    constexpr uint32_t kPcSampleLoopPc = 0x00171010u;
+-    constexpr int kPcSampleSpinMs = 400;
+-
+-    void pcSampleSpin(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+-    {
+-        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPcSampleSpinMs);
+-        while (std::chrono::steady_clock::now() < end)
+-            ctx->pc = kPcSampleLoopPc;
+-        ctx->pc = 0u;
+-        runtime->requestStop();
+-    }
+-
+-    void setPcSampleEnv(const char *value)
+-    {
+-#ifdef _MSC_VER
+-        _putenv_s("PS2X_PC_SAMPLE", value);
+-#else
+-        if (value && *value)
+-            setenv("PS2X_PC_SAMPLE", value, 1);
+-        else
+-            unsetenv("PS2X_PC_SAMPLE");
+-#endif
+-    }
+ }
+ 
+ void register_ps2_gs_external_tests()
+@@ -597,120 +531,40 @@ void register_ps2_gs_external_tests()
+ 
+     MiniTest::Case("EeSchedulerFrameTime", [](TestCase &tc)
+     {
+-        tc.Run("PS2X_FRAME_TIME writes one tick,wall_us,busy_us line per VBlankStart", [](TestCase &t)
+-        {
+-            const FrameTimeRun run = runFrameTimeLog();
+-            t.IsTrue(run.vsyncTick >= kFrameTimeVSyncs, "the scheduler ran at least 3 vsyncs");
+-            t.IsTrue(run.logOpened, "the frame-time log exists");
+-            const std::vector<std::string> &lines = run.lines;
+-
+-            t.IsTrue(!lines.empty() && lines[0] == "tick,wall_us,busy_us", "header line");
+-            t.IsTrue(lines.size() >= 1u + kFrameTimeVSyncs, "header + one line per vsync");
+-            uint64_t prevTick = 0u;
+-            bool parsed = lines.size() > 1u, ticksIncrease = true, busyWithinWall = true, firstIsZero = false;
+-            for (size_t i = 1; i < lines.size(); ++i)
+-            {
+-                uint64_t tick = 0u, wall = 0u, busy = 0u;
+-                char c1 = 0, c2 = 0;
+-                std::istringstream ss(lines[i]);
+-                ss >> tick >> c1 >> wall >> c2 >> busy;
+-                if (!ss || c1 != ',' || c2 != ',')
+-                {
+-                    parsed = false;
+-                    break;
+-                }
+-                if (i == 1u)
+-                    firstIsZero = wall == 0u && busy == 0u;
+-                else
+-                    busyWithinWall = busyWithinWall && busy <= wall;
+-                ticksIncrease = ticksIncrease && tick > prevTick;
+-                prevTick = tick;
+-            }
+-            t.IsTrue(parsed, "every line is tick,wall_us,busy_us");
+-            t.IsTrue(ticksIncrease, "ticks strictly increase");
+-            t.IsTrue(firstIsZero, "the first vsync writes wall=busy=0");
+-            t.IsTrue(busyWithinWall, "0 <= busy <= wall on every later line");
+-        });
+-
+-        tc.Run("PS2X_FRAME_TIME counts the scheduler's idle wait as pacing, not busy", [](TestCase &t)
++        tc.Run("without a plugin the engine writes no diagnostics (PS2X_FRAME_TIME, PS2X_PC_SAMPLE set)", [](TestCase &t)
+         {
+-            // The guest only waits for vsync, so every guest thread is blocked and the scheduler
+-            // sleeps in waitForEvent for nearly the whole frame: busy must be a small part of wall.
+-            const FrameTimeRun run = runFrameTimeLog();
+-            uint64_t wallSum = 0u, busySum = 0u;
+-            for (size_t i = 2; i < run.lines.size(); ++i) // skip the header and the first 0,0 line
+-            {
+-                uint64_t tick = 0u, wall = 0u, busy = 0u;
+-                char c1 = 0, c2 = 0;
+-                std::istringstream ss(run.lines[i]);
+-                ss >> tick >> c1 >> wall >> c2 >> busy;
+-                wallSum += wall;
+-                busySum += busy;
+-            }
+-            t.IsTrue(run.lines.size() >= 1u + kFrameTimeVSyncs, "header + one line per vsync");
+-            t.IsTrue(wallSum >= 10000u, "the logged vsyncs span real time (>= 10 ms)");
+-            t.IsTrue(busySum * 4u < wallSum,
+-                     "an idle guest is busy for under a quarter of the frame (busy " + std::to_string(busySum) +
+-                         " us of wall " + std::to_string(wallSum) + " us)");
+-        });
+-
+-        tc.Run("PS2X_PC_SAMPLE writes a pc histogram whose top entry is the pc the guest spins on", [](TestCase &t)
+-        {
+-            const std::filesystem::path path =
++            const std::filesystem::path dir =
+                 std::filesystem::temp_directory_path() /
+-                ("ps2x-pc-sample-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
++                ("ps2x-no-diag-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
++            const std::string frameTime = (dir / "ft.csv").string(), pcSample = (dir / "pc.csv").string();
+             std::error_code ec;
+-            std::filesystem::remove(path, ec);
+-            const std::string pathStr = path.string();
+-            setPcSampleEnv(pathStr.c_str());
++            std::filesystem::create_directories(dir, ec);
++            setFrameTimeEnv(frameTime.c_str());
++#ifdef _MSC_VER
++            _putenv_s("PS2X_PC_SAMPLE", pcSample.c_str());
++#else
++            setenv("PS2X_PC_SAMPLE", pcSample.c_str(), 1);
++#endif
+             {
+                 std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+                 PS2Runtime runtime;
+-                runtime.registerFunction(kPcSampleEntryPc, pcSampleSpin);
++                runtime.registerFunction(kDrivePc, frameTimeDrive);
++                s_frameTimeVSyncsSeen = 0u;
+                 R5900Context mainContext{};
+-                mainContext.pc = kPcSampleEntryPc;
++                mainContext.pc = kDrivePc;
+                 runtime.eeScheduler().reset(rdram.data(), mainContext);
+                 runtime.eeScheduler().run();
++                t.IsTrue(runtime.eeScheduler().currentVSyncTick() >= kFrameTimeVSyncs, "the guest ran its vsyncs");
+             }
+-            setPcSampleEnv("");
+-
+-            std::ifstream in(path);
+-            t.IsTrue(in.is_open(), "the pc-sample CSV exists");
+-            std::string header;
+-            std::getline(in, header);
+-            t.IsTrue(header == "tick,tid,pc,count,vu1,iop,gs,gsvsync", "header line (got '" + header + "')");
+-            std::unordered_map<uint32_t, uint64_t> byPc;
+-            uint64_t total = 0u;
+-            for (std::string line; std::getline(in, line);)
+-            {
+-                if (line.empty())
+-                    continue;
+-                std::vector<std::string> cols;
+-                std::stringstream ss(line);
+-                for (std::string col; std::getline(ss, col, ',');)
+-                    cols.push_back(col);
+-                if (cols.size() != 8u)
+-                    continue;
+-                const uint32_t pc = static_cast<uint32_t>(std::stoul(cols[2], nullptr, 16));
+-                const uint64_t count = std::stoull(cols[3]);
+-                byPc[pc] += count;
+-                total += count;
+-            }
+-            in.close();
+-            std::filesystem::remove(path, ec);
+-
+-            uint32_t topPc = 0u;
+-            uint64_t topCount = 0u;
+-            for (const auto &[pc, count] : byPc)
+-                if (count > topCount)
+-                {
+-                    topPc = pc;
+-                    topCount = count;
+-                }
+-            t.IsTrue(total >= 10u, "at least 10 samples over the spin (got " + std::to_string(total) + ")");
+-            t.IsTrue(topPc == kPcSampleLoopPc,
+-                     "the top pc is the spin pc (top 0x" + [&] { std::ostringstream o; o << std::hex << topPc; return o.str(); }() +
+-                         " with " + std::to_string(topCount) + " of " + std::to_string(total) + ")");
++            setFrameTimeEnv("");
++#ifdef _MSC_VER
++            _putenv_s("PS2X_PC_SAMPLE", "");
++#else
++            unsetenv("PS2X_PC_SAMPLE");
++#endif
++            t.IsFalse(std::filesystem::exists(frameTime), "no frame-time CSV");
++            t.IsFalse(std::filesystem::exists(pcSample), "no PC sample CSV");
++            std::filesystem::remove_all(dir, ec);
+         });
+     });
+ }
+diff --git a/ps2xTest/src/ps2_input_script_tests.cpp b/ps2xTest/src/ps2_input_script_tests.cpp
+deleted file mode 100644
+index fb98d9d..0000000
+--- a/ps2xTest/src/ps2_input_script_tests.cpp
++++ /dev/null
+@@ -1,243 +0,0 @@
+-#include "MiniTest.h"
+-#include "runtime/ps2_input_script.h"
+-
+-#include <array>
+-#include <cstdint>
+-#include <cstring>
+-#include <sstream>
+-#include <string>
+-
+-namespace
+-{
+-    struct FakeMemory
+-    {
+-        std::array<uint8_t, 0x1000> bytes{};
+-
+-        void write32(uint32_t addr, uint32_t value) { std::memcpy(bytes.data() + addr, &value, 4u); }
+-
+-        Ps2InputScript::ReadMem reader()
+-        {
+-            return [this](uint32_t addr, uint32_t width, uint32_t &out)
+-            {
+-                const uint32_t physical = addr & 0x01FFFFFFu;
+-                if (physical + width > bytes.size())
+-                    return false;
+-                out = 0u;
+-                std::memcpy(&out, bytes.data() + physical, width);
+-                return true;
+-            };
+-        }
+-    };
+-
+-    bool parseOk(Ps2InputScript &script, const std::string &text)
+-    {
+-        std::string error;
+-        return script.parse(text, error);
+-    }
+-}
+-
+-void register_ps2_input_script_tests()
+-{
+-    MiniTest::Case("InputScript", [](TestCase &tc)
+-                   {
+-        tc.Run("parses every step kind, comments and blank lines", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            std::string error;
+-            const bool ok = script.parse(
+-                "# title screen\n"
+-                "timeout 0x3c\n"
+-                "\n"
+-                "wait vsync 10   # settle\n"
+-                "wait mem 0x100 4 == 0x2a\n"
+-                "wait mem *0x200+0x10 2 != 7\n"
+-                "press start+cross 3\n"
+-                "capture title 2\n"
+-                "watch *0x200+4 1\n"
+-                "log hello world\n"
+-                "quit\n",
+-                error);
+-            t.IsTrue(ok, "parse succeeds: " + error);
+-            t.Equals(script.timeoutSeconds(), 60.0, "timeout header");
+-            const auto &steps = script.steps();
+-            t.Equals(steps.size(), static_cast<size_t>(8), "eight steps");
+-            if (steps.size() != 8u)
+-                return;
+-            t.IsTrue(steps[0].op == Ps2InputScript::Op::WaitVsync && steps[0].count == 10u, "wait vsync");
+-            t.Equals(steps[0].line, 4, "line numbers count comments and blanks");
+-            t.IsTrue(steps[1].op == Ps2InputScript::Op::WaitMem && steps[1].ref.addr == 0x100u && !steps[1].ref.deref &&
+-                         steps[1].width == 4u && steps[1].equal && steps[1].value == 0x2au,
+-                     "wait mem");
+-            t.IsTrue(steps[2].ref.deref && steps[2].ref.addr == 0x200u && steps[2].ref.offset == 0x10u &&
+-                         steps[2].width == 2u && !steps[2].equal && steps[2].value == 7u,
+-                     "wait mem deref");
+-            t.IsTrue(steps[3].op == Ps2InputScript::Op::Press && steps[3].mask == (0x0008u | 0x4000u) && steps[3].count == 3u,
+-                     "press");
+-            t.IsTrue(steps[4].op == Ps2InputScript::Op::Capture && steps[4].name == "title" && steps[4].count == 2u, "capture");
+-            t.IsTrue(steps[5].op == Ps2InputScript::Op::Watch && steps[5].ref.deref && steps[5].ref.offset == 4u &&
+-                         steps[5].width == 1u,
+-                     "watch");
+-            t.IsTrue(steps[6].op == Ps2InputScript::Op::Log && steps[6].name == "hello world", "log text");
+-            t.IsTrue(steps[7].op == Ps2InputScript::Op::Quit, "quit");
+-            t.IsTrue(script.hasCaptureSteps(), "has capture steps"); });
+-
+-        tc.Run("default timeout is 600 seconds", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "quit\n"), "parse");
+-            t.Equals(script.timeoutSeconds(), 600.0, "default timeout");
+-            t.IsFalse(script.hasCaptureSteps(), "no capture steps"); });
+-
+-        tc.Run("parse errors name the line", [](TestCase &t)
+-               {
+-            const char *bad[] = {
+-                "wait vsync\n",
+-                "\n# c\npress jump 2\n",
+-                "wait mem 0x100 3 == 1\n",
+-                "wait mem 0x100 1 < 1\n",
+-                "wait mem 0x100 1 == 0x100\n",
+-                "capture title 0\n",
+-                "frobnicate\n",
+-                "quit\ntimeout 5\n",
+-                "wait vsync 12abc\n",
+-            };
+-            const int lines[] = {1, 3, 1, 1, 1, 1, 1, 2, 1};
+-            for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i)
+-            {
+-                Ps2InputScript script;
+-                std::string error;
+-                t.IsFalse(script.parse(bad[i], error), std::string("rejects: ") + bad[i]);
+-                const std::string prefix = "line " + std::to_string(lines[i]) + ":";
+-                t.IsTrue(error.rfind(prefix, 0) == 0u, "error '" + error + "' starts with " + prefix);
+-            }
+-        });
+-
+-        tc.Run("wait vsync and press hold length", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "wait vsync 2\npress circle+up 3\nquit\n"), "parse");
+-            FakeMemory mem;
+-            std::ostringstream log;
+-            const auto read = mem.reader();
+-
+-            uint64_t tick = 100;
+-            script.onVSync(tick, read, log); // step 0 begins
+-            t.Equals(script.buttons(), static_cast<uint16_t>(0xFFFFu), "nothing held while waiting");
+-            script.onVSync(++tick, read, log);
+-            t.Equals(script.buttons(), static_cast<uint16_t>(0xFFFFu), "still waiting");
+-            script.onVSync(++tick, read, log); // 102: wait done, press begins
+-            const uint16_t held = static_cast<uint16_t>(0xFFFFu & ~(0x2000u | 0x0010u));
+-            t.Equals(script.buttons(), held, "press begins at tick 102");
+-            script.onVSync(++tick, read, log);
+-            script.onVSync(++tick, read, log);
+-            t.Equals(script.buttons(), held, "held through tick 104");
+-            script.onVSync(++tick, read, log); // 105: released
+-            t.Equals(script.buttons(), static_cast<uint16_t>(0xFFFFu), "released after 3 vsyncs");
+-            t.IsFalse(script.quitRequested(), "release vsync before next step");
+-            script.onVSync(++tick, read, log); // 106: quit
+-            t.IsTrue(script.quitRequested(), "quit after release vsync");
+-            const std::string text = log.str();
+-            t.IsTrue(text.find("[script] step 0 line 1 begin tick=100") != std::string::npos, "step 0 logged");
+-            t.IsTrue(text.find("[script] step 1 line 2 begin tick=102") != std::string::npos, "step 1 logged");
+-            t.IsTrue(text.find("[script] step 2 line 3 begin tick=106") != std::string::npos, "step 2 logged"); });
+-
+-        tc.Run("wait mem with deref and watch", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "watch 0x40 4\nwait mem *0x200+0x8 4 == 5\nlog done\nquit\n"), "parse");
+-            FakeMemory mem;
+-            std::ostringstream log;
+-            const auto read = mem.reader();
+-
+-            script.onVSync(1, read, log);
+-            t.IsFalse(script.quitRequested(), "null pointer is not satisfied");
+-            mem.write32(0x200, 0x300);
+-            mem.write32(0x40, 9);
+-            script.onVSync(2, read, log);
+-            t.IsFalse(script.quitRequested(), "pointee not yet 5");
+-            t.IsTrue(log.str().find("[script] watch 0x40 0x0->0x9 tick=2") != std::string::npos, "watch logged change");
+-            mem.write32(0x308, 5);
+-            script.onVSync(3, read, log);
+-            t.IsTrue(script.quitRequested(), "deref satisfied, log and quit run in the same vsync");
+-            t.IsTrue(log.str().find("[script] log done") != std::string::npos, "log step printed"); });
+-
+-        tc.Run("capture counts one frame per distinct tick", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "capture title 2\nquit\n"), "parse");
+-            FakeMemory mem;
+-            std::ostringstream log;
+-            const auto read = mem.reader();
+-            std::string fileName;
+-            std::string screen;
+-            uint32_t k = 99;
+-
+-            t.IsFalse(script.takeCapture(5, fileName, screen, k), "no capture before the step begins");
+-            script.onVSync(10, read, log);
+-            t.IsTrue(script.takeCapture(10, fileName, screen, k), "first frame");
+-            t.Equals(fileName, std::string("title-0.png"), "k=0 file");
+-            t.Equals(k, 0u, "k=0");
+-            script.commitCapture(true);
+-            t.IsFalse(script.takeCapture(10, fileName, screen, k), "same tick not captured twice");
+-            script.onVSync(11, read, log);
+-            t.IsFalse(script.quitRequested(), "one of two frames");
+-            t.IsTrue(script.takeCapture(11, fileName, screen, k), "second frame");
+-            script.commitCapture(false);
+-            t.IsTrue(script.takeCapture(12, fileName, screen, k), "failed write retried");
+-            t.Equals(fileName, std::string("title-1.png"), "k=1 reused after failure");
+-            script.commitCapture(true);
+-            t.IsFalse(script.takeCapture(13, fileName, screen, k), "no more than n frames");
+-            script.onVSync(12, read, log);
+-            t.IsTrue(script.quitRequested(), "capture completes after n written frames"); });
+-
+-        tc.Run("capture wants frames only during its step and refuses frames older than the step", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "wait vsync 2\ncapture title 1\nquit\n"), "parse");
+-            FakeMemory mem;
+-            std::ostringstream log;
+-            const auto read = mem.reader();
+-            std::string fileName;
+-            std::string screen;
+-            uint32_t k = 0u;
+-            script.onVSync(1, read, log);
+-            t.IsFalse(script.captureWanted(), "no frames wanted while waiting");
+-            script.onVSync(3, read, log);
+-            t.IsTrue(script.captureWanted(), "frames wanted once the capture step begins (tick 3)");
+-            t.IsFalse(script.takeCapture(2, fileName, screen, k), "a frame from before the step is refused");
+-            t.IsTrue(script.takeCapture(3, fileName, screen, k), "the step's own frame is taken");
+-            script.commitCapture(true);
+-            t.IsFalse(script.captureWanted(), "no more frames wanted once n are written");
+-            script.onVSync(4, read, log);
+-            t.IsTrue(script.quitRequested(), "script moves on");
+-            t.IsFalse(script.captureWanted(), "none wanted after the step"); });
+-
+-        tc.Run("timeout with injected clock", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "timeout 30\nwait vsync 1000\nquit\n"), "parse");
+-            FakeMemory mem;
+-            std::ostringstream log;
+-            script.start(100.0);
+-            script.onVSync(1, mem.reader(), log);
+-            std::string message;
+-            t.IsFalse(script.timedOut(129.5, message), "within timeout");
+-            t.IsTrue(script.timedOut(130.0, message), "timed out");
+-            t.Equals(message, std::string("[script] TIMEOUT step 0 line 2: wait vsync 1000"), "timeout message"); });
+-
+-        tc.Run("loop end before quit exits 4, after quit 0", [](TestCase &t)
+-               {
+-            Ps2InputScript script;
+-            t.IsTrue(parseOk(script, "wait vsync 2\nquit\n"), "parse");
+-            FakeMemory mem;
+-            std::ostringstream log;
+-            std::string message;
+-            script.onVSync(1, mem.reader(), log);
+-            t.Equals(script.loopEndExitCode(message), 4, "game ended before quit");
+-            t.Equals(message, std::string("[script] game ended before quit at step 0 line 1: wait vsync 2"), "end message");
+-            script.onVSync(3, mem.reader(), log);
+-            t.IsTrue(script.quitRequested(), "quit reached");
+-            t.Equals(script.loopEndExitCode(message), 0, "quit exits 0");
+-            t.IsTrue(message.empty(), "no message after quit"); });
+-    });
+-}
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 3f67f2f..692503c 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -5,7 +5,6 @@
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/ps2_diag_hooks.h"
+-#include "runtime/ps2_vu1_capture.h"
+ #include "runtime/ps2_vu1_external.h"
+ #include "ps2_runtime.h"
+ 
+@@ -1764,12 +1763,11 @@ void register_ps2_vu1_tests()
+             t.Equals(vu1.state().vi[1], 0,
+                      "instruction following a reserved opcode must not execute");
+         });
+-        tc.Run("PS2X_VU1_CAPTURE writes inputs, outputs and the PATH1 packet of an MSCAL run", [](TestCase &t)
++        tc.Run("without a plugin PS2X_VU1_CAPTURE writes nothing", [](TestCase &t)
+         {
+-            namespace cap = ps2x::vu1capture;
+             const std::filesystem::path dir =
+                 std::filesystem::temp_directory_path() /
+-                ("ps2x-vu1-capture-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
++                ("ps2x-vu1-nocap-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+             std::error_code ec;
+             std::filesystem::remove_all(dir, ec);
+             const std::string spec = dir.string() + ",8,2";
+@@ -1778,78 +1776,25 @@ void register_ps2_vu1_tests()
+ #else
+             setenv("PS2X_VU1_CAPTURE", spec.c_str(), 1);
+ #endif
+-            std::vector<uint8_t> packet(32u, 0u);
+             {
+                 PS2Runtime runtime;
+                 t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+                 t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+-#ifdef _MSC_VER
+-                _putenv_s("PS2X_VU1_CAPTURE", "");
+-#else
+-                unsetenv("PS2X_VU1_CAPTURE");
+-#endif
+                 uint8_t *code = runtime.memory().getVU1Code();
+-                uint8_t *data = runtime.memory().getVU1Data();
+                 std::memset(code, 0, PS2_VU1_CODE_SIZE);
+-                std::memset(data, 0, PS2_VU1_DATA_SIZE);
+-                // 0x40: XGKICK vi0 ; 0x48: IADDIU vi1, vi0, 5 with E bit ; 0x50: delay slot.
+-                writeVuInstructionPair(code, 0x40u, makeVuLowerSpecial(0x6Cu, 0u), kVuUpperNop);
+-                writeVuInstructionPair(code, 0x48u, makeVuIaddiu(1u, 0u, 5), kVuUpperNop | 0x40000000u);
+-                writeVuInstructionPair(code, 0x50u, 0u, kVuUpperNop);
+-                const uint64_t gifTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
+-                std::memcpy(data, &gifTag, sizeof(gifTag));
+-                for (uint32_t i = 0; i < 16u; ++i)
+-                    data[16u + i] = static_cast<uint8_t>(0xA0u + i);
+-                std::memcpy(packet.data(), data, packet.size());
+-
+-                // Same inputs twice: the second run is a duplicate and must not be written.
+-                for (int run = 0; run < 2; ++run)
+-                {
+-                    runtime.vu1().state().vi[1] = 0;
+-                    const uint32_t mscal = makeVifCmd(0x14u, 0u, 0x40u / 8u);
+-                    runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
+-                }
++                writeVuInstructionPair(code, 0x40u, makeVuIaddiu(1u, 0u, 5), kVuUpperNop | 0x40000000u);
++                writeVuInstructionPair(code, 0x48u, 0u, kVuUpperNop);
++                runtime.vu1().state().vi[1] = 0;
++                const uint32_t mscal = makeVifCmd(0x14u, 0u, 0x40u / 8u);
++                runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
+                 t.Equals(runtime.vu1().state().vi[1], 5, "the program ran");
+             }
+-
+-            std::vector<std::filesystem::path> files;
+-            for (const auto &e : std::filesystem::directory_iterator(dir, ec))
+-                if (e.path().extension() == ".cap")
+-                    files.push_back(e.path());
+-            t.Equals(files.size(), static_cast<size_t>(1u), "one capture file (the duplicate run is not written)");
+-            t.IsTrue(std::filesystem::exists(dir / "summary.txt"), "summary.txt is written");
+-            if (files.size() != 1u)
+-                return;
+-            std::ifstream in(files[0], std::ios::binary);
+-            const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+-            cap::FileHeader h{};
+-            t.IsTrue(bytes.size() >= sizeof(h), "file holds a header");
+-            if (bytes.size() < sizeof(h))
+-                return;
+-            std::memcpy(&h, bytes.data(), sizeof(h));
+-            t.IsTrue(std::memcmp(h.magic, cap::kMagic, 8) == 0, "magic");
+-            t.Equals(h.version, cap::kVersion, "version");
+-            t.Equals(h.kind, static_cast<uint32_t>(cap::Mscal), "kind = MSCAL");
+-            t.Equals(h.startPC, 0x40u, "start pc in bytes");
+-            t.Equals(h.packetCount, 1u, "one PATH1 packet");
+-            t.IsTrue(h.cyclesRun > 0u && (h.flags & cap::FlagBudgetHit) == 0u, "cycles counted, budget not hit");
+-            const size_t base = sizeof(h) + h.codeBytes + 2u * h.dataBytes + 2u * h.stateBytes;
+-            t.Equals(bytes.size(), base + 4u + 32u, "file size = sections + one 32-byte packet");
+-            if (bytes.size() != base + 4u + 32u)
+-                return;
+-            cap::StateRecord before{}, after{};
+-            std::memcpy(&before, bytes.data() + sizeof(h) + h.codeBytes + h.dataBytes, sizeof(before));
+-            std::memcpy(&after, bytes.data() + sizeof(h) + h.codeBytes + 2u * h.dataBytes + h.stateBytes, sizeof(after));
+-            t.Equals(before.vi[1], 0, "state before: vi1 = 0");
+-            t.Equals(after.vi[1], 5, "state after: vi1 = 5");
+-            uint32_t lower = 0;
+-            std::memcpy(&lower, bytes.data() + sizeof(h) + 0x40u, 4u);
+-            t.Equals(lower, makeVuLowerSpecial(0x6Cu, 0u), "code section holds micro memory");
+-            uint32_t size = 0;
+-            std::memcpy(&size, bytes.data() + base, 4u);
+-            t.Equals(size, 32u, "packet size");
+-            t.IsTrue(std::memcmp(bytes.data() + base + 4u, packet.data(), 32u) == 0, "packet bytes = GIFtag + IMAGE qword");
+-            std::filesystem::remove_all(dir, ec);
++#ifdef _MSC_VER
++            _putenv_s("PS2X_VU1_CAPTURE", "");
++#else
++            unsetenv("PS2X_VU1_CAPTURE");
++#endif
++            t.IsFalse(std::filesystem::exists(dir), "no capture directory");
+         });
+ 
+         tc.Run("diagnostics hooks see a VU1 MSCAL run: begin, its PATH1 packet, end, inside a VU1 section", [](TestCase &t)
+-- 
+2.46.2.windows.1
+

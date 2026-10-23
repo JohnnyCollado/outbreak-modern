@@ -1,0 +1,1200 @@
+From 9f8748f30560d681245d9bf7b788b687683307dd Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:12:14 -0400
+Subject: [PATCH] Runtime: diagnostics plugin hook API and loader
+
+Diagnostics move out of the engine into an optional plugin library. This patch
+adds the seam: one PS2DiagHooks pointer, null = no plugin (a play build), one
+load and null check per hook site, same pattern as PS2ExternalGS/PS2ExternalVu1.
+The in-engine diagnostics stay until the next patch removes them.
+
+- runtime/ps2_diag_hooks.h (light header, versioned PS2_DIAG_API_VERSION 1):
+  PS2DiagHost (apiVersion, sizeof(VU1State), readGuest, vsyncTick) and
+  PS2DiagHooks: onVsync(tick, idleWaitNs), wantsFrame(tick), onGuestEnter(pc*,
+  tid)/onGuestLeave, onSectionEnter/Leave (Vu1, Iop, Gs, GsVsync),
+  onVu1Begin/onVu1Path1/onVu1End, onRunEnd (scheduler thread); padButtons
+  (game thread); onFrame, onHostFrame (0 go on, 1 stop, >=2 exit code),
+  onShutdown (main thread). PS2DiagSectionScope for hot paths.
+- src/lib/ps2_diag.cpp: ps2LoadDiagPlugin loads PS2X_DIAG=<path>, else
+  <exe dir>/<PS2X_DIAG_NAME>.dll|.so if present (CMake cache, default ob_diag);
+  entry ps2_diag_create(host, &exitCode): null + 0 = nothing to do, null + code
+  = exit with it. A named plugin that does not load = exit 2.
+- Hook sites: scheduler (VBlankStart onVsync after the script step and before
+  the snapshot decision; pacing wait summed when a plugin is loaded; guest
+  enter/leave; run end), GIF arbiter (Gs), VU1 interpreter run (Vu1) and
+  finishXgkick (Path1), runtime IOP calls (Iop), VIF1 MSCAL/MSCNT callbacks
+  (begin/end, both VU1 backends), pad poll, UploadFrame (onFrame; the external
+  GS frame demand includes wantsFrame), the host loop and its end. Initialize
+  fills the host and loads the plugin after the GS/VU1 selection.
+
+Tests: recording hooks see one onVsync per VBlankStart with a cumulative idle
+wait and the running context's pc; wantsFrame picks the one external GS
+snapshot, GS packet and vsync sections pair up; a pad-owning plugin replaces
+the host pad; an MSCAL run reports begin, its PATH1 packet inside the VU1
+section, and end; the loader returns 0 with nothing to load and 2 for a
+missing PS2X_DIAG.
+---
+ ps2xRuntime/CMakeLists.txt                   |   3 +
+ ps2xRuntime/include/runtime/ee_scheduler.h   |   5 +
+ ps2xRuntime/include/runtime/ps2_diag_hooks.h | 125 +++++++++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp   |  22 +-
+ ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp   |   2 +
+ ps2xRuntime/src/lib/ps2_diag.cpp             | 125 +++++++++++
+ ps2xRuntime/src/lib/ps2_pad.cpp              |  15 +-
+ ps2xRuntime/src/lib/ps2_runtime.cpp          | 138 ++++++++++--
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp      |   4 +
+ ps2xTest/CMakeLists.txt                      |   1 +
+ ps2xTest/src/main.cpp                        |   2 +
+ ps2xTest/src/ps2_diag_hooks_tests.cpp        | 208 +++++++++++++++++++
+ ps2xTest/src/ps2_vu1_tests.cpp               |  84 ++++++++
+ 13 files changed, 709 insertions(+), 25 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_diag_hooks.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_diag.cpp
+ create mode 100644 ps2xTest/src/ps2_diag_hooks_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 54eabd3..c411915 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -16,6 +16,7 @@ option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" O
+ option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
+ option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
+ option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
++set(PS2X_DIAG_NAME "ob_diag" CACHE STRING "Diagnostics plugin (runtime/ps2_diag_hooks.h) loaded from beside the exe when present; PS2X_DIAG=<path> overrides")
+ set(PS2X_EXTERNAL_GS_DIR "" CACHE PATH "Directory of an external GS library (target ps2x_external_gs); empty = CPU GS only")
+ set(PS2X_EXTERNAL_VU1_DIR "" CACHE PATH "Directory of an external VU1 library (target ps2x_external_vu1); empty = VU1 interpreter only")
+ 
+@@ -388,6 +389,7 @@ add_library(ps2_runtime STATIC
+     src/lib/gs/ps2_gif_arbiter.cpp
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
++    src/lib/ps2_diag.cpp
+     src/lib/ps2_frame_dump.cpp
+     src/lib/ps2_pc_sampler.cpp
+     src/lib/ps2_input_script.cpp
+@@ -441,6 +443,7 @@ endif()
+ 
+ target_compile_definitions(ps2_runtime PRIVATE
+     PS2X_HAS_FFMPEG=$<BOOL:${PS2X_ENABLE_FFMPEG}>
++    PS2X_DIAG_NAME="${PS2X_DIAG_NAME}"
+ )
+ 
+ file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 5cc4208..580effa 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -3,6 +3,8 @@
+ #include "ps2_runtime.h"
+ #include "runtime/ps2_pc_sampler.h"
+ 
++class PS2DiagHooks;
++
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -469,4 +471,7 @@ private:
+ 
+     // PS2X_PC_SAMPLE=<path> (read once in reset): guest PC sampler, null when unset.
+     std::unique_ptr<ps2x::pcsample::Sampler> m_pcSampler;
++
++    // Diagnostics plugin hooks (runtime/ps2_diag_hooks.h), read once in reset; null = no plugin.
++    PS2DiagHooks *m_diag = nullptr;
+ };
+diff --git a/ps2xRuntime/include/runtime/ps2_diag_hooks.h b/ps2xRuntime/include/runtime/ps2_diag_hooks.h
+new file mode 100644
+index 0000000..2b692d3
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_diag_hooks.h
+@@ -0,0 +1,125 @@
++#ifndef PS2_DIAG_HOOKS_H
++#define PS2_DIAG_HOOKS_H
++
++// Diagnostics hook API. Diagnostics (scripted input, frame captures, frame timing, profilers, VU1 capture) live
++// outside the engine, in an optional plugin library; mods can reuse the same API later. The engine keeps one
++// PS2DiagHooks pointer: null = no plugin (a play build), and every hook site is one load and null check.
++//
++// Loading (ps2LoadDiagPlugin, once at start-up, main thread): the library PS2X_DIAG=<path> names, else
++// <exe dir>/<PS2X_DIAG_NAME><shared library suffix> if that file exists, else none. Its C entry point
++// PS2_DIAG_ENTRY_NAME,
++//     PS2DiagHooks *ps2_diag_create(const PS2DiagHost *host, int *exitCode);
++// returns the hooks (alive until the process exits) or null: *exitCode 0 = nothing to do (the engine runs
++// without hooks), anything else = the engine exits with that code (a bad script, a version mismatch).
++// A plugin talks to the engine only through this header (plain types and the PS2DiagHost callbacks) and the
++// VU1State layout; it refuses a host whose apiVersion or vu1StateBytes differ from its own.
++//
++// Threads: the EE executor (scheduler) thread, the game thread (pad polls) and the main (window) thread call
++// different hooks, as marked; a plugin synchronises its own state.
++
++#include <cstdint>
++
++struct VU1State;
++
++#define PS2_DIAG_API_VERSION 1u
++#define PS2_DIAG_ENTRY_NAME "ps2_diag_create"
++
++// Engine services for a plugin.
++struct PS2DiagHost
++{
++    uint32_t apiVersion;    // PS2_DIAG_API_VERSION the engine was built with
++    uint32_t vu1StateBytes; // sizeof(VU1State) in the engine
++    void *user;             // passed back to each callback
++    // Reads <bytes> of EE RAM at a guest address (segment bits ignored); false when out of range. Any thread.
++    bool (*readGuest)(void *user, uint32_t guestAddr, void *dst, uint32_t bytes);
++    // The current guest vsync tick. Any thread.
++    uint64_t (*vsyncTick)(void *user);
++};
++
++// Engine sections a profiler can attribute time to.
++enum class PS2DiagSection : uint32_t
++{
++    Vu1 = 0,     // a VU1 microprogram run (interpreter or external VU1)
++    Iop = 1,     // IOP work on the EE executor (RPC, SIF transfer, IOP cycles)
++    Gs = 2,      // an external GS packet from the GIF arbiter
++    GsVsync = 3, // the external GS vsync and snapshot at VBlankStart
++    Count = 4
++};
++
++// One VU1 run started by VIF1 MSCAL/MSCALF (kind 0) or MSCNT (kind 1).
++struct PS2DiagVu1Run
++{
++    uint32_t kind;
++    uint32_t startPc;     // bytes; MSCNT: the state's pc on entry
++    uint32_t top, itop;   // VIF1 TOP/ITOP
++    uint32_t fbrst;       // EE-side FBRST (D enable bit 10, T enable bit 11)
++    uint32_t vpuStat;     // EE-side VPU_STAT before the run
++    uint32_t cycleBudget; // the interpreter's per-run budget
++    uint64_t codeGeneration;
++    const uint8_t *code;  // 16 KB micro memory
++    const uint8_t *data;  // 16 KB data memory before the run
++    const VU1State *state;
++};
++
++class PS2DiagHooks
++{
++public:
++    virtual ~PS2DiagHooks() = default;
++
++    // EE executor thread.
++    virtual void onVsync(uint64_t tick, uint64_t idleWaitNs) {} // each VBlankStart, after the external GS vsync;
++                                                                // idleWaitNs = total scheduler sleep so far (pacing)
++    virtual bool wantsFrame(uint64_t tick) { return false; }    // right after onVsync: true = deliver this tick's
++                                                                // frame to onFrame (external GS: one readback)
++    virtual void onGuestEnter(uint32_t *pc, int32_t threadId) {} // entering guest code; *pc is the live guest pc
++                                                                 // (the engine writes it without synchronisation)
++    virtual void onGuestLeave() {}
++    virtual void onSectionEnter(PS2DiagSection section) {}
++    virtual void onSectionLeave(PS2DiagSection section) {}
++    virtual void onVu1Begin(const PS2DiagVu1Run &run) {}
++    virtual void onVu1Path1(const uint8_t *packet, uint32_t bytes) {} // each XGKICK (PATH1) packet a VU1 run sends
++    virtual void onVu1End(const uint8_t *data, const VU1State &after, uint32_t vpuStat) {}
++    virtual void onRunEnd() {} // the scheduler's run loop ended: flush files
++
++    // Game thread: a pad poll. true = the plugin owns the pad; buttons = the active-low button word to report.
++    virtual bool padButtons(int port, uint16_t &buttons) { return false; }
++
++    // Main thread.
++    virtual void onFrame(uint64_t tick, const uint8_t *rgba, uint32_t width, uint32_t height) {} // packed RGBA8
++    virtual int onHostFrame(double nowSeconds) { return 0; } // each host loop pass: 0 go on, 1 stop the run,
++                                                             // >= 2 exit the process with that code now
++    virtual int onShutdown() { return 0; }                   // after the host loop: non-zero = process exit code
++};
++
++PS2DiagHooks *ps2DiagHooks();               // null = no plugin
++void ps2SetDiagHooks(PS2DiagHooks *hooks);  // the loader and tests
++
++// Marks a section for the plugin; one load and null check without one.
++class PS2DiagSectionScope
++{
++public:
++    explicit PS2DiagSectionScope(PS2DiagSection section) : m_hooks(ps2DiagHooks()), m_section(section)
++    {
++        if (m_hooks)
++            m_hooks->onSectionEnter(m_section);
++    }
++    ~PS2DiagSectionScope()
++    {
++        if (m_hooks)
++            m_hooks->onSectionLeave(m_section);
++    }
++    PS2DiagSectionScope(const PS2DiagSectionScope &) = delete;
++    PS2DiagSectionScope &operator=(const PS2DiagSectionScope &) = delete;
++
++private:
++    PS2DiagHooks *m_hooks;
++    PS2DiagSection m_section;
++};
++
++// Start-up: loads the plugin as described above and sets the hooks. Returns 0 (hooks set, or no plugin) or the
++// exit code the engine should stop with. Messages go to stderr ("[diag] ...").
++int ps2LoadDiagPlugin(const PS2DiagHost &host);
++
++using PS2DiagCreateFn = PS2DiagHooks *(*)(const PS2DiagHost *host, int *exitCode);
++
++#endif
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 96e389a..c5e824a 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -3,6 +3,7 @@
+ #include "ps2_log.h"
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_external.h"
++#include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_input_script.h"
+ #include "runtime/ps2_pc_sampler.h"
+ 
+@@ -162,6 +163,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     // PS2X_PC_SAMPLE=<path>: guest PC sampling profiler (runtime/ps2_pc_sampler.h). Read once here.
+     m_pcSampler.reset();
+     m_pcSampler = ps2x::pcsample::startFromEnvironment(&m_runtime.memory().gs().vsyncTick);
++    m_diag = ps2DiagHooks();
+ 
+     GuestThread main{};
+     main.id = kMainThreadId;
+@@ -331,9 +333,13 @@ void EeScheduler::run()
+                 ps2x::pcsample::state().threadId.store(running->id, std::memory_order_relaxed);
+                 ps2x::pcsample::state().context.store(&context, std::memory_order_release);
+             }
++            if (m_diag)
++                m_diag->onGuestEnter(&context.pc, running->id);
+             function(m_rdram, &context, &m_runtime);
+             if (m_pcSampler)
+                 ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
++            if (m_diag)
++                m_diag->onGuestLeave();
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_insideInterrupt = false;
+         }
+@@ -341,6 +347,8 @@ void EeScheduler::run()
+         {
+             if (m_pcSampler)
+                 ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
++            if (m_diag)
++                m_diag->onGuestLeave();
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_insideInterrupt = false;
+         }
+@@ -348,6 +356,8 @@ void EeScheduler::run()
+         {
+             if (m_pcSampler)
+                 ps2x::pcsample::state().context.store(nullptr, std::memory_order_release);
++            if (m_diag)
++                m_diag->onGuestLeave();
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_running.store(false, std::memory_order_release);
+             publishSnapshot();
+@@ -370,6 +380,8 @@ void EeScheduler::run()
+     m_running.store(false, std::memory_order_release);
+     if (m_pcSampler)
+         m_pcSampler->stop(); // writes the final CSV; the process may exit before destruction
++    if (m_diag)
++        m_diag->onRunEnd();
+     copyMainContextToRuntime();
+     publishSnapshot();
+ }
+@@ -1847,7 +1859,7 @@ void EeScheduler::processDueDeadlines()
+                 m_eventCv.wait_until(lock, pacingDeadline, [this]()
+                                      { return !m_events.empty() ||
+                                               m_stopRequested.load(std::memory_order_acquire); });
+-                if (m_frameTimeLogEnabled)
++                if (m_frameTimeLogEnabled || m_diag)
+                 {
+                     // Time blocked here is pacing, not cost: logFrameTime subtracts it.
+                     m_pacingWaitNs += static_cast<uint64_t>(
+@@ -1954,6 +1966,7 @@ void EeScheduler::processEvent(const EeEvent &event)
+         if (externalGS)
+         {
+             ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
++            PS2DiagSectionScope diagGsVsync(PS2DiagSection::GsVsync);
+             externalGS->vsync(m_vsyncTick, m_runtime.memory().gs());
+         }
+         writeGuestU32(m_vsyncFlagAddress, 1u);
+@@ -1982,11 +1995,14 @@ void EeScheduler::processEvent(const EeEvent &event)
+                             },
+                             std::cout);
+         }
++        if (m_diag)
++            m_diag->onVsync(m_vsyncTick, m_pacingWaitNs);
+         // Snapshot (a GS readback) only when a consumer wants this frame; after the script step, so a capture
+         // step that begins at this tick gets this tick's frame.
+         if (externalGS && ps2ExternalGSFrameWanted(m_vsyncTick))
+         {
+             ps2x::pcsample::Scope gsVsyncScope(ps2x::pcsample::GsVsync);
++            PS2DiagSectionScope diagGsVsync(PS2DiagSection::GsVsync);
+             PresentationFrame frame{};
+             if (externalGS->snapshot(frame.pixels, frame.width, frame.height))
+                 m_runtime.gs().publishExternalFrame(std::move(frame), m_vsyncTick);
+@@ -2113,7 +2129,7 @@ void EeScheduler::waitForEvent()
+     {
+         m_eventCv.wait(lock, [this]()
+                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+-        if (m_frameTimeLogEnabled)
++        if (m_frameTimeLogEnabled || m_diag)
+         {
+             m_pacingWaitNs += static_cast<uint64_t>(
+                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStart).count());
+@@ -2150,7 +2166,7 @@ void EeScheduler::waitForEvent()
+     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                                { return !m_events.empty() ||
+                                                         m_stopRequested.load(std::memory_order_acquire); });
+-    if (m_frameTimeLogEnabled)
++    if (m_frameTimeLogEnabled || m_diag)
+     {
+         m_pacingWaitNs += static_cast<uint64_t>(
+             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStart).count());
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index a0fdcfd..16f5fe6 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_external.h"
++#include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_pc_sampler.h"
+ #include <algorithm>
+ #include <cstring>
+@@ -62,6 +63,7 @@ void GifArbiter::drain()
+             if (externalGS)
+             {
+                 ps2x::pcsample::Scope gsScope(ps2x::pcsample::Gs);
++                PS2DiagSectionScope diagGs(PS2DiagSection::Gs);
+                 externalGS->gifPacket(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+             }
+             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+diff --git a/ps2xRuntime/src/lib/ps2_diag.cpp b/ps2xRuntime/src/lib/ps2_diag.cpp
+new file mode 100644
+index 0000000..2467c75
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_diag.cpp
+@@ -0,0 +1,125 @@
++#include "runtime/ps2_diag_hooks.h"
++
++#include <atomic>
++#include <cstdlib>
++#include <filesystem>
++#include <iostream>
++#include <string>
++
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#else
++#include <dlfcn.h>
++#include <unistd.h>
++#endif
++
++#ifndef PS2X_DIAG_NAME
++#define PS2X_DIAG_NAME "ob_diag"
++#endif
++
++namespace
++{
++    std::atomic<PS2DiagHooks *> s_diagHooks{nullptr};
++
++    std::filesystem::path exeDirectory()
++    {
++#if defined(_WIN32)
++        wchar_t buffer[MAX_PATH * 4];
++        const DWORD n = GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])));
++        if (n == 0u || n >= sizeof(buffer) / sizeof(buffer[0]))
++            return {};
++        return std::filesystem::path(std::wstring(buffer, n)).parent_path();
++#else
++        std::error_code ec;
++        const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
++        return ec ? std::filesystem::path{} : exe.parent_path();
++#endif
++    }
++
++    // Opens the library and resolves the entry point; null on failure (message in error).
++    PS2DiagCreateFn openPlugin(const std::filesystem::path &path, std::string &error)
++    {
++#if defined(_WIN32)
++        HMODULE module = LoadLibraryW(path.wstring().c_str());
++        if (!module)
++        {
++            error = "LoadLibrary failed, error " + std::to_string(GetLastError());
++            return nullptr;
++        }
++        auto fn = reinterpret_cast<PS2DiagCreateFn>(GetProcAddress(module, PS2_DIAG_ENTRY_NAME));
++#else
++        void *module = dlopen(path.string().c_str(), RTLD_NOW | RTLD_LOCAL);
++        if (!module)
++        {
++            const char *e = dlerror();
++            error = e ? e : "dlopen failed";
++            return nullptr;
++        }
++        auto fn = reinterpret_cast<PS2DiagCreateFn>(dlsym(module, PS2_DIAG_ENTRY_NAME));
++#endif
++        if (!fn)
++            error = std::string("no entry point ") + PS2_DIAG_ENTRY_NAME;
++        return fn; // the library stays loaded for the life of the process
++    }
++}
++
++PS2DiagHooks *ps2DiagHooks()
++{
++    return s_diagHooks.load(std::memory_order_acquire);
++}
++
++void ps2SetDiagHooks(PS2DiagHooks *hooks)
++{
++    s_diagHooks.store(hooks, std::memory_order_release);
++}
++
++int ps2LoadDiagPlugin(const PS2DiagHost &host)
++{
++    std::filesystem::path path;
++    bool named = false;
++    if (const char *env = std::getenv("PS2X_DIAG"); env && *env)
++    {
++        path = std::filesystem::u8path(env);
++        named = true;
++    }
++    else
++    {
++#if defined(_WIN32)
++        const char *suffix = ".dll";
++#elif defined(__APPLE__)
++        const char *suffix = ".dylib";
++#else
++        const char *suffix = ".so";
++#endif
++        const std::filesystem::path dir = exeDirectory();
++        std::error_code ec;
++        if (dir.empty() || !std::filesystem::is_regular_file(dir / (std::string(PS2X_DIAG_NAME) + suffix), ec))
++            return 0; // no plugin: the play build
++        path = dir / (std::string(PS2X_DIAG_NAME) + suffix);
++    }
++
++    std::string error;
++    const PS2DiagCreateFn create = openPlugin(path, error);
++    if (!create)
++    {
++        std::cerr << "[diag] cannot load " << path.string() << ": " << error << std::endl;
++        return named ? 2 : 0; // a plugin found beside the exe that does not load is skipped
++    }
++    int exitCode = 0;
++    PS2DiagHooks *hooks = create(&host, &exitCode);
++    if (!hooks)
++    {
++        if (exitCode != 0)
++            std::cerr << "[diag] " << path.string() << " refused to start, exit " << exitCode << std::endl;
++        return exitCode;
++    }
++    ps2SetDiagHooks(hooks);
++    std::cout << "[diag] plugin " << path.string() << std::endl;
++    return 0;
++}
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 8653dfb..44071a1 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_pad.h"
++#include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_input_script.h"
+ #include "ps2_host_backend.h"
+ #include <cstring>
+@@ -26,7 +27,7 @@ namespace
+     constexpr uint16_t PAD_L2 = 0x0100u;
+ }
+ 
+-bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
++bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+ {
+     if (!data || size < 32)
+         return false;
+@@ -47,6 +48,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+         return true;
+     }
+ 
++    // A diagnostics plugin that owns the pad (a scripted run): only its buttons, no host pad or keys.
++    if (PS2DiagHooks *diag = ps2DiagHooks())
++    {
++        uint16_t owned = 0xFFFFu;
++        if (diag->padButtons(port, owned))
++        {
++            data[2] = static_cast<uint8_t>(owned & 0xFF);
++            data[3] = static_cast<uint8_t>(owned >> 8);
++            return true;
++        }
++    }
++
+     uint16_t btns = 0xFFFFu;
+     constexpr int kGamepad = 0;
+     const bool useGamepad = IsGamepadAvailable(kGamepad);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 83cf266..f388c6b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -13,6 +13,7 @@
+ #include "runtime/ps2_frame_dump.h"
+ #include "runtime/ps2_input_script.h"
+ #include "runtime/ps2_fps_counter.h"
++#include "runtime/ps2_diag_hooks.h"
+ #include "ThreadNaming.h"
+ #include "Kernel/Stubs/Audio.h"
+ #include "Kernel/Stubs/GS.h"
+@@ -407,19 +408,22 @@ static void DeliverFrameToConsumers(const char *dumpDir, uint64_t tick, const ui
+     {
+         ps2DumpPresentedFrame(dumpDir, tick, rgba, width, height);
+     }
++    if (PS2DiagHooks *diag = ps2DiagHooks())
++        diag->onFrame(tick, rgba, width, height);
+ }
+ 
+ // External GS frame demand (gs_external.h): a script wants frames only during a capture step; a plain
+-// PS2X_FRAME_DUMP_DIR wants every frame.
+-static bool ScriptCaptureFrameDemand(uint64_t)
+-{
+-    const Ps2InputScript *script = ps2ActiveInputScript();
+-    return script != nullptr && script->captureWanted();
+-}
++// PS2X_FRAME_DUMP_DIR wants every frame; a diagnostics plugin decides for itself (wantsFrame).
++static bool s_dumpEveryFrame = false;
+ 
+-static bool EveryFrameDemand(uint64_t)
++static bool EngineFrameDemand(uint64_t tick)
+ {
+-    return true;
++    if (s_dumpEveryFrame)
++        return true;
++    if (const Ps2InputScript *script = ps2ActiveInputScript(); script && script->captureWanted())
++        return true;
++    PS2DiagHooks *diag = ps2DiagHooks();
++    return diag != nullptr && diag->wantsFrame(tick);
+ }
+ 
+ // Window title base (initialize's title) and whether the window is hidden: the frame counter puts the rate in
+@@ -438,7 +442,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+         static uint64_t s_lastExternalFrameTick = std::numeric_limits<uint64_t>::max();
+         static std::vector<uint8_t> s_externalScratch;
+         const uint64_t tick = rt->eeScheduler().currentVSyncTick();
+-        if (s_frameDumpDir == nullptr || tick == s_lastExternalTick)
++        if ((s_frameDumpDir == nullptr && ps2DiagHooks() == nullptr) || tick == s_lastExternalTick)
+             return;
+         s_lastExternalTick = tick;
+         rt->gs().latchHostPresentationFrame();
+@@ -681,6 +685,7 @@ bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
+ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
+ {
+     ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
++    PS2DiagSectionScope diagIop(PS2DiagSection::Iop);
+     auto scope = m_iopHost->enterCall(ctx, rdram);
+     request.callToken = scope.token();
+     return m_iopSubsystem->handleRpc(request);
+@@ -689,6 +694,7 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
+ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
+ {
+     ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
++    PS2DiagSectionScope diagIop(PS2DiagSection::Iop);
+     auto scope = m_iopHost->enterCall(nullptr, rdram);
+     m_iopSubsystem->onSifTransfer(transfer);
+ }
+@@ -696,6 +702,7 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
+ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+ {
+     ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Iop);
++    PS2DiagSectionScope diagIop(PS2DiagSection::Iop);
+     m_iopSubsystem->runEeCycles(eeCycles);
+ }
+ 
+@@ -750,6 +757,31 @@ VU1State PS2Runtime::vu1State()
+     return m_vu1.state();
+ }
+ 
++// PS2DiagHost services (runtime/ps2_diag_hooks.h): guest RAM reads and the vsync tick, from any thread.
++static bool DiagReadGuest(void *user, uint32_t guestAddr, void *dst, uint32_t bytes)
++{
++    const uint8_t *rdram = static_cast<PS2Runtime *>(user)->memory().getRDRAM();
++    const uint32_t physical = guestAddr & 0x01FFFFFFu;
++    if (!rdram || !dst || bytes > PS2_RAM_SIZE || physical > PS2_RAM_SIZE - bytes)
++        return false;
++    std::memcpy(dst, rdram + physical, bytes);
++    return true;
++}
++
++static uint64_t DiagVsyncTick(void *user)
++{
++    return static_cast<PS2Runtime *>(user)->memory().gs().vsyncTick.load(std::memory_order_acquire);
++}
++
++// The diagnostics plugin's view of a VU1 run (runtime/ps2_diag_hooks.h).
++static void DiagVu1Begin(PS2DiagHooks &diag, uint32_t kind, uint32_t startPc, uint32_t top, uint32_t itop,
++                         uint32_t fbrst, uint32_t vpuStat, PS2Memory &memory, const VU1State &state)
++{
++    const PS2DiagVu1Run run{kind, startPc, top, itop, fbrst, vpuStat, 65536u, memory.getVU1CodeGeneration(),
++                            memory.getVU1Code(), memory.getVU1Data(), &state};
++    diag.onVu1Begin(run);
++}
++
+ bool PS2Runtime::syncCoreSubsystems()
+ {
+     uint8_t *const rdram = m_memory.getRDRAM();
+@@ -776,27 +808,36 @@ bool PS2Runtime::syncCoreSubsystems()
+                                              uint32_t startPC, uint32_t top, uint32_t itop)
+     {
+         const uint32_t fbrst = cpuContext.vu0_fbrst;
+-        if (vu1Capture)
++        PS2DiagHooks *const diag = ps2DiagHooks();
++        if (vu1Capture || diag)
+         {
+             VU1State before{};
+             externalVu1.readState(before);
+-            vu1Capture->begin(mscal ? ps2x::vu1capture::Mscal : ps2x::vu1capture::Mscnt, mscal ? startPC : before.pc,
+-                              top, itop, fbrst, cpuContext.vu0_vpu_stat, 65536, m_memory.getVU1CodeGeneration(),
+-                              m_memory.getVU1Code(), m_memory.getVU1Data(), before);
++            if (vu1Capture)
++                vu1Capture->begin(mscal ? ps2x::vu1capture::Mscal : ps2x::vu1capture::Mscnt, mscal ? startPC : before.pc,
++                                  top, itop, fbrst, cpuContext.vu0_vpu_stat, 65536, m_memory.getVU1CodeGeneration(),
++                                  m_memory.getVU1Code(), m_memory.getVU1Data(), before);
++            if (diag)
++                DiagVu1Begin(*diag, mscal ? 0u : 1u, mscal ? startPC : before.pc, top, itop, fbrst,
++                             cpuContext.vu0_vpu_stat, m_memory, before);
+         }
+         PS2Vu1RunResult result;
+         {
+             ps2x::pcsample::Scope vu1Scope(ps2x::pcsample::Vu1);
++            PS2DiagSectionScope diagVu1(PS2DiagSection::Vu1);
+             result = mscal ? externalVu1.mscal(m_memory, startPC, top, itop, fbrst)
+                            : externalVu1.mscnt(m_memory, top, itop, fbrst);
+         }
+         cpuContext.vu0_vpu_stat = (cpuContext.vu0_vpu_stat & ~0x0600u) | (result.stoppedByD ? 0x0200u : 0u) |
+                                   (result.stoppedByT ? 0x0400u : 0u);
+-        if (vu1Capture)
++        if (vu1Capture || diag)
+         {
+             VU1State after{};
+             externalVu1.readState(after);
+-            vu1Capture->end(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
++            if (vu1Capture)
++                vu1Capture->end(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
++            if (diag)
++                diag->onVu1End(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
+         }
+     };
+     m_memory.setVu1MscalCallback([this, vu1Capture, runExternalVu1](uint32_t startPC, uint32_t top, uint32_t itop)
+@@ -820,6 +861,10 @@ bool PS2Runtime::syncCoreSubsystems()
+                                                            cpuContext->vu0_fbrst, cpuContext->vu0_vpu_stat, 65536,
+                                                            m_memory.getVU1CodeGeneration(), m_memory.getVU1Code(),
+                                                            m_memory.getVU1Data(), m_vu1.state());
++                                     PS2DiagHooks *const diag = ps2DiagHooks();
++                                     if (diag)
++                                         DiagVu1Begin(*diag, 0u, startPC, top, itop, cpuContext->vu0_fbrst,
++                                                      cpuContext->vu0_vpu_stat, m_memory, m_vu1.state());
+                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                    m_gs, &m_memory, startPC, top, itop, 65536);
+@@ -828,7 +873,9 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                      if (vu1Capture)
+-                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
++                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat);
++                                     if (diag)
++                                         diag->onVu1End(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
+     m_memory.setVu1MscntCallback([this, vu1Capture, runExternalVu1](uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+@@ -850,6 +897,10 @@ bool PS2Runtime::syncCoreSubsystems()
+                                                            cpuContext->vu0_fbrst, cpuContext->vu0_vpu_stat, 65536,
+                                                            m_memory.getVU1CodeGeneration(), m_memory.getVU1Code(),
+                                                            m_memory.getVU1Data(), m_vu1.state());
++                                     PS2DiagHooks *const diag = ps2DiagHooks();
++                                     if (diag)
++                                         DiagVu1Begin(*diag, 1u, m_vu1.state().pc, top, itop, cpuContext->vu0_fbrst,
++                                                      cpuContext->vu0_vpu_stat, m_memory, m_vu1.state());
+                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                   m_gs, &m_memory, top, itop, 65536);
+@@ -858,7 +909,9 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                      if (vu1Capture)
+-                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
++                                         vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat);
++                                     if (diag)
++                                         diag->onVu1End(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
+     resetIop();
+     m_vu0.reset();
+     m_vu1.reset();
+@@ -933,6 +986,20 @@ bool PS2Runtime::initialize(const char *title)
+         }
+         std::cout << "[vu1] backend=" << vu1Mode << std::endl;
+     }
++    {
++        // Diagnostics plugin (runtime/ps2_diag_hooks.h): PS2X_DIAG=<path>, else <exe dir>/ob_diag.dll when present.
++        static PS2DiagHost s_diagHost{};
++        s_diagHost = PS2DiagHost{PS2_DIAG_API_VERSION, static_cast<uint32_t>(sizeof(VU1State)), this, &DiagReadGuest,
++                                 &DiagVsyncTick};
++        if (const int code = ps2LoadDiagPlugin(s_diagHost); code != 0)
++        {
++            std::cout.flush();
++            std::cerr.flush();
++            std::_Exit(code);
++        }
++        if (ps2DiagHooks())
++            ps2SetExternalGSFrameDemand(EngineFrameDemand);
++    }
+ 
+     if (const char *scriptPath = std::getenv("PS2X_INPUT_SCRIPT"))
+     {
+@@ -953,13 +1020,14 @@ bool PS2Runtime::initialize(const char *title)
+         s_inputScript.start(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+         ps2SetActiveInputScript(&s_inputScript);
+         if (s_inputScript.hasCaptureSteps())
+-            ps2SetExternalGSFrameDemand(ScriptCaptureFrameDemand);
++            ps2SetExternalGSFrameDemand(EngineFrameDemand);
+         std::cout << "[script] loaded " << scriptPath << " steps=" << s_inputScript.steps().size()
+                   << " timeout=" << s_inputScript.timeoutSeconds() << "s" << std::endl;
+     }
+     else if (const char *dumpDir = std::getenv("PS2X_FRAME_DUMP_DIR"); dumpDir && *dumpDir)
+     {
+-        ps2SetExternalGSFrameDemand(EveryFrameDemand); // dump every presented frame
++        s_dumpEveryFrame = true; // dump every presented frame
++        ps2SetExternalGSFrameDemand(EngineFrameDemand);
+     }
+ 
+     try
+@@ -2790,9 +2858,9 @@ void PS2Runtime::run()
+         EndDrawing();
+ 
+         // Frame counter: guest vsyncs per wall second, in the title once per second.
++        const double hostNow = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+         static Ps2FpsCounter s_fps;
+-        if (s_fps.update(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+-                         m_eeScheduler->currentVSyncTick()))
++        if (s_fps.update(hostNow, m_eeScheduler->currentVSyncTick()))
+         {
+             SetWindowTitle(Ps2FpsCounter::title(s_windowTitle, s_fps.fps()).c_str());
+             if (s_windowHidden)
+@@ -2817,6 +2885,23 @@ void PS2Runtime::run()
+                 break;
+             }
+         }
++        if (PS2DiagHooks *diag = ps2DiagHooks())
++        {
++            // The plugin may end the run (1) or the process (>= 2, e.g. a script timeout).
++            const int action = diag->onHostFrame(hostNow);
++            if (action >= 2)
++            {
++                std::cout.flush();
++                std::cerr.flush();
++                std::_Exit(action);
++            }
++            if (action == 1)
++            {
++                RUNTIME_LOG("[run] diagnostics plugin stop, breaking out of loop");
++                requestStop();
++                break;
++            }
++        }
+ 
+         if (WindowShouldClose())
+         {
+@@ -2839,6 +2924,17 @@ void PS2Runtime::run()
+         }
+     }
+ 
++    if (PS2DiagHooks *diag = ps2DiagHooks())
++    {
++        const int code = diag->onShutdown();
++        if (code != 0)
++        {
++            std::cout.flush();
++            std::cerr.flush();
++            std::_Exit(code);
++        }
++    }
++
+     requestStop();
+     if (gameThread.joinable())
+     {
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 8867cc0..a751a51 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_pc_sampler.h"
+ #include "runtime/ps2_vu1_capture.h"
+ #include "runtime/ps2_memory.h"
+@@ -922,6 +923,8 @@ void VU1Interpreter::finishXgkick()
+         return;
+ 
+     ps2x::vu1capture::notifyPath1(m_xgkick.packet.data(), m_xgkick.totalBytes);
++    if (PS2DiagHooks *diag = ps2DiagHooks())
++        diag->onVu1Path1(m_xgkick.packet.data(), m_xgkick.totalBytes);
+     if (m_activeMemory)
+         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
+     else if (m_activeGs)
+@@ -1628,6 +1631,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+ {
+     ps2x::pcsample::Scope sampleScope(ps2x::pcsample::Vu1);
++    PS2DiagSectionScope diagVu1(PS2DiagSection::Vu1);
+     m_activeVuData = vuData;
+     m_activeVuDataSize = dataSize;
+     m_activeGs = &gs;
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 8fb6939..cb6832b 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -43,6 +43,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_gs_external_tests.cpp
+     src/ps2_runtime_api_tests.cpp
+     src/ps2_fps_counter_tests.cpp
++    src/ps2_diag_hooks_tests.cpp
+     src/ps2_runtime_api_support.cpp
+ )
+ 
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index e8c75cf..8fe5c7a 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -24,6 +24,7 @@ void register_ps2_input_script_tests();
+ void register_ps2_gs_external_tests();
+ void register_ps2_runtime_api_tests();
+ void register_ps2_fps_counter_tests();
++void register_ps2_diag_hooks_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -52,6 +53,7 @@ int main()
+     register_ps2_gs_external_tests();
+     register_ps2_runtime_api_tests();
+     register_ps2_fps_counter_tests();
++    register_ps2_diag_hooks_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_diag_hooks_tests.cpp b/ps2xTest/src/ps2_diag_hooks_tests.cpp
+new file mode 100644
+index 0000000..8dd008e
+--- /dev/null
++++ b/ps2xTest/src/ps2_diag_hooks_tests.cpp
+@@ -0,0 +1,208 @@
++#include "MiniTest.h"
++#include "ps2_runtime.h"
++#include "runtime/ee_scheduler.h"
++#include "runtime/gs/gs_external.h"
++#include "runtime/ps2_diag_hooks.h"
++#include "runtime/ps2_pad.h"
++
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++namespace
++{
++    // Records what the engine hands a diagnostics plugin.
++    class RecordingDiagHooks final : public PS2DiagHooks
++    {
++    public:
++        std::vector<uint64_t> vsyncTicks;
++        std::vector<uint64_t> idleWaits;
++        uint32_t guestEnters = 0, guestLeaves = 0;
++        uint32_t *lastPc = nullptr;
++        int32_t lastThread = -1;
++        uint32_t sectionEnters[4]{}, sectionLeaves[4]{};
++        uint64_t wantTick = 0;
++        uint16_t padWord = 0;
++        bool ownPad = false;
++
++        void onVsync(uint64_t tick, uint64_t idleWaitNs) override
++        {
++            vsyncTicks.push_back(tick);
++            idleWaits.push_back(idleWaitNs);
++        }
++        bool wantsFrame(uint64_t tick) override { return tick == wantTick; }
++        void onGuestEnter(uint32_t *pc, int32_t threadId) override
++        {
++            ++guestEnters;
++            lastPc = pc;
++            lastThread = threadId;
++        }
++        void onGuestLeave() override { ++guestLeaves; }
++        void onSectionEnter(PS2DiagSection s) override { ++sectionEnters[static_cast<uint32_t>(s)]; }
++        void onSectionLeave(PS2DiagSection s) override { ++sectionLeaves[static_cast<uint32_t>(s)]; }
++        bool padButtons(int, uint16_t &buttons) override
++        {
++            buttons = padWord;
++            return ownPad;
++        }
++    };
++
++    struct DiagScope
++    {
++        explicit DiagScope(PS2DiagHooks *hooks) { ps2SetDiagHooks(hooks); }
++        ~DiagScope() { ps2SetDiagHooks(nullptr); }
++    };
++
++    // A minimal external GS: counts vsyncs and snapshots, remembering the tick of each snapshot.
++    class CountingExternalGS final : public PS2ExternalGS
++    {
++    public:
++        uint64_t lastVsync = 0;
++        std::vector<uint64_t> snapshotTicks;
++        uint32_t packets = 0;
++        void gifPacket(GifPathId, const uint8_t *, uint32_t) override { ++packets; }
++        void privWrite(uint32_t, uint64_t) override {}
++        void vsync(uint64_t tick, const GSRegisters &) override { lastVsync = tick; }
++        uint32_t readLocalToHost(uint8_t *, uint32_t) override { return 0u; }
++        void reset() override {}
++        bool snapshot(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h) override
++        {
++            snapshotTicks.push_back(lastVsync);
++            rgba.assign(4u, 0xFFu);
++            w = h = 1u;
++            return true;
++        }
++    };
++
++    constexpr uint32_t kDiagDrivePc = 0x00173000u;
++    constexpr uint32_t kDiagVSyncs = 5u;
++    uint32_t s_diagVSyncsSeen = 0u;
++    RecordingDiagHooks *s_rec = nullptr;
++    bool s_pcPointerMatched = true;
++
++    // Waits kDiagVSyncs vsyncs (resuming at itself), checking the hook got this context's pc.
++    void diagDrive(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        if (s_rec && s_rec->lastPc != &ctx->pc)
++            s_pcPointerMatched = false;
++        if (s_diagVSyncsSeen++ >= kDiagVSyncs)
++        {
++            ctx->pc = 0u;
++            runtime->requestStop();
++            return;
++        }
++        ctx->pc = kDiagDrivePc;
++        runtime->eeScheduler().waitVSync(runtime->eeScheduler().currentVSyncTick());
++    }
++
++    void runDiagDrive(PS2Runtime &runtime)
++    {
++        static std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++        runtime.registerFunction(kDiagDrivePc, diagDrive);
++        s_diagVSyncsSeen = 0u;
++        s_pcPointerMatched = true;
++        R5900Context mainContext{};
++        mainContext.pc = kDiagDrivePc;
++        runtime.eeScheduler().reset(rdram.data(), mainContext);
++        runtime.eeScheduler().run();
++    }
++
++    void setEnv(const char *name, const char *value)
++    {
++#ifdef _MSC_VER
++        _putenv_s(name, value);
++#else
++        if (value && *value)
++            setenv(name, value, 1);
++        else
++            unsetenv(name);
++#endif
++    }
++}
++
++void register_ps2_diag_hooks_tests()
++{
++    MiniTest::Case("DiagHooks", [](TestCase &tc)
++    {
++        tc.Run("onVsync once per VBlankStart with the idle wait; guest enter/leave with the live pc", [](TestCase &t)
++        {
++            RecordingDiagHooks rec;
++            DiagScope scope(&rec);
++            s_rec = &rec;
++            PS2Runtime runtime;
++            runDiagDrive(runtime);
++            s_rec = nullptr;
++            t.IsTrue(rec.vsyncTicks.size() >= kDiagVSyncs, "one onVsync per vsync the guest waited");
++            bool increasing = true, waitsGrow = true;
++            for (size_t i = 0; i < rec.vsyncTicks.size(); ++i)
++            {
++                increasing = increasing && rec.vsyncTicks[i] == i + 1u;
++                waitsGrow = waitsGrow && (i == 0 || rec.idleWaits[i] >= rec.idleWaits[i - 1]);
++            }
++            t.IsTrue(increasing, "ticks 1, 2, 3, ...");
++            t.IsTrue(waitsGrow, "the idle wait is cumulative");
++            t.IsTrue(!rec.idleWaits.empty() && rec.idleWaits.back() > 0u, "an idle guest leaves the scheduler waiting");
++            t.IsTrue(rec.guestEnters > kDiagVSyncs && rec.guestEnters == rec.guestLeaves, "enter/leave pair up");
++            t.IsTrue(s_pcPointerMatched, "onGuestEnter gets the running context's pc");
++            t.IsTrue(rec.lastThread > 0, "and its guest thread id");
++        });
++
++        tc.Run("wantsFrame decides the external GS snapshot; GS packets and vsync are sections", [](TestCase &t)
++        {
++            RecordingDiagHooks rec;
++            rec.wantTick = 3u;
++            CountingExternalGS gs;
++            DiagScope scope(&rec);
++            ps2SetExternalGS(&gs);
++            ps2SetExternalGSFrameDemand([](uint64_t tick)
++                                        { PS2DiagHooks *d = ps2DiagHooks(); return d && d->wantsFrame(tick); });
++            PS2Runtime runtime;
++            runtime.gifArbiter().setProcessPacketFn([](const uint8_t *, uint32_t) {});
++            runtime.memory().setGifArbiter(&runtime.gifArbiter());
++            const uint64_t tag[2] = {1ull | (1ull << 15) | (1ull << 60), 0xEull};
++            const uint64_t ad[2] = {0x1000ull, 0x4Cull};
++            uint8_t pkt[32];
++            std::memcpy(pkt, tag, 16);
++            std::memcpy(pkt + 16, ad, 16);
++            runtime.memory().submitGifPacket(GifPathId::Path3, pkt, sizeof(pkt), true);
++            runDiagDrive(runtime);
++            ps2SetExternalGSFrameDemand(nullptr);
++            ps2SetExternalGS(nullptr);
++            t.IsTrue(gs.snapshotTicks == std::vector<uint64_t>{3u}, "one snapshot, at the tick the plugin wanted");
++            const uint32_t gsIdx = static_cast<uint32_t>(PS2DiagSection::Gs);
++            const uint32_t vsIdx = static_cast<uint32_t>(PS2DiagSection::GsVsync);
++            t.Equals(gs.packets, 1u, "the packet reached the external GS");
++            t.Equals(rec.sectionEnters[gsIdx], 1u, "one GS section");
++            t.Equals(rec.sectionLeaves[gsIdx], 1u, "closed");
++            t.IsTrue(rec.sectionEnters[vsIdx] >= kDiagVSyncs + 1u, "vsync sections (vsync + the one snapshot)");
++            t.Equals(rec.sectionEnters[vsIdx], rec.sectionLeaves[vsIdx], "closed");
++        });
++
++        tc.Run("a plugin that owns the pad replaces the host pad", [](TestCase &t)
++        {
++            RecordingDiagHooks rec;
++            rec.ownPad = true;
++            rec.padWord = static_cast<uint16_t>(0xFFFFu & ~0x2000u);
++            DiagScope scope(&rec);
++            PSPadBackend pad;
++            uint8_t data[32] = {};
++            t.IsTrue(pad.readState(0, 0, data, sizeof(data)), "pad read");
++            t.Equals(data[2], static_cast<uint8_t>(0xFFu), "low byte");
++            t.Equals(data[3], static_cast<uint8_t>(0xDFu), "high byte: circle held");
++        });
++
++        tc.Run("loader: no PS2X_DIAG and no plugin beside the exe = no hooks; a missing PS2X_DIAG = exit 2", [](TestCase &t)
++        {
++            const PS2DiagHost host{PS2_DIAG_API_VERSION, 0u, nullptr, nullptr, nullptr};
++            setEnv("PS2X_DIAG", "");
++            t.Equals(ps2LoadDiagPlugin(host), 0, "nothing to load: start normally");
++            t.IsTrue(ps2DiagHooks() == nullptr, "no hooks");
++            setEnv("PS2X_DIAG", "Z:/no/such/ob_diag.dll");
++            t.Equals(ps2LoadDiagPlugin(host), 2, "a named plugin that does not load stops start-up");
++            t.IsTrue(ps2DiagHooks() == nullptr, "still no hooks");
++            setEnv("PS2X_DIAG", "");
++        });
++    });
++}
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 7a029fb..3f67f2f 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -4,6 +4,7 @@
+ #include "runtime/gs/ps2_gs_psmct32.h"
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_vu1.h"
++#include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_vu1_capture.h"
+ #include "runtime/ps2_vu1_external.h"
+ #include "ps2_runtime.h"
+@@ -1851,6 +1852,89 @@ void register_ps2_vu1_tests()
+             std::filesystem::remove_all(dir, ec);
+         });
+ 
++        tc.Run("diagnostics hooks see a VU1 MSCAL run: begin, its PATH1 packet, end, inside a VU1 section", [](TestCase &t)
++        {
++            struct Vu1Hooks final : PS2DiagHooks
++            {
++                uint32_t begins = 0, ends = 0, vu1Sections = 0, openSections = 0;
++                uint32_t kind = 9, startPc = 0, top = 0, itop = 0;
++                int32_t viBefore = -1, viAfter = -1;
++                const uint8_t *code = nullptr;
++                std::vector<std::vector<uint8_t>> packets;
++                bool packetInsideRun = true;
++                void onVu1Begin(const PS2DiagVu1Run &run) override
++                {
++                    ++begins;
++                    kind = run.kind;
++                    startPc = run.startPc;
++                    top = run.top;
++                    itop = run.itop;
++                    code = run.code;
++                    viBefore = run.state ? run.state->vi[1] : -1;
++                }
++                void onVu1Path1(const uint8_t *p, uint32_t n) override
++                {
++                    packetInsideRun = packetInsideRun && begins == ends + 1u && openSections > 0u;
++                    packets.emplace_back(p, p + n);
++                }
++                void onVu1End(const uint8_t *, const VU1State &after, uint32_t) override
++                {
++                    ++ends;
++                    viAfter = after.vi[1];
++                }
++                void onSectionEnter(PS2DiagSection s) override
++                {
++                    if (s == PS2DiagSection::Vu1)
++                    {
++                        ++vu1Sections;
++                        ++openSections;
++                    }
++                }
++                void onSectionLeave(PS2DiagSection s) override
++                {
++                    if (s == PS2DiagSection::Vu1)
++                        --openSections;
++                }
++            } hooks;
++            ps2SetDiagHooks(&hooks);
++            std::vector<uint8_t> packet(32u, 0u);
++            {
++                PS2Runtime runtime;
++                t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++                t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
++                uint8_t *code = runtime.memory().getVU1Code();
++                uint8_t *data = runtime.memory().getVU1Data();
++                std::memset(code, 0, PS2_VU1_CODE_SIZE);
++                std::memset(data, 0, PS2_VU1_DATA_SIZE);
++                // 0x40: XGKICK vi0 ; 0x48: IADDIU vi1, vi0, 5 with E bit ; 0x50: delay slot.
++                writeVuInstructionPair(code, 0x40u, makeVuLowerSpecial(0x6Cu, 0u), kVuUpperNop);
++                writeVuInstructionPair(code, 0x48u, makeVuIaddiu(1u, 0u, 5), kVuUpperNop | 0x40000000u);
++                writeVuInstructionPair(code, 0x50u, 0u, kVuUpperNop);
++                const uint64_t gifTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
++                std::memcpy(data, &gifTag, sizeof(gifTag));
++                for (uint32_t i = 0; i < 16u; ++i)
++                    data[16u + i] = static_cast<uint8_t>(0xA0u + i);
++                std::memcpy(packet.data(), data, packet.size());
++                runtime.vu1().state().vi[1] = 0;
++                const uint32_t mscal = makeVifCmd(0x14u, 0u, 0x40u / 8u);
++                runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
++                t.Equals(runtime.vu1().state().vi[1], 5, "the program ran");
++                t.IsTrue(hooks.code == code, "begin gets the micro memory");
++            }
++            ps2SetDiagHooks(nullptr);
++            t.Equals(hooks.begins, 1u, "one begin");
++            t.Equals(hooks.ends, 1u, "one end");
++            t.Equals(hooks.kind, 0u, "kind MSCAL");
++            t.Equals(hooks.startPc, 0x40u, "start pc in bytes");
++            t.Equals(hooks.viBefore, 0, "state before: vi1 = 0");
++            t.Equals(hooks.viAfter, 5, "state after: vi1 = 5");
++            t.Equals(hooks.packets.size(), static_cast<size_t>(1u), "one PATH1 packet");
++            t.IsTrue(!hooks.packets.empty() && hooks.packets[0] == packet, "packet bytes = GIFtag + IMAGE qword");
++            t.IsTrue(hooks.packetInsideRun, "the packet arrives between begin and end, inside the VU1 section");
++            t.Equals(hooks.vu1Sections, 1u, "one VU1 section");
++            t.Equals(hooks.openSections, 0u, "closed");
++        });
++
+         tc.Run("an external VU1 receives MSCAL/MSCNT instead of the interpreter and its XGKICK reaches the GIF arbiter", [](TestCase &t)
+         {
+             // Recording backend: what the runtime hands it, and an XGKICK packet sent the way a real backend does.
+-- 
+2.46.2.windows.1
+

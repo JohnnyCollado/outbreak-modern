@@ -3,7 +3,7 @@
 // behind src/pcsx2_side.cpp (built with PCSX2's headers and flags). The two header sets never meet.
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
-#include "runtime/ps2_vu1_capture.h"
+#include "runtime/ps2_diag_hooks.h"
 #include "runtime/ps2_vu1_external.h"
 
 #include "ob_pcsx2_vu.h"
@@ -95,8 +95,9 @@ namespace
 	private:
 		static void Path1(void* ctx, const uint8_t* data, uint32_t size)
 		{
-			// As VU1Interpreter::finishXgkick (ps2_vu1_core.cpp): capture tap, then PATH1 into the GIF arbiter.
-			ps2x::vu1capture::notifyPath1(data, size);
+			// As VU1Interpreter::finishXgkick (ps2_vu1_core.cpp): diagnostics hook, then PATH1 into the GIF arbiter.
+			if (PS2DiagHooks* diag = ps2DiagHooks())
+				diag->onVu1Path1(data, size);
 			static_cast<Pcsx2MicroVu1*>(ctx)->m_memory->submitGifPacket(GifPathId::Path1, data, size);
 		}
 

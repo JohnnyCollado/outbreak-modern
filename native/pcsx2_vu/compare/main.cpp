@@ -1,4 +1,5 @@
-// ob_pcsx2_vu_compare: offline differential test of VU1 backends on PS2X_VU1_CAPTURE files (patch 0031).
+// ob_pcsx2_vu_compare: offline differential test of VU1 backends on PS2X_VU1_CAPTURE files (ob_diag plugin;
+// format: native/ob_diag/include/ob_vu1_capture.h).
 //
 // For each capture: (0) replay it through PS2Recomp's VU1Interpreter (the runner's own ps2_runtime.lib) and
 // check that the replay reproduces the recorded outputs (proves the harness), (a) time the interpreter,
@@ -13,7 +14,9 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
-#include "runtime/ps2_vu1_capture.h"
+#include "runtime/ps2_diag_hooks.h"
+
+#include "ob_vu1_capture.h"
 
 #include <algorithm>
 #include <chrono>
@@ -219,11 +222,16 @@ namespace
             return true;
         }
 
-        static void tap(void *ctx, const uint8_t *d, uint32_t n)
+        // The interpreter's XGKICK packets reach the diagnostics hooks (runtime/ps2_diag_hooks.h): collect them.
+        struct Path1Tap final : PS2DiagHooks
         {
-            if (auto *p = static_cast<Interp *>(ctx)->sink)
-                p->emplace_back(d, d + n);
-        }
+            Packets *sink = nullptr;
+            void onVu1Path1(const uint8_t *d, uint32_t n) override
+            {
+                if (sink)
+                    sink->emplace_back(d, d + n);
+            }
+        } tap;
 
         // Returns interpreter cycles of the run.
         uint64_t run(const Capture &c, Packets *packets)
@@ -251,7 +259,8 @@ namespace
             cap::fromRecord(c.before, s);
             s.cycles = cyclesBefore;
             sink = packets;
-            cap::setPath1Tap(&Interp::tap, this);
+            tap.sink = packets;
+            ps2SetDiagHooks(&tap);
             const auto t0 = Clock::now();
             if (c.h.kind == cap::Mscal)
                 vu.execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem,
@@ -260,7 +269,8 @@ namespace
                 vu.resume(mem.getVU1Code(), PS2_VU1_CODE_SIZE, mem.getVU1Data(), PS2_VU1_DATA_SIZE, gs, &mem,
                           c.h.top, c.h.itop, c.h.maxCycles);
             lastNs = nsSince(t0);
-            cap::setPath1Tap(nullptr, nullptr);
+            ps2SetDiagHooks(nullptr);
+            tap.sink = nullptr;
             sink = nullptr;
             return vu.state().cycles - cyclesBefore;
         }

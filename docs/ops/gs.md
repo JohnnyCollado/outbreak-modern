@@ -103,7 +103,9 @@ backend interface, privileged registers, readback, present and vblank).
   (`ps2_vif1_interpreter.cpp:307-323`); PCSX2 still has the original IMAGE open, so the adapter drops that 16 B tag
   (PATH2, carry holds open IMAGE, tag = FLG 2, NLOOP = qwc-1, other bits 0). Without it: black frames.
 - Vsync: privileged regs mirror into the 8 KB basemem, then `GSvsync(field = CSR bit 13)`.
-- Snapshot (frame dump/capture): 1:1 crop of the displayed rect read from `g_gs_renderer->m_mem` (circuit 1 if
+- Snapshot (frame dump/capture), only on demand since patch 0034: the scheduler calls it at a VBlankStart only when
+  `ps2ExternalGSFrameWanted(tick)` (the diagnostics plugin's `wantsFrame`: a capture step, or a plain frame dump);
+  a play run never reads the GS back. 1:1 crop of the displayed rect read from `g_gs_renderer->m_mem` (circuit 1 if
   PMODE EN1 else 2; DISPFB FBP/FBW/PSM, DBX/DBY; size (DW+1)/(MAGH+1) x (DH+1)) after `Flush` +
   `InvalidateLocalMem` (SW sync). `GSSaveSnapshotToMemory` returns the whole 640x960 texture, not the display rect.
 - Pitfall: never `GSReadLocalMemoryUnsync` for diagnostics or snapshots: it mutates PCSX2's transfer state

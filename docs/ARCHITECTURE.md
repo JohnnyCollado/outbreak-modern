@@ -32,7 +32,8 @@ ps2EntryRunner.exe at run time
                    PS2X_GS=pcsx2-vk   PCSX2 2.9.134 Vulkan GS (the display path)
   IOP ............ interpreter running the game's own IRX modules
   SPU2 (sound) ... not producing sound yet
-  window/input ... raylib window and pad; PCSX2 Vulkan draws into a child window
+  window/input ... raylib window and pad; PCSX2 Vulkan draws into a child window; title = frame counter
+  diagnostics .... optional plugin ob_diag.dll (native/ob_diag) on the hook API runtime/ps2_diag_hooks.h
 ```
 Sources: GS choice [`docs/ops/gs.md` Decisions; `research/2026-10-22-gpu-gs-options.md`];
 hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
@@ -55,7 +56,8 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `upstream/ps2recomp/` | **Our PS2Recomp changes**: numbered patches 0001-00NN, each with a test, plus a README table | The real source of runtime changes; applied as commits in `C:\ob\up` |
 | `upstream/pcsx2/` | Our PCSX2 changes (none so far) | PCSX2 pinned at v2.9.134 (`docs/ops/pins.md`) |
 | `native/pcsx2_gs/` | PCSX2's GS built as a static library, host stubs, D3D shims, smoke test, and the adapter that connects it to PS2Recomp's hook | `docs/ops/gs.md` |
-| `native/pcsx2_vu/` | PCSX2's microVU (VU1 recompiler) built as a static library (wrapper TU, fakes, config defaults, link-only stubs) and `ob_pcsx2_vu_compare`, the offline interpreter-vs-microVU diff on VU1 captures; not wired into the runner yet | `docs/ops/build.md` (VU1 capture, vucompare), `research/2026-10-23-microvu-feasibility.md` |
+| `native/pcsx2_vu/` | PCSX2's microVU (VU1 recompiler) built as a static library (wrapper TU, fakes, config defaults, link-only stubs), the runner's `PS2X_VU1=mvu` backend (`adapter/hook.cpp`, patch 0033), and `ob_pcsx2_vu_compare`, the offline interpreter-vs-microVU diff on VU1 captures | `docs/ops/build.md` (VU1 backend, VU1 capture, vucompare), `research/2026-10-23-microvu-feasibility.md` |
+| `native/ob_diag/` | **The diagnostics plugin** `ob_diag.dll` over PS2Recomp's hook API (`runtime/ps2_diag_hooks.h`, patch 0036): scripted input (`PS2X_INPUT_SCRIPT`), frame dumps and captures (`PS2X_FRAME_DUMP_DIR`), frame-time CSV (`PS2X_FRAME_TIME`), guest PC sampler (`PS2X_PC_SAMPLE`), VU1 capture (`PS2X_VU1_CAPTURE`; `include/ob_vu1_capture.h` is the file format), and its tests (`ob_diag_tests`) | Built into `C:\ob\diag-build`; loaded only via `PS2X_DIAG` (ob.sh) or when placed beside the exe; a play build ships without it |
 | `gate/` | The correctness judge: scripted boot, frozen tolerance, reference hashes, baselines, evidence | `docs/ops/gate.md` |
 | `tools/ob.sh` (+ `tools/ob/`) | Windows driver: build tools, recompile, boot, test, gate, pcsx2-gs | `tools/ob/sync_changed.py` keeps rebuilds incremental |
 | `tools/gate/` | Gate scoring (`gate.py`) and reference handling (`refs.py`) | |
@@ -75,7 +77,22 @@ Outside the repository, on purpose:
   Game-derived, so never in git. [`docs/ops/workspace.md`]
 - `game_files/` and `ps2_emu/` (the disc's files and the reference PCSX2) are git-ignored.
 
-## 4. Rules that still apply
+## 4. Engine vs diagnostics
+
+The engine (PS2Recomp runtime plus `native/pcsx2_gs` and `native/pcsx2_vu`) holds only what plays the game and what
+makes it faster or draw better (developer, 2026-10-23). Everything that observes or drives it for testing lives in
+the optional plugin `native/ob_diag` (a DLL):
+- The engine keeps thin hook points only: one `PS2DiagHooks` pointer, null = no plugin, one load and null check per
+  site (same pattern as `PS2ExternalGS` / `PS2ExternalVu1`). Hook points never live in generated game code
+  (`ob.sh depcheck`: 0 game units).
+- A play build ships without the plugin and runs identically; the frame counter in the title is the one readout
+  that stays in the engine (one compare per frame, one title set per second).
+- New diagnostic tools go into the plugin over `runtime/ps2_diag_hooks.h`; if a tool needs something the API lacks,
+  extend the API (bump `PS2_DIAG_API_VERSION`) rather than adding the tool to the engine.
+- Later mod support is meant to reuse the same API (load path, versioned host table, hooks for vsync, pad, frames,
+  guest memory reads). Not built: mods would need more (guest memory writes, function hooks, several plugins).
+
+## 5. Rules that still apply
 
 - Every PS2Recomp change is a numbered patch with a test that fails without it.
   [`upstream/ps2recomp/README.md`]

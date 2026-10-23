@@ -1,0 +1,206 @@
+From 7abc91997655a22df45c23bd4cebc41a3a1763fa Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 05:00:32 -0400
+Subject: [PATCH] Runtime: frame counter in the window title
+
+The window title shows guest vsyncs per wall second, "<title> | 27.3 fps",
+recomputed once per second: one subtraction and compare per presented host
+frame and one SetWindowTitle per second. With a hidden window (scripted runs)
+the same rate goes to stdout once per second as "[fps] tick N | 27.3 fps", so
+a run without any diagnostics still reports its speed.
+
+- runtime/ps2_fps_counter.h: Ps2FpsCounter::update(nowSeconds, vsyncTick)
+  returns true once per second with fps() = vsyncs / elapsed; title(base, fps).
+- PS2Runtime::run: updates after EndDrawing, sets the title, logs when hidden.
+
+Test: counter windows (no rate under 1 s, 60 vsyncs in 1.0 s = 60.0, 27 in
+1.25 s = 21.6, stalled guest = 0) and the title format.
+---
+ ps2xRuntime/include/runtime/ps2_fps_counter.h | 50 +++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 18 +++++++
+ ps2xTest/CMakeLists.txt                       |  1 +
+ ps2xTest/src/main.cpp                         |  2 +
+ ps2xTest/src/ps2_fps_counter_tests.cpp        | 32 ++++++++++++
+ 5 files changed, 103 insertions(+)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_fps_counter.h
+ create mode 100644 ps2xTest/src/ps2_fps_counter_tests.cpp
+
+diff --git a/ps2xRuntime/include/runtime/ps2_fps_counter.h b/ps2xRuntime/include/runtime/ps2_fps_counter.h
+new file mode 100644
+index 0000000..162e0fd
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_fps_counter.h
+@@ -0,0 +1,50 @@
++#ifndef PS2_FPS_COUNTER_H
++#define PS2_FPS_COUNTER_H
++
++#include <cstdint>
++#include <cstdio>
++#include <string>
++
++// Frame counter for the window title: guest vsyncs per wall-clock second, recomputed once per second.
++// Main thread: update() once per presented host frame (one subtraction and compare); the caller sets the
++// title only when update() returns true, i.e. once per second.
++class Ps2FpsCounter
++{
++public:
++    // True when at least one second passed since the previous rate (or since the first call): fps() is new.
++    bool update(double nowSeconds, uint64_t vsyncTick)
++    {
++        if (!m_started)
++        {
++            m_started = true;
++            m_startSeconds = nowSeconds;
++            m_startTick = vsyncTick;
++            return false;
++        }
++        const double elapsed = nowSeconds - m_startSeconds;
++        if (elapsed < 1.0)
++            return false;
++        m_fps = static_cast<double>(vsyncTick - m_startTick) / elapsed;
++        m_startSeconds = nowSeconds;
++        m_startTick = vsyncTick;
++        return true;
++    }
++
++    double fps() const { return m_fps; }
++
++    // "<base> | 59.9 fps"
++    static std::string title(const std::string &base, double fps)
++    {
++        char rate[32];
++        std::snprintf(rate, sizeof(rate), "%.1f", fps);
++        return base + " | " + rate + " fps";
++    }
++
++private:
++    bool m_started = false;
++    double m_startSeconds = 0.0;
++    uint64_t m_startTick = 0;
++    double m_fps = 0.0;
++};
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index b83ccda..83cf266 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -12,6 +12,7 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_frame_dump.h"
+ #include "runtime/ps2_input_script.h"
++#include "runtime/ps2_fps_counter.h"
+ #include "ThreadNaming.h"
+ #include "Kernel/Stubs/Audio.h"
+ #include "Kernel/Stubs/GS.h"
+@@ -421,6 +422,11 @@ static bool EveryFrameDemand(uint64_t)
+     return true;
+ }
+ 
++// Window title base (initialize's title) and whether the window is hidden: the frame counter puts the rate in
++// the title once per second, and prints it to the log when nobody can see the title.
++static std::string s_windowTitle;
++static bool s_windowHidden = false;
++
+ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+ {
+     static const char *s_frameDumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
+@@ -977,6 +983,8 @@ bool PS2Runtime::initialize(const char *title)
+         const unsigned int windowFlags = hidden ? (FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN) : FLAG_WINDOW_RESIZABLE;
+         SetConfigFlags(windowFlags);
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
++        s_windowTitle = title ? title : "";
++        s_windowHidden = hidden;
+         if (hidden)
+         {
+             SetExitKey(KEY_NULL); // a hidden window is never closed by input
+@@ -2781,6 +2789,16 @@ void PS2Runtime::run()
+         }
+         EndDrawing();
+ 
++        // Frame counter: guest vsyncs per wall second, in the title once per second.
++        static Ps2FpsCounter s_fps;
++        if (s_fps.update(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
++                         m_eeScheduler->currentVSyncTick()))
++        {
++            SetWindowTitle(Ps2FpsCounter::title(s_windowTitle, s_fps.fps()).c_str());
++            if (s_windowHidden)
++                std::cout << "[fps] " << Ps2FpsCounter::title("tick " + std::to_string(m_eeScheduler->currentVSyncTick()), s_fps.fps()) << std::endl;
++        }
++
+         if (const Ps2InputScript *script = ps2ActiveInputScript())
+         {
+             std::string timeoutMessage;
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 182c779..8fb6939 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -42,6 +42,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_input_script_tests.cpp
+     src/ps2_gs_external_tests.cpp
+     src/ps2_runtime_api_tests.cpp
++    src/ps2_fps_counter_tests.cpp
+     src/ps2_runtime_api_support.cpp
+ )
+ 
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 44b4b0b..e8c75cf 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -23,6 +23,7 @@ void register_ps2_frame_dump_tests();
+ void register_ps2_input_script_tests();
+ void register_ps2_gs_external_tests();
+ void register_ps2_runtime_api_tests();
++void register_ps2_fps_counter_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -50,6 +51,7 @@ int main()
+     register_ps2_input_script_tests();
+     register_ps2_gs_external_tests();
+     register_ps2_runtime_api_tests();
++    register_ps2_fps_counter_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_fps_counter_tests.cpp b/ps2xTest/src/ps2_fps_counter_tests.cpp
+new file mode 100644
+index 0000000..f95ac27
+--- /dev/null
++++ b/ps2xTest/src/ps2_fps_counter_tests.cpp
+@@ -0,0 +1,32 @@
++#include "MiniTest.h"
++#include "runtime/ps2_fps_counter.h"
++
++#include <cmath>
++#include <string>
++
++void register_ps2_fps_counter_tests()
++{
++    MiniTest::Case("FpsCounter", [](TestCase &tc)
++    {
++        tc.Run("counts guest vsyncs per wall second, recomputed once per second", [](TestCase &t)
++        {
++            Ps2FpsCounter c;
++            t.IsFalse(c.update(100.0, 1000u), "the first call only starts the window");
++            t.IsFalse(c.update(100.5, 1030u), "no rate before one second");
++            t.IsFalse(c.update(100.99, 1059u), "still under one second");
++            t.IsTrue(c.update(101.0, 1060u), "a rate after one second");
++            t.IsTrue(std::fabs(c.fps() - 60.0) < 1e-9, "60 vsyncs in 1.0 s = 60 fps");
++            t.IsFalse(c.update(101.5, 1074u), "the window restarted at the last rate");
++            t.IsTrue(c.update(102.25, 1087u), "next rate after 1.25 s");
++            t.IsTrue(std::fabs(c.fps() - 27.0 / 1.25) < 1e-9, "27 vsyncs in 1.25 s = 21.6 fps");
++            t.IsTrue(c.update(104.25, 1087u), "a stalled guest still gets a rate");
++            t.IsTrue(c.fps() == 0.0, "no vsyncs = 0 fps");
++        });
++
++        tc.Run("title is '<base> | <rate, one decimal> fps'", [](TestCase &t)
++        {
++            t.Equals(Ps2FpsCounter::title("Outbreak", 59.94), std::string("Outbreak | 59.9 fps"), "one decimal");
++            t.Equals(Ps2FpsCounter::title("Outbreak", 27.0), std::string("Outbreak | 27.0 fps"), "trailing zero kept");
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+

@@ -8,13 +8,14 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 |---|---|---|
 | Build the tools | `bash tools/run.sh ob-tools -- bash tools/ob.sh tools` | Analyzer + recompiler into `C:\ob\t` |
 | PCSX2 GS library + smoke test | `bash tools/run.sh pcsx2-gs -- bash tools/ob.sh pcsx2-gs` | Clones/builds deps if missing (`gs.md`) |
-| Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`. ~16 s when generated code is unchanged; ~30 s after a runtime-internal change (patch 0028: game code sees only `ps2_runtime_api.h`); a full rebuild (~6 min) only when the recompiler output or the game-facing headers change |
+| Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`, then the ob_diag plugin into `C:\ob\diag-build` (~3 s). ~16 s when generated code is unchanged; ~30 s after a runtime-internal change (patch 0028: game code sees only `ps2_runtime_api.h`); a full rebuild (~6 min) only when the recompiler output or the game-facing headers change |
 | VU1 interpreter vs microVU | `bash tools/ob.sh vucompare [DIR\|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]` | Builds `native/pcsx2_vu` + `ob_pcsx2_vu_compare.exe` into `C:\ob\pcsx2-vu-build` (first build ~55 s incl. its own copy of `ob_pcsx2_gs`; then 5-8 s), runs it on `C:\ob\vu1-captures`. Needs `ob.sh recompile` first (links the runner's `ps2_runtime.lib`). See "VU1 capture" below |
 | Dependency check | `bash tools/ob.sh depcheck` | ~12 s. Touches `gs_frontend.h` (mtime restored after), dry-runs the runner build (`cmake --build C:/ob/r --target ps2EntryRunner -- -n -f C:/ob/r/build.ninja` via `tools/ob/vc.bat`), counts the steps. Green = `depcheck: ok: gs_frontend.h rebuilds N runtime step(s), 0 generated game units`, exit 0; else exit 1 and the game units (`Unity\`) are listed. The `-f` with the absolute manifest path is needed: CMake's CONFIGURE_DEPENDS glob check is always dirty, and a plain `-n` stops after "Re-running CMake" with no steps. Run after any runtime change (patch 0028 keeps game code off runtime headers). Log `C:\ob\logs\ob-depcheck.log` |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
-| Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest |
+| Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest, `ob_diag` (the plugin's own tests; builds `native/ob_diag` into `C:\ob\diag-build`, ~3 s incremental) |
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> [PS2X_VU1=<interp\|mvu>] bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`). The gated screens end at character select, before any VU1 run: `PS2X_VU1` does not change them |
-| Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`) |
+| Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`); loads the ob_diag plugin (`PS2X_DIAG`) |
+| Engine-only boot | `bash tools/ob.sh boot --no-diag --hidden --secs N --tag T` | No plugin, as a play build; speed from the `[fps]` log lines |
 | Visible boot | `PS2X_GS=pcsx2-vk bash tools/ob.sh boot --tag visible` | Opens a window: needs the developer's "proceed" each time |
 
 From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob.sh boot --tag visible`
@@ -28,19 +29,25 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   (override with `OB_PY`).
 - Pins (`pins.md`): MSVC 19.44 / VS 2022, CMake 3.30, PS2Recomp `eb8688b` + `upstream/ps2recomp/` patches,
   PCSX2 v2.9.134, game SLPM-65428 v1.04 + English patch v2.1.
-- `PS2X_PC_SAMPLE=<path.csv>` (patch 0030): guest PC sampling profiler (~550 Hz measured: 1 ms sleeps); CSV `tick,tid,pc,count,vu1,iop,gs,gsvsync`
-  per 64-vsync bucket (pc 0 = outside guest code). `PS2X_FRAME_TIME=<path.csv>` (0027/0029): per-vsync `tick,wall_us,busy_us`.
+- Frame counter (patch 0035, in the engine): the window title reads `<title> | 27.3 fps` (guest vsyncs per wall second,
+  updated once per second); with a hidden window the same rate is logged as `[fps] tick N | 27.3 fps` each second.
+- Diagnostics are a plugin, not the engine (patches 0036/0037, `docs/ARCHITECTURE.md` "Engine vs diagnostics"): the
+  variables below and `PS2X_INPUT_SCRIPT` / `PS2X_FRAME_DUMP_DIR` work only when `native/ob_diag`'s `ob_diag.dll` is
+  loaded: `PS2X_DIAG=<path to the dll>` (what `ob.sh boot` sets), or the dll placed beside the exe. Without it they
+  do nothing. Hook API: `runtime/ps2_diag_hooks.h` in PS2Recomp.
+- `PS2X_PC_SAMPLE=<path.csv>` (plugin; was patch 0030): guest PC sampling profiler (~550 Hz measured: 1 ms sleeps); CSV `tick,tid,pc,count,vu1,iop,gs,gsvsync`
+  per 64-vsync bucket (pc 0 = outside guest code). `PS2X_FRAME_TIME=<path.csv>` (plugin; was 0027/0029): per-vsync `tick,wall_us,busy_us`.
   Summarize: `python -I tools/ob/pc_profile.py <csv> --from T --to T` (maps pcs to functions).
-- `PS2X_VU1_CAPTURE=<dir>[,N[,K]]` (patch 0031): VU1 program capture, see below.
+- `PS2X_VU1_CAPTURE=<dir>[,N[,K]]` (plugin; was patch 0031): VU1 program capture, see below.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
-## VU1 capture (patch 0031) and `vucompare`
+## VU1 capture (ob_diag plugin, was patch 0031) and `vucompare`
 
 - Capture: `PS2X_GS=pcsx2-vk PS2X_VU1_CAPTURE='C:\ob\vu1-captures,400,4' bash tools/ob.sh boot --secs 420 --script gate/play.script --tag vucap`.
   Every VU1 run started by VIF1 MSCAL/MSCALF/MSCNT is offered to the recorder; a file is written when fewer than N
   (default 200) exist, its key (kind, start pc, hash of the 16 KB micro memory) has fewer than K (default 4), and no
   run with the same inputs was written. Captures are game-derived: keep them under `C:\ob`, never in git.
-- File `vu1-<index6>-<pc4>.cap`, little-endian, layout in `C:\ob\up\ps2xRuntime\include\runtime\ps2_vu1_capture.h`:
+- File `vu1-<index6>-<pc4>.cap`, little-endian, layout in `native/ob_diag/include/ob_vu1_capture.h` (also read by `vucompare`):
   `FileHeader` (104 B: magic `OBVU1CAP`, version 1, header size, kind 0 = MSCAL / 1 = MSCNT, flags bit 0 = cycle
   budget hit, run index, start pc in bytes (MSCNT: state pc on entry), TOP, ITOP, EE-side FBRST, VPU_STAT before and
   after, cycle budget, interpreter cycles of the run, code generation, code hash, input hash, code/data/state sizes,

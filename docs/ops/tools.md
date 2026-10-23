@@ -12,7 +12,7 @@ Source: R0-003 (8), phase 1.1 T2/T4 (`docs/history/`). The everyday commands are
   Test: tools/test_mwo3_to_elf.py.
 - `PY tools/q_scan.py` — read-only VU0 Q-register check. Test: tools/test_q_scan.py.
 - `bash tools/recomp_cycle.sh` — Linux/xvfb form of the recompile + boot cycle (not run on Windows).
-- `gate/boot.script` — scripted hidden boot to character select, six captures (grammar: patch 0020 header,
+- `gate/boot.script` — scripted hidden boot to character select, six captures (grammar: `native/ob_diag/src/input_script.h`, was the patch 0020 header,
   docs/history/phase-1.1/tasks/T4.md).
 
 ## Legacy: ARMSX2 / PINE mod era (not part of the port) — moved to `legacy/` on 2026-10-22

@@ -49,7 +49,8 @@ if(EXISTS "${OB_R}/ps2xRuntime/ps2_runtime.lib")
     # Same defines as the runner's ps2_runtime objects (C:\ob\r build.ninja): class layouts must agree.
     target_compile_definitions(ob_pcsx2_vu_compare PRIVATE GRAPHICS_API_OPENGL_33 PLATFORM_DESKTOP
         PS2X_ENABLE_IOP_RPC_TRACE=1 PS2X_EXTERNAL_GS=1 PS2X_HAS_FFMPEG=0 PS2_RUNTIME_LOGS=1)
-    target_include_directories(ob_pcsx2_vu_compare PRIVATE "${OB_SRC}/ps2xRuntime/include"
+    target_include_directories(ob_pcsx2_vu_compare PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../ob_diag/include"
+        "${OB_SRC}/ps2xRuntime/include"
         "${OB_SRC}/ps2xRuntime/src/lib/Kernel" "${OB_SRC}/ps2xIOP/include" "${OB_T}/_deps/raylib-src/src")
     target_link_libraries(ob_pcsx2_vu_compare PRIVATE ob_pcsx2_vu
         "${OB_R}/ps2xRuntime/ps2_runtime.lib" "${OB_R}/ps2xIOP/ps2_iop.lib"
