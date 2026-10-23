@@ -55,6 +55,18 @@ if(EXISTS "${OB_R}/ps2xRuntime/ps2_runtime.lib")
     target_link_libraries(ob_pcsx2_vu_compare PRIVATE ob_pcsx2_vu
         "${OB_R}/ps2xRuntime/ps2_runtime.lib" "${OB_R}/ps2xIOP/ps2_iop.lib"
         "${OB_T}/_deps/raylib-build/raylib/raylib.lib" opengl32 glu32 winmm)
+
+    # Placement and start-up tests (ob.sh test): the runner's adapter + its ps2_runtime.lib (PS2Memory with
+    # patch 0041, ps2InstallExternalVu1, VU1Interpreter) + microVU, under a crowded address space.
+    add_executable(ob_pcsx2_vu_tests tests/vu_tests.cpp adapter/hook.cpp)
+    target_compile_options(ob_pcsx2_vu_tests PRIVATE /EHsc)
+    target_compile_definitions(ob_pcsx2_vu_tests PRIVATE GRAPHICS_API_OPENGL_33 PLATFORM_DESKTOP
+        PS2X_ENABLE_IOP_RPC_TRACE=1 PS2X_EXTERNAL_GS=1 PS2X_HAS_FFMPEG=0 PS2_RUNTIME_LOGS=1 PS2X_EXTERNAL_VU1=1)
+    target_include_directories(ob_pcsx2_vu_tests PRIVATE "${OB_SRC}/ps2xTest/include" "${OB_SRC}/ps2xRuntime/include"
+        "${OB_SRC}/ps2xRuntime/src/lib/Kernel" "${OB_SRC}/ps2xIOP/include" "${OB_T}/_deps/raylib-src/src")
+    target_link_libraries(ob_pcsx2_vu_tests PRIVATE ob_pcsx2_vu
+        "${OB_R}/ps2xRuntime/ps2_runtime.lib" "${OB_R}/ps2xIOP/ps2_iop.lib"
+        "${OB_T}/_deps/raylib-build/raylib/raylib.lib" opengl32 glu32 winmm)
 else()
     message(STATUS "ob_pcsx2_vu: ${OB_R}/ps2xRuntime/ps2_runtime.lib missing, compare tool not configured (ob.sh recompile first)")
 endif()

@@ -4,7 +4,7 @@
 # recomp-cycle.sh, ovl-cycle.sh, build-runner.bat, boot-frames-26.ps1).
 #
 #   tools/ob.sh tools                        configure + build the tools tree ($OB_T)
-#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag tests: "<suite>: <pass>/<total>"
+#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu tests: "<suite>: <pass>/<total>"
 #   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
 #                    [--no-diag] [--hidden]  --no-diag: without the ob_diag plugin (a play build; no script, dumps,
@@ -32,7 +32,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 : "${OB_SRC:=$OB_ROOT/src}" "${OB_T:=$OB_ROOT/t}" "${OB_R:=$OB_ROOT/r}" "${OB_WORK:=$OB_ROOT/work}"
 : "${OB_OVL:=$OB_ROOT/ovl}" "${OB_LOGS:=$OB_ROOT/logs}" "${OB_SPLAT:=$OB_ROOT/splat/SLPM_654.28}"
 : "${OB_RUN:=$REPO/game_files}"
-: "${OB_DIAG_BUILD:=$OB_ROOT/diag-build}"
+: "${OB_DIAG_BUILD:=$OB_ROOT/diag-build}" "${OB_PCSX2_VU_BUILD:=$OB_ROOT/pcsx2-vu-build}"
 : "${OB_VCVARS:=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 export OB_VCVARS
 PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
@@ -111,6 +111,17 @@ cmd_test() {
         [ -n "$t" ] && [ "$p" = "$t" ] && [ "$t" -gt 0 ] || { red=1; grep -a 'Failed\]' "$log" | head -20; }
     else
         echo "ob_diag: 0/0 (build failed: $OB_LOGS/ob-diag-build.log)"; red=1
+    fi
+    # microVU placement/start-up tests (native/pcsx2_vu/tests): link the runner's ps2_runtime.lib, so they test
+    # the runner as last built (ob.sh recompile, or a runner-only build after a runtime change).
+    log="$OB_LOGS/ob-test-pcsx2_vu.log"
+    if pcsx2_vu_build > /dev/null && [ -f "$OB_PCSX2_VU_BUILD/ob_pcsx2_vu_tests.exe" ]; then
+        (cd "$OB_PCSX2_VU_BUILD" && ./ob_pcsx2_vu_tests.exe) > "$log" 2>&1
+        p=$(sed -n 's/^Passed: \([0-9]*\).*/\1/p' "$log" | tail -1); t=$(sed -n 's/^Total Tests: \([0-9]*\).*/\1/p' "$log" | tail -1)
+        echo "pcsx2_vu: ${p:-0}/${t:-0}"
+        [ -n "$t" ] && [ "$p" = "$t" ] && [ "$t" -gt 0 ] || { red=1; grep -a 'Failed\]' -A2 "$log" | head -20; }
+    else
+        echo "pcsx2_vu: 0/0 (build failed: $OB_LOGS/ob-pcsx2-vu.log)"; red=1
     fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
@@ -308,27 +319,33 @@ cmd_pcsx2_gs() {
     echo "pcsx2-gs: smoke exit $rc"; return $rc
 }
 
-# vucompare: configure (once) + build native/pcsx2_vu and ob_pcsx2_vu_compare.exe into $OB_PCSX2_VU_BUILD, then run
-# it. The compare tool links the runner's own ps2_runtime.lib ($OB_R, so ob.sh recompile first) for the interpreter.
-# Exit: the tool's (0 = every capture bit-exact, 1 = some differ, 2 = usage / no captures).
-cmd_vucompare() {
+# pcsx2_vu_build: configure (once) + build native/pcsx2_vu standalone into $OB_PCSX2_VU_BUILD: the compare tool and
+# ob_pcsx2_vu_tests. Both link the runner's own ps2_runtime.lib ($OB_R, so ob.sh recompile first).
+pcsx2_vu_build() {
     local src="${OB_PCSX2:-$OB_ROOT/pcsx2}" deps="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}"
-    local b="${OB_PCSX2_VU_BUILD:-$OB_ROOT/pcsx2-vu-build}" log="$OB_LOGS/ob-pcsx2-vu.log" rc start
-    local dir="$OB_ROOT/vu1-captures"
-    if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then dir=$1; shift; fi
-    if [ $# -gt 0 ] && [ "$1" = --synthetic ]; then dir=--synthetic; shift; fi
-    [ -f "$OB_R/ps2xRuntime/ps2_runtime.lib" ] || { echo "vucompare: $OB_R/ps2xRuntime/ps2_runtime.lib missing; run ob.sh recompile first"; return 1; }
+    local b="$OB_PCSX2_VU_BUILD" log="$OB_LOGS/ob-pcsx2-vu.log" rc start
+    [ -f "$OB_R/ps2xRuntime/ps2_runtime.lib" ] || { echo "pcsx2_vu: $OB_R/ps2xRuntime/ps2_runtime.lib missing; run ob.sh recompile first"; return 1; }
     start=$(date +%s)
     mkdir -p "$b"
     { { [ -f "$b/build.ninja" ] ||
-          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src" \
-              -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T"; } &&
+          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src"               -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T"; } &&
       vc cmake --build "$b" -j $JOBS; } > "$log" 2>&1
     rc=$?
-    echo "vucompare: build exit $rc in $(( $(date +%s) - start )) s ($log)"
-    [ $rc = 0 ] || { tail -5 "$log"; return $rc; }
+    echo "pcsx2_vu: build exit $rc in $(( $(date +%s) - start )) s ($log)"
+    [ $rc = 0 ] || tail -5 "$log"
+    return $rc
+}
+
+# vucompare: pcsx2_vu_build, then run the compare tool.
+# Exit: the tool's (0 = every capture bit-exact, 1 = some differ, 2 = usage / no captures).
+cmd_vucompare() {
+    local dir="$OB_ROOT/vu1-captures" rc
+    if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then dir=$1; shift; fi
+    if [ $# -gt 0 ] && [ "$1" = --synthetic ]; then dir=--synthetic; shift; fi
+    pcsx2_vu_build; rc=$?
+    [ $rc = 0 ] || return $rc
     [ "$dir" = --synthetic ] || dir=$(cygpath -w "$dir")
-    "$b/ob_pcsx2_vu_compare.exe" "$dir" "$@"
+    "$OB_PCSX2_VU_BUILD/ob_pcsx2_vu_compare.exe" "$dir" "$@"
 }
 
 # depcheck: proves a runtime-internal header change does not rebuild generated game code (patch 0028). Touches

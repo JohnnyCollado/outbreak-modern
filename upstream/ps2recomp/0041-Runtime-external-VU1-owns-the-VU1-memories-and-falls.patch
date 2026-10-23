@@ -1,0 +1,330 @@
+From 3c67e8fe9279a12cbd4e57578b3495adb7c6fffb Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 08:24:41 -0400
+Subject: [PATCH] Runtime: external VU1 owns the VU1 memories and falls back to
+ the interpreter
+
+PS2ExternalVu1::vu1Memory (default: none) lets a backend hand PS2Memory the
+VU1 code/data buffers; PS2Memory::initialize uses them (zeroed, never freed)
+instead of new[]. microVU needs its code cache within disp32 reach of VU1
+data; with both in one reservation made by the backend, placement no longer
+depends on what the process maps later. The tracking is file-local in
+ps2_memory.cpp, so ps2_memory.h (seen by generated code) is unchanged.
+
+ps2CreateExternalVu1 now reports a reason (char *err, uint32_t errSize), and
+ps2InstallExternalVu1 installs the backend or, when it is null, keeps the
+interpreter and logs once
+"[vu1] <mode> unavailable (<reason>); falling back to interp".
+PS2X_VU1=mvu on a build without an external VU1 falls back the same way
+instead of exiting 2. The backend is created before PS2Memory::initialize,
+so no VU1 program has run when the fallback happens.
+---
+ .../include/runtime/ps2_vu1_external.h        | 17 +++-
+ ps2xRuntime/src/lib/ps2_memory.cpp            | 56 +++++++++---
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 23 ++---
+ ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp   | 22 +++++
+ ps2xTest/src/ps2_vu1_tests.cpp                | 91 +++++++++++++++++++
+ 5 files changed, 181 insertions(+), 28 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1_external.h b/ps2xRuntime/include/runtime/ps2_vu1_external.h
+index d005d45..6e2067e 100644
+--- a/ps2xRuntime/include/runtime/ps2_vu1_external.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1_external.h
+@@ -31,11 +31,26 @@ public:
+   // interpreter's state right after its reset), readState fills the registers, pc and flags of out.
+   virtual void setState(const VU1State &s) = 0;
+   virtual void readState(VU1State &out) = 0;
++  // VU1 memory the backend owns (a recompiler may need it at a fixed place relative to its code cache).
++  // When this returns true, PS2Memory::initialize uses *code / *data (PS2_VU1_CODE_SIZE /
++  // PS2_VU1_DATA_SIZE bytes, zeroed there, never freed by PS2Memory; they must outlive it) instead of
++  // its own heap buffers. Read once per initialize, so the backend must be set before it.
++  virtual bool vu1Memory(uint8_t **code, uint8_t **data)
++  {
++    (void)code;
++    (void)data;
++    return false;
++  }
+ };
+ PS2ExternalVu1 *ps2ExternalVu1();            // null = the VU1 interpreter
+ void ps2SetExternalVu1(PS2ExternalVu1 *vu1); // tests and startup
++// Startup: installs vu1 (true), or, when it is null, keeps the interpreter and writes once
++// "[vu1] <mode> unavailable (<reason>); falling back to interp" through log (default: stderr) (false).
++bool ps2InstallExternalVu1(PS2ExternalVu1 *vu1, const char *mode, const char *reason,
++                           void (*log)(const char *line) = nullptr);
+ #ifdef PS2X_EXTERNAL_VU1
+-PS2ExternalVu1 *ps2CreateExternalVu1(const char *mode); // defined by the external library; null = failure
++// Defined by the external library; null = it cannot start, with the reason in err.
++PS2ExternalVu1 *ps2CreateExternalVu1(const char *mode, char *err, uint32_t errSize);
+ #endif
+ 
+ #endif
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 5227e93..e867801 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -11,8 +11,26 @@
+ #include <string>
+ #include <vector>
+ 
++#include "runtime/ps2_vu1_external.h"
++
+ namespace
+ {
++    // VU1 memories an external VU1 backend handed PS2Memory (ps2_vu1_external.h vu1Memory): the backend
++    // owns them, so PS2Memory never delete[]s them. File-local so ps2_memory.h (seen by generated code) is unchanged.
++    std::vector<const uint8_t *> &externalVu1Buffers()
++    {
++        static std::vector<const uint8_t *> buffers;
++        return buffers;
++    }
++
++    void freeVu1Buffer(uint8_t *&p)
++    {
++        const std::vector<const uint8_t *> &ext = externalVu1Buffers();
++        if (p && std::find(ext.begin(), ext.end(), p) == ext.end())
++            delete[] p;
++        p = nullptr;
++    }
++
+     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
+     {
+         if (static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes) > static_cast<uint64_t>(regionSize))
+@@ -288,16 +306,8 @@ PS2Memory::~PS2Memory()
+         m_gsVRAM = nullptr;
+     }
+ 
+-    if (m_vu1Code)
+-    {
+-        delete[] m_vu1Code;
+-        m_vu1Code = nullptr;
+-    }
+-    if (m_vu1Data)
+-    {
+-        delete[] m_vu1Data;
+-        m_vu1Data = nullptr;
+-    }
++    freeVu1Buffer(m_vu1Code);
++    freeVu1Buffer(m_vu1Data);
+     if (m_vu0Code)
+     {
+         delete[] m_vu0Code;
+@@ -326,8 +336,8 @@ bool PS2Memory::initialize(size_t ramSize)
+         delete[] m_gsVRAM;
+         delete[] m_vu0Code;
+         delete[] m_vu0Data;
+-        delete[] m_vu1Code;
+-        delete[] m_vu1Data;
++        freeVu1Buffer(m_vu1Code);
++        freeVu1Buffer(m_vu1Data);
+         m_rdram = nullptr;
+         m_scratchpad = nullptr;
+         ps2SetScratchpadHostPtr(nullptr);
+@@ -400,8 +410,26 @@ bool PS2Memory::initialize(size_t ramSize)
+         std::memset(m_vu0Code, 0, PS2_VU0_CODE_SIZE);
+         std::memset(m_vu0Data, 0, PS2_VU0_DATA_SIZE);
+ 
+-        m_vu1Code = new uint8_t[PS2_VU1_CODE_SIZE];
+-        m_vu1Data = new uint8_t[PS2_VU1_DATA_SIZE];
++        // An external VU1 may own the VU1 memories (microVU needs its code cache within disp32 reach of
++        // the data, so it allocates both in one reservation); else the heap, as before.
++        uint8_t *externalCode = nullptr;
++        uint8_t *externalData = nullptr;
++        PS2ExternalVu1 *externalVu1 = ps2ExternalVu1();
++        if (externalVu1 && externalVu1->vu1Memory(&externalCode, &externalData) && externalCode && externalData)
++        {
++            std::vector<const uint8_t *> &ext = externalVu1Buffers();
++            if (std::find(ext.begin(), ext.end(), externalCode) == ext.end())
++                ext.push_back(externalCode);
++            if (std::find(ext.begin(), ext.end(), externalData) == ext.end())
++                ext.push_back(externalData);
++            m_vu1Code = externalCode;
++            m_vu1Data = externalData;
++        }
++        else
++        {
++            m_vu1Code = new uint8_t[PS2_VU1_CODE_SIZE];
++            m_vu1Data = new uint8_t[PS2_VU1_DATA_SIZE];
++        }
+         std::memset(m_vu1Code, 0, PS2_VU1_CODE_SIZE);
+         std::memset(m_vu1Data, 0, PS2_VU1_DATA_SIZE);
+         markVU0CodeModified();
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index b798a76..77f0ea5 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -892,24 +892,21 @@ bool PS2Runtime::initialize(const char *title)
+     }
+     {
+         // PS2X_VU1 selects the VU1 backend: unset or "interp" = the VU1 interpreter; "mvu" needs a build
+-        // with PS2X_EXTERNAL_VU1_DIR (PCSX2's microVU). Before syncCoreSubsystems, which hands it the reset state.
++        // with PS2X_EXTERNAL_VU1_DIR (PCSX2's microVU). Before m_memory.initialize (the backend may own the VU1
++        // memories, ps2_vu1_external.h vu1Memory) and syncCoreSubsystems (which hands it the reset state). A
++        // backend that cannot start falls back to the interpreter with one log line; no VU1 program has run yet.
+         const char *vu1Env = std::getenv("PS2X_VU1");
+-        const std::string vu1Mode = (vu1Env && *vu1Env) ? vu1Env : "interp";
++        std::string vu1Mode = (vu1Env && *vu1Env) ? vu1Env : "interp";
+         if (vu1Mode == "mvu")
+         {
+ #ifdef PS2X_EXTERNAL_VU1
+-            PS2ExternalVu1 *externalVu1 = ps2CreateExternalVu1(vu1Mode.c_str());
+-            if (!externalVu1)
+-            {
+-                std::cerr << "[vu1] backend " << vu1Mode << " failed to start" << std::endl;
+-                std::cerr.flush();
+-                std::_Exit(2);
+-            }
+-            ps2SetExternalVu1(externalVu1);
++            char vu1Err[512] = {};
++            PS2ExternalVu1 *externalVu1 = ps2CreateExternalVu1(vu1Mode.c_str(), vu1Err, sizeof(vu1Err));
++            if (!ps2InstallExternalVu1(externalVu1, vu1Mode.c_str(), vu1Err))
++                vu1Mode = "interp";
+ #else
+-            std::cerr << "[vu1] backend " << vu1Mode << " needs a build with PS2X_EXTERNAL_VU1_DIR" << std::endl;
+-            std::cerr.flush();
+-            std::_Exit(2);
++            ps2InstallExternalVu1(nullptr, vu1Mode.c_str(), "this build has no PS2X_EXTERNAL_VU1_DIR");
++            vu1Mode = "interp";
+ #endif
+         }
+         else if (vu1Mode != "interp")
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp
+index 1122610..0e1a391 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp
+@@ -1,6 +1,8 @@
+ #include "runtime/ps2_vu1_external.h"
+ 
+ #include <atomic>
++#include <cstdio>
++#include <string>
+ 
+ namespace
+ {
+@@ -16,3 +18,23 @@ void ps2SetExternalVu1(PS2ExternalVu1 *vu1)
+ {
+     s_externalVu1.store(vu1, std::memory_order_release);
+ }
++
++bool ps2InstallExternalVu1(PS2ExternalVu1 *vu1, const char *mode, const char *reason, void (*log)(const char *line))
++{
++    if (vu1)
++    {
++        ps2SetExternalVu1(vu1);
++        return true;
++    }
++    ps2SetExternalVu1(nullptr);
++    const std::string line = std::string("[vu1] ") + (mode ? mode : "?") + " unavailable (" +
++                             ((reason && *reason) ? reason : "no reason given") + "); falling back to interp";
++    if (log)
++        log(line.c_str());
++    else
++    {
++        std::fprintf(stderr, "%s\n", line.c_str());
++        std::fflush(stderr);
++    }
++    return false;
++}
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 692503c..362bfe1 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -1962,5 +1962,96 @@ void register_ps2_vu1_tests()
+             t.Equals(runtime.cpu().vu0_vpu_stat & 0x0600u, 0u, "VPU_STAT D/T cleared by a run without a stop");
+             t.Equals(runtime.vu1State().vi[1], 42, "vu1State() reads the external backend's registers");
+         });
++
++        tc.Run("an external VU1 that owns the VU1 memories: PS2Memory uses them, zeroes them and never frees them", [](TestCase &t)
++        {
++            // Buffers inside a larger block: a delete[] on them would be a heap error, not a quiet pass.
++            static std::vector<uint8_t> block(16u + PS2_VU1_CODE_SIZE + PS2_VU1_DATA_SIZE, 0xCDu);
++            struct OwningVu1 final : PS2ExternalVu1
++            {
++                uint8_t *code = nullptr;
++                uint8_t *data = nullptr;
++                PS2Vu1RunResult mscal(PS2Memory &, uint32_t, uint32_t, uint32_t, uint32_t) override { return {}; }
++                PS2Vu1RunResult mscnt(PS2Memory &, uint32_t, uint32_t, uint32_t) override { return {}; }
++                void setState(const VU1State &) override {}
++                void readState(VU1State &out) override { out = VU1State{}; }
++                bool vu1Memory(uint8_t **c, uint8_t **d) override
++                {
++                    *c = code;
++                    *d = data;
++                    return true;
++                }
++            };
++            OwningVu1 owner;
++            owner.code = block.data() + 16u;
++            owner.data = owner.code + PS2_VU1_CODE_SIZE;
++            struct Unset
++            {
++                ~Unset() { ps2SetExternalVu1(nullptr); }
++            } unset;
++            ps2SetExternalVu1(&owner);
++            {
++                PS2Memory mem;
++                t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++                t.IsTrue(mem.getVU1Data() == owner.data, "VU1 data memory is the backend's");
++                t.IsTrue(mem.getVU1Code() == owner.code, "VU1 code memory is the backend's");
++                bool zeroed = true;
++                for (uint32_t i = 0; i < PS2_VU1_CODE_SIZE + PS2_VU1_DATA_SIZE; ++i)
++                    zeroed = zeroed && owner.code[i] == 0u;
++                t.IsTrue(zeroed, "and zeroed by initialize");
++                owner.data[0] = 0x5Au;
++                t.IsTrue(mem.initialize(), "a second initialize should succeed");
++                t.IsTrue(mem.getVU1Data() == owner.data, "and keep the backend's memory (VU1 data never moves)");
++                owner.data[0] = 0x5Au;
++            }
++            t.Equals(static_cast<uint32_t>(owner.data[0]), 0x5Au, "PS2Memory's destructor left the backend's memory alone");
++            ps2SetExternalVu1(nullptr);
++            PS2Memory heapMem;
++            t.IsTrue(heapMem.initialize(), "without a backend, PS2Memory initialize should succeed");
++            t.IsTrue(heapMem.getVU1Data() != owner.data && heapMem.getVU1Data() != nullptr, "and allocates its own VU1 data");
++        });
++
++        tc.Run("an external VU1 that cannot start falls back to the interpreter with one log line", [](TestCase &t)
++        {
++            static std::vector<std::string> lines;
++            lines.clear();
++            auto capture = [](const char *line) { lines.emplace_back(line); };
++            struct NullVu1 final : PS2ExternalVu1
++            {
++                PS2Vu1RunResult mscal(PS2Memory &, uint32_t, uint32_t, uint32_t, uint32_t) override { return {}; }
++                PS2Vu1RunResult mscnt(PS2Memory &, uint32_t, uint32_t, uint32_t) override { return {}; }
++                void setState(const VU1State &) override {}
++                void readState(VU1State &out) override { out = VU1State{}; }
++            } stale;
++            struct Unset
++            {
++                ~Unset() { ps2SetExternalVu1(nullptr); }
++            } unset;
++            ps2SetExternalVu1(&stale);
++            t.IsTrue(!ps2InstallExternalVu1(nullptr, "mvu", "no room for the code cache", capture), "a null backend is not installed");
++            t.IsTrue(ps2ExternalVu1() == nullptr, "the interpreter is the VU1 backend");
++            t.Equals(lines.size(), static_cast<size_t>(1u), "one log line");
++            if (lines.size() == 1u)
++                t.IsTrue(lines[0] == "[vu1] mvu unavailable (no room for the code cache); falling back to interp",
++                         "naming the mode, the reason and the fallback");
++
++            // The interpreter then runs VU1 programs (IADDIU vi1, vi0, 5 + E bit).
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
++            uint8_t *code = runtime.memory().getVU1Code();
++            std::memset(code, 0, PS2_VU1_CODE_SIZE);
++            writeVuInstructionPair(code, 0x40u, makeVuIaddiu(1u, 0u, 5), kVuUpperNop | 0x40000000u);
++            writeVuInstructionPair(code, 0x48u, 0u, kVuUpperNop);
++            runtime.vu1().state().vi[1] = 0;
++            const uint32_t mscal = makeVifCmd(0x14u, 0u, 0x40u / 8u);
++            runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
++            t.Equals(runtime.vu1().state().vi[1], 5, "the interpreter ran the MSCAL");
++
++            lines.clear();
++            t.IsTrue(ps2InstallExternalVu1(&stale, "mvu", "", capture), "a backend that started is installed");
++            t.IsTrue(ps2ExternalVu1() == &stale, "and is the VU1 backend");
++            t.Equals(lines.size(), static_cast<size_t>(0u), "without a log line");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

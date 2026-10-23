@@ -12,7 +12,7 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | VU1 interpreter vs microVU | `bash tools/ob.sh vucompare [DIR\|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]` | Builds `native/pcsx2_vu` + `ob_pcsx2_vu_compare.exe` into `C:\ob\pcsx2-vu-build` (first build ~55 s incl. its own copy of `ob_pcsx2_gs`; then 5-8 s), runs it on `C:\ob\vu1-captures`. Needs `ob.sh recompile` first (links the runner's `ps2_runtime.lib`). See "VU1 capture" below |
 | Dependency check | `bash tools/ob.sh depcheck` | ~12 s. Touches `gs_frontend.h` (mtime restored after), dry-runs the runner build (`cmake --build C:/ob/r --target ps2EntryRunner -- -n -f C:/ob/r/build.ninja` via `tools/ob/vc.bat`), counts the steps. Green = `depcheck: ok: gs_frontend.h rebuilds N runtime step(s), 0 generated game units`, exit 0; else exit 1 and the game units (`Unity\`) are listed. The `-f` with the absolute manifest path is needed: CMake's CONFIGURE_DEPENDS glob check is always dirty, and a plain `-n` stops after "Re-running CMake" with no steps. Run after any runtime change (patch 0028 keeps game code off runtime headers). Log `C:\ob\logs\ob-depcheck.log` |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
-| Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest, `ob_diag` (the plugin's own tests; builds `native/ob_diag` into `C:\ob\diag-build`, ~3 s incremental) |
+| Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest, `ob_diag` (the plugin's own tests; builds `native/ob_diag` into `C:\ob\diag-build`, ~3 s incremental), `pcsx2_vu` (`ob_pcsx2_vu_tests`: microVU placement under a crowded address space and the fallback; built in `C:\ob\pcsx2-vu-build`, links the runner's `ps2_runtime.lib`, so rebuild the runner after a runtime change) |
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> [PS2X_VU1=<interp\|mvu>] bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`). The gated screens end at character select, before any VU1 run: `PS2X_VU1` does not change them |
 | Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`); loads the ob_diag plugin (`PS2X_DIAG`) |
 | Engine-only boot | `bash tools/ob.sh boot --no-diag --hidden --secs N --tag T` | No plugin, as a play build; speed from the `[fps]` log lines |
@@ -68,9 +68,10 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   per-field counts, known patterns (STATUS/MAC left at their input value by microVU's flag elimination; P equal to
   the final Q), and ns per interpreter cycle (median of `--repeat` warm runs; only the run call is timed).
   `--synthetic` runs a few built-in programs instead. Exit 0 = all bit-exact, 1 = some differ, 2 = usage.
-- `native/pcsx2_vu` caveats handled in code: the 64 MB code cache is allocated within 1 GB of the VU1 data and the
-  disp32 reach (cache to data, globals to the rbx text pointer) is checked at `Init` in every build (failure =
-  error, no run); MXCSR is set to `EmuConfig.Cpu.VU1FPCR` around each run; microVU's program cache is cleared when
+- `native/pcsx2_vu` caveats handled in code: in the runner, VU1 data, VU1 code and the 64 MB code cache are one
+  reservation made at startup (`InitOwned`, patch 0041; worst cache-to-data distance 64 MB); the compare tool's
+  `Init` searches within 2 GB of its own VU1 data. The disp32 reach (cache to data, globals to the rbx text pointer)
+  is checked in every build (failure = error, no run); MXCSR is set to `EmuConfig.Cpu.VU1FPCR` around each run; microVU's program cache is cleared when
   the code generation changes; PCSX2 config defaults are the verbatim `Pcsx2Config.cpp` constructor bodies
   (`src/config_defaults.cpp`, re-copy on a PCSX2 bump). No PCSX2 source edit.
 
@@ -78,7 +79,11 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
 
 - Selector read once at startup (`ps2_runtime.cpp`, next to `PS2X_GS`): unset or `interp` = PS2Recomp's VU1
   interpreter; `mvu` = PCSX2's microVU (`native/pcsx2_vu`); anything else = `[vu1] unknown PS2X_VU1=...`, exit 2.
-  The boot log prints `[vu1] backend=<mode>`, and on the first VU1 run `[vu1] mvu: <cache/data addresses, reach>`.
+  mvu starts right there, before PS2Memory and the window (patch 0041): stderr `[vu1] mvu active: <cache/data
+  addresses, reach>`; if it cannot start (or the build has no microVU), stderr `[vu1] mvu unavailable (<reason>);
+  falling back to interp` once and the interpreter runs. stdout `[vu1] backend=<mode actually used>`.
+  PS2Memory takes its VU1 data/code from the backend (`PS2ExternalVu1::vu1Memory`), so the cache is always in reach
+  (`reports/2026-10-23-gameplay.md` entry 24: a visible-window run found no free 64 MB within 1 GB of a heap block).
   The gate passes it through: `PS2X_GS=pcsx2-sw PS2X_VU1=mvu bash tools/ob.sh gate`.
 - Seam (`runtime/ps2_vu1_external.h`): `PS2ExternalVu1::mscal/mscnt` replace the interpreter at the VIF1 MSCAL/MSCNT
   callbacks; `setState/readState` translate state (reset; `PS2X_VU1_CAPTURE`; `PS2Runtime::vu1State()`). In mvu

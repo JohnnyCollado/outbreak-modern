@@ -98,7 +98,20 @@ namespace ObMvu
 			return static_cast<uint64_t>(std::max(std::abs(x), std::abs(y)));
 		}
 
-		constexpr uint64_t kReach = 0x7FFF0000ull; // rel32 / disp32 reach, minus a 64 KB margin
+		// disp32 reach: EmitSibMagic (common/emitter/x86emitter.cpp:298-330) encodes an absolute address
+		// rip-relative when (address - end of instruction) fits s32, i.e. within 2 GB of the code; the margin
+		// covers the instruction length and the 64 KB allocation granularity.
+		constexpr uint64_t kReach = 0x7FFF0000ull;
+		// Search distance for AllocNear: every byte of the cache within kReach - 64 KB of every byte of data.
+		constexpr size_t kSearch = static_cast<size_t>(kReach - 0x10000ull);
+
+		// One reservation for the VU1 memories and the code cache (InitOwned): [0, 64 KB) data + code (RW),
+		// [64 KB, 64 KB + 64 MB) the cache (RWX). Worst cache<->data distance is 64 MB + 16 KB, whatever
+		// else the process maps later (window, GPU driver, Vulkan): placement needs no luck.
+		constexpr size_t kOwnedHead = 0x10000;
+		u8* s_reservation = nullptr;
+		u8* s_ownedData = nullptr;
+		u8* s_ownedCode = nullptr;
 
 		// mVUallocSFLAGd (microVU_Alloc.inl:62-77): architectural STATUS -> mVU's internal flag layout.
 		u32 DenormalizeStatus(u32 st)
@@ -123,69 +136,118 @@ namespace ObPcsx2Vu
 {
 	using namespace ObMvu;
 
-	bool Init(uint8_t* vuData, uint8_t* vuCode, char* err, uint32_t errSize)
+	namespace
 	{
-		auto fail = [&](const char* msg) {
+		bool Fail(char* err, uint32_t errSize, const char* msg)
+		{
 			if (err && errSize)
 				std::snprintf(err, errSize, "%s", msg);
 			return false;
-		};
-		if (s_ready)
-			return fail("ob_pcsx2_vu: Init called twice");
-		if (!vuData || !vuCode)
-			return fail("ob_pcsx2_vu: null VU1 memory");
-
-		ObMvuApplyConfigDefaults();
-		EmuConfig.Speedhacks.vuFlagHack = s_flagHack;
-		x86Emitter::use_avx = g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX; // VMManager.cpp:407
-
-		// Caveat 1 (study section 1, Memory.cpp:98-117): generated code addresses VU data by disp32
-		// (rip-relative or from the rbx text pointer); out of reach is only a pxAssertMsg (compiled out).
-		s_cache = AllocNear(vuData, vuData + 0x4000, kCacheSize, 0x40000000u);
-		if (!s_cache)
-			return fail("ob_pcsx2_vu: no free 64 MB range within 1 GB of VU1 data");
-		const uint64_t dData = WorstDistance(s_cache, s_cache + kCacheSize, vuData, vuData + 0x4000);
-		// Globals are reached through rbx = &cpuRegs.GPR.r[9] (iR5900.h:31): they must be near it.
-		const u8* text = reinterpret_cast<const u8*>(R5900_TEXTPTR);
-		const uint64_t dGlobals = std::max({
-			WorstDistance(&vuRegs[0], &vuRegs[2], text, text + 16),
-			WorstDistance(&g_vu1Thread, &g_vu1Thread + 1, text, text + 16),
-			WorstDistance(eeHw, eeHw + sizeof(eeHw), text, text + 16),
-			WorstDistance(&EmuConfig, &EmuConfig + 1, text, text + 16)});
-		std::snprintf(s_describe, sizeof(s_describe),
-			"mvu cache %p-%p, vu1 data %p, worst cache<->data %llu MB, globals<->text %llu MB, vuFlagHack %d",
-			s_cache, s_cache + kCacheSize, vuData,
-			static_cast<unsigned long long>(dData >> 20), static_cast<unsigned long long>(dGlobals >> 20), s_flagHack ? 1 : 0);
-		if (dData >= kReach || dGlobals >= kReach)
-		{
-			VirtualFree(s_cache, 0, MEM_RELEASE);
-			s_cache = nullptr;
-			char msg[320];
-			std::snprintf(msg, sizeof(msg), "ob_pcsx2_vu: out of disp32 reach: %s", s_describe);
-			return fail(msg);
 		}
 
-		s_vuData = vuData;
-		vuRegs[0].idx = 0;
-		vuRegs[0].Mem = s_vu0Mem;
-		vuRegs[0].Micro = s_vu0Micro;
-		vuRegs[1].idx = 1;
-		vuRegs[1].Mem = vuData;
-		vuRegs[1].Micro = vuCode;
-		ObMvuJit::Reserve();
-		ObMvuJit::Reset();
-		s_codeGeneration = ~0ull;
-		s_ready = true;
-		return true;
+		void ReleaseCache()
+		{
+			if (s_reservation)
+				VirtualFree(s_reservation, 0, MEM_RELEASE); // the cache is part of it
+			else if (s_cache)
+				VirtualFree(s_cache, 0, MEM_RELEASE);
+			s_reservation = s_ownedData = s_ownedCode = nullptr;
+			s_cache = nullptr;
+		}
+
+		// Shared tail of Init / InitOwned, with s_cache placed: reach check, then microVU up.
+		bool Start(uint8_t* vuData, uint8_t* vuCode, char* err, uint32_t errSize)
+		{
+			ObMvuApplyConfigDefaults();
+			EmuConfig.Speedhacks.vuFlagHack = s_flagHack;
+			x86Emitter::use_avx = g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX; // VMManager.cpp:407
+			const uint64_t dData = WorstDistance(s_cache, s_cache + kCacheSize, vuData, vuData + 0x4000);
+			// Globals are reached through rbx = &cpuRegs.GPR.r[9] (iR5900.h:31): they must be near it.
+			const u8* text = reinterpret_cast<const u8*>(R5900_TEXTPTR);
+			const uint64_t dGlobals = std::max({
+				WorstDistance(&vuRegs[0], &vuRegs[2], text, text + 16),
+				WorstDistance(&g_vu1Thread, &g_vu1Thread + 1, text, text + 16),
+				WorstDistance(eeHw, eeHw + sizeof(eeHw), text, text + 16),
+				WorstDistance(&EmuConfig, &EmuConfig + 1, text, text + 16)});
+			std::snprintf(s_describe, sizeof(s_describe),
+				"mvu cache %p-%p, vu1 data %p, worst cache<->data %llu MB, globals<->text %llu MB, vuFlagHack %d",
+				s_cache, s_cache + kCacheSize, vuData,
+				static_cast<unsigned long long>(dData >> 20), static_cast<unsigned long long>(dGlobals >> 20), s_flagHack ? 1 : 0);
+			if (dData >= kReach || dGlobals >= kReach)
+			{
+				ReleaseCache();
+				char msg[320];
+				std::snprintf(msg, sizeof(msg), "ob_pcsx2_vu: out of disp32 reach: %s", s_describe);
+				return Fail(err, errSize, msg);
+			}
+
+			s_vuData = vuData;
+			vuRegs[0].idx = 0;
+			vuRegs[0].Mem = s_vu0Mem;
+			vuRegs[0].Micro = s_vu0Micro;
+			vuRegs[1].idx = 1;
+			vuRegs[1].Mem = vuData;
+			vuRegs[1].Micro = vuCode;
+			ObMvuJit::Reserve();
+			ObMvuJit::Reset();
+			s_codeGeneration = ~0ull;
+			s_ready = true;
+			return true;
+		}
+	} // namespace
+
+	bool Init(uint8_t* vuData, uint8_t* vuCode, char* err, uint32_t errSize)
+	{
+		if (s_ready)
+			return Fail(err, errSize, "ob_pcsx2_vu: Init called twice");
+		if (!vuData || !vuCode)
+			return Fail(err, errSize, "ob_pcsx2_vu: null VU1 memory");
+		// Caveat 1 (study section 1, Memory.cpp:98-117): generated code addresses VU data by disp32
+		// (rip-relative or from the rbx text pointer); out of reach is only a pxAssertMsg (compiled out).
+		s_cache = AllocNear(vuData, vuData + 0x4000, kCacheSize, kSearch);
+		if (!s_cache)
+			return Fail(err, errSize, "ob_pcsx2_vu: no free 64 MB range within 2 GB of VU1 data");
+		return Start(vuData, vuCode, err, errSize);
 	}
+
+	bool InitOwned(char* err, uint32_t errSize)
+	{
+		if (s_ready)
+			return Fail(err, errSize, "ob_pcsx2_vu: Init called twice");
+		void* base = VirtualAlloc(nullptr, kOwnedHead + kCacheSize, MEM_RESERVE, PAGE_NOACCESS);
+		if (!base)
+		{
+			char msg[160];
+			std::snprintf(msg, sizeof(msg), "ob_pcsx2_vu: cannot reserve %zu MB for VU1 memory + code cache (error %lu)",
+				(kOwnedHead + kCacheSize) >> 20, static_cast<unsigned long>(GetLastError()));
+			return Fail(err, errSize, msg);
+		}
+		u8* b = static_cast<u8*>(base);
+		if (!VirtualAlloc(b, kOwnedHead, MEM_COMMIT, PAGE_READWRITE) ||
+			!VirtualAlloc(b + kOwnedHead, kCacheSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE))
+		{
+			const unsigned long e = GetLastError();
+			VirtualFree(base, 0, MEM_RELEASE);
+			char msg[160];
+			std::snprintf(msg, sizeof(msg), "ob_pcsx2_vu: cannot commit VU1 memory + code cache (error %lu)", e);
+			return Fail(err, errSize, msg);
+		}
+		s_reservation = b;
+		s_ownedData = b;          // 16 KB VU1 data
+		s_ownedCode = b + 0x4000; // 16 KB VU1 code (not reached by generated code; here for one owner)
+		s_cache = b + kOwnedHead;
+		return Start(s_ownedData, s_ownedCode, err, errSize);
+	}
+
+	uint8_t* OwnedData() { return s_ready ? s_ownedData : nullptr; }
+	uint8_t* OwnedCode() { return s_ready ? s_ownedCode : nullptr; }
 
 	void Shutdown()
 	{
 		if (!s_ready)
 			return;
 		ObMvuJit::Shutdown();
-		VirtualFree(s_cache, 0, MEM_RELEASE);
-		s_cache = nullptr;
+		ReleaseCache();
 		s_ready = false;
 	}
 

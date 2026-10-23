@@ -45,7 +45,7 @@ namespace
 
 		void setState(const VU1State& s) override
 		{
-			ObPcsx2Vu::State& o = m_pending;
+			ObPcsx2Vu::State o{};
 			for (int r = 0; r < 32; ++r)
 				for (int l = 0; l < 4; ++l)
 					o.vf[r][l] = FloatBits(s.vf[r][l]);
@@ -61,19 +61,13 @@ namespace
 			o.mac = s.mac;
 			o.clip = s.clip;
 			o.tpc = s.pc & 0x3FF8u;
-			if (m_memory)
-				ObPcsx2Vu::SetState(m_pending);
-			else
-				m_hasPending = true; // applied once Init has the VU1 memories (first run)
+			ObPcsx2Vu::SetState(o); // microVU is up from creation (InitOwned)
 		}
 
 		void readState(VU1State& out) override
 		{
 			ObPcsx2Vu::State o{};
-			if (m_memory)
-				ObPcsx2Vu::GetState(o);
-			else
-				o = m_pending;
+			ObPcsx2Vu::GetState(o);
 			out = VU1State{};
 			for (int r = 0; r < 32; ++r)
 				for (int l = 0; l < 4; ++l)
@@ -101,25 +95,15 @@ namespace
 			static_cast<Pcsx2MicroVu1*>(ctx)->m_memory->submitGifPacket(GifPathId::Path1, data, size);
 		}
 
+		// The memory the XGKICK packets go to. microVU already runs on the VU1 memories it owns, which
+		// PS2Memory::initialize took through vu1Memory (patch 0041), so there is nothing to place here.
 		void bind(PS2Memory& memory)
 		{
-			if (m_memory == &memory && m_vuData == memory.getVU1Data())
+			if (m_memory == &memory)
 				return;
-			if (m_memory)
-				fatal("VU1 memory moved after microVU was bound to it");
-			uint8_t* data = memory.getVU1Data();
-			uint8_t* code = memory.getVU1Code();
-			char err[512] = {};
-			if (!ObPcsx2Vu::Init(data, code, err, sizeof(err)))
-				fatal(err);
-			ObPcsx2Vu::SetPath1Sink(&Path1, this);
+			if (memory.getVU1Data() != ObPcsx2Vu::OwnedData() || memory.getVU1Code() != ObPcsx2Vu::OwnedCode())
+				fatal("PS2Memory does not use the backend's VU1 memory (PS2Memory initialized before the backend was set?)");
 			m_memory = &memory;
-			m_vuData = data;
-			if (m_hasPending)
-				ObPcsx2Vu::SetState(m_pending);
-			m_hasPending = false;
-			std::printf("[vu1] mvu: %s\n", ObPcsx2Vu::Describe());
-			std::fflush(stdout);
 		}
 
 		PS2Vu1RunResult run(PS2Memory& memory, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst)
@@ -147,18 +131,39 @@ namespace
 			std::_Exit(2);
 		}
 
+	public:
+		bool vu1Memory(uint8_t** code, uint8_t** data) override
+		{
+			*code = ObPcsx2Vu::OwnedCode();
+			*data = ObPcsx2Vu::OwnedData();
+			return *code && *data;
+		}
+
+		Pcsx2MicroVu1() { ObPcsx2Vu::SetPath1Sink(&Path1, this); }
+
+	private:
 		PS2Memory* m_memory = nullptr;
-		uint8_t* m_vuData = nullptr;
-		ObPcsx2Vu::State m_pending{};
-		bool m_hasPending = false;
 		uint32_t m_unfinished = 0;
 	};
 } // namespace
 
-PS2ExternalVu1* ps2CreateExternalVu1(const char* mode)
+// At startup, before the window, the GPU driver and PS2Memory exist: microVU comes up here on memory it owns
+// (InitOwned: VU1 data, code and the 64 MB code cache in one reservation), so a failure is reported now and
+// the runtime falls back to the interpreter (ps2InstallExternalVu1) before any VU1 program has run.
+PS2ExternalVu1* ps2CreateExternalVu1(const char* mode, char* err, uint32_t errSize)
 {
+	auto fail = [&](const char* msg) -> PS2ExternalVu1* {
+		if (err && errSize)
+			std::snprintf(err, errSize, "%s", msg);
+		return nullptr;
+	};
 	const std::string m = mode ? mode : "";
 	if (m != "mvu")
-		return nullptr;
+		return fail("ob_pcsx2_vu: unknown mode");
+	char why[512] = {};
+	if (!ObPcsx2Vu::InitOwned(why, sizeof(why)))
+		return fail(why);
+	std::fprintf(stderr, "[vu1] mvu active: %s\n", ObPcsx2Vu::Describe());
+	std::fflush(stderr);
 	return new Pcsx2MicroVu1();
 }
