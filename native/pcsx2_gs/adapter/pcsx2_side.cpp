@@ -1,8 +1,14 @@
 // pcsx2_side: the PCSX2 half of the runner's external GS (ob_gs_bridge.h). Compiled with ob_pcsx2_gs's
 // PUBLIC defines/options; never sees PS2Recomp headers. One mutex serialises every PCSX2 call.
+// Threading (PCSX2's MTGS scheme, pcsx2/MTGS.cpp): by default every PCSX2 GS call runs on a GS thread owned here,
+// fed by gs_ring.h; the ob_gs_* entry points (game thread) only copy the command into the ring. Readback and snapshot
+// wait for the GS thread to execute everything queued before them. PS2X_GS_THREAD=0: every call runs inline on the
+// caller's thread, as before. Window attach/resize stay on the main thread in both modes (the child window must
+// belong to the thread that pumps the parent's messages); the resize reaches PCSX2 at the next executed vsync.
 #include "common/RedtapeWindows.h"
 #include "common/Console.h"
 #include "common/FileSystem.h"
+#include "common/FPControl.h"
 #include "common/Path.h"
 #include "common/WindowInfo.h"
 
@@ -12,10 +18,12 @@
 
 #include "ob_pcsx2_gs.h"
 #include "ob_gs_bridge.h"
+#include "gs_ring.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -31,11 +39,17 @@ namespace
 	bool s_visible = false;   // parent window visible at attach: Mailbox present, else Disabled
 	std::atomic<u64> s_pending_size{0}; // (w << 32) | h from ob_gs_window_resized; 0 = none; applied in ob_gs_vsync
 
+	void StopGsThread(const char* why); // below
+
 	// Child of the runner window: no background, disabled and hit-test transparent so input stays with the parent.
 	LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	{
 		if (msg == WM_NCHITTEST)
 			return HTTRANSPARENT;
+		// The runner's CloseWindow (main thread, after it joined the game thread) destroys the parent and so this
+		// child: the GS thread executes what is queued and ends first, so nothing presents into a dead window.
+		if (msg == WM_DESTROY)
+			StopGsThread("window destroyed");
 		return DefWindowProcW(hwnd, msg, wp, lp);
 	}
 
@@ -191,10 +205,11 @@ static bool IsSynthImageContinuation(const std::vector<u8>& carry, const u8* dat
 		(tag[0] & 0x7FFF) == n / 16 - 1;
 }
 
-void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes)
+// ---- Exec*: the PCSX2 side of each command, on the executing thread (GS thread, or the caller inline) with s_mu held.
+
+static void ExecGif(uint32_t path, const uint8_t* data, uint32_t size_bytes)
 {
 	static std::vector<u8> s_carry[4];
-	std::lock_guard<std::mutex> lk(s_mu);
 	if (!EnsureOpen() || size_bytes < 16)
 		return;
 	std::vector<u8>& c = s_carry[path & 3];
@@ -231,16 +246,14 @@ void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes)
 	}
 }
 
-void ob_gs_priv_write(uint32_t offset, uint64_t value)
+static void ExecPriv(uint32_t offset, uint64_t value)
 {
-	std::lock_guard<std::mutex> lk(s_mu);
 	if (EnsureOpen() && offset + 8 <= sizeof(s_basemem))
 		Put64(offset, value);
 }
 
-void ob_gs_vsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint64_t busdir, uint64_t siglblid)
+static void ExecVsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint64_t busdir, uint64_t siglblid)
 {
-	std::lock_guard<std::mutex> lk(s_mu);
 	if (!EnsureOpen())
 		return;
 	for (u32 i = 0; i < 15; i++)
@@ -314,9 +327,8 @@ void ob_gs_window_resized(uint32_t w, uint32_t h)
 	std::fflush(stderr);
 }
 
-uint32_t ob_gs_read_local(uint8_t* dst, uint32_t max_bytes)
+static uint32_t ExecReadLocal(uint8_t* dst, uint32_t max_bytes)
 {
-	std::lock_guard<std::mutex> lk(s_mu);
 	const u32 qwc = max_bytes / 16;
 	if (!EnsureOpen() || qwc == 0)
 		return 0;
@@ -324,16 +336,14 @@ uint32_t ob_gs_read_local(uint8_t* dst, uint32_t max_bytes)
 	return qwc * 16;
 }
 
-void ob_gs_reset()
+static void ExecReset()
 {
-	std::lock_guard<std::mutex> lk(s_mu);
 	if (s_open)
 		GSreset(false);
 }
 
-const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height)
+static const uint8_t* ExecSnapshot(uint32_t* width, uint32_t* height)
 {
-	std::lock_guard<std::mutex> lk(s_mu);
 	if (!EnsureOpen())
 		return nullptr;
 	u32 dw = 0, dh = 0;
@@ -384,4 +394,232 @@ const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height)
 	*width = dw;
 	*height = dh;
 	return s_rgba.data();
+}
+
+// ---- Dispatch: GS thread (default) or inline (PS2X_GS_THREAD=0) ----
+
+namespace
+{
+	enum Cmd : uint32_t
+	{
+		kGif = obgs::Ring::kFirstUserCmd, // aux = path; payload = the packet
+		kPriv,                            // aux = offset, a = value
+		kVsync,                           // payload = VsyncArgs
+		kReadLocal,                       // aux = max bytes, a = dst, b = &result (u32)
+		kReset,
+		kSnapshot,                        // a = &SnapshotResult
+	};
+	struct VsyncArgs
+	{
+		u64 priv[15], csr, imr, busdir, siglblid;
+	};
+	struct SnapshotResult
+	{
+		const u8* p;
+		u32 w, h;
+	};
+
+	// PCSX2's MTGS ring is 1 << 19 qwords = 8 MiB (MTGS.h RingBufferSizeFactor); its EE thread stalls at a vsync
+	// while more than EmuConfig.GS.VsyncQueueSize (Config.h, default 2 = DEFAULT_FRAME_LATENCY) vsyncs are queued.
+	constexpr size_t kRingBytes = size_t(1) << 23;
+	constexpr int kQueueAheadVsyncs = 2;
+
+	enum class Mode : int
+	{
+		Undecided,
+		Thread,
+		Inline,
+	};
+	Mode s_mode = Mode::Undecided;      // producer-only (the thread that calls ob_gs_*)
+	obgs::Ring* s_ring = nullptr;       // never deleted; StopGsThread ends its thread
+	DWORD s_producer_tid = 0;
+	u64 s_vsyncs_posted = 0;
+
+	void RingHandler(void*, const obgs::RecordHeader& h, const uint8_t* payload)
+	{
+		std::lock_guard<std::mutex> lk(s_mu);
+		switch (h.cmd)
+		{
+			case kGif:
+				ExecGif(h.aux, payload, h.bytes);
+				break;
+			case kPriv:
+				ExecPriv(h.aux, h.a);
+				break;
+			case kVsync:
+			{
+				VsyncArgs v;
+				std::memcpy(&v, payload, sizeof(v));
+				ExecVsync(v.priv, v.csr, v.imr, v.busdir, v.siglblid);
+				break;
+			}
+			case kReadLocal:
+				*reinterpret_cast<u32*>(h.b) = ExecReadLocal(reinterpret_cast<u8*>(h.a), h.aux);
+				break;
+			case kReset:
+				ExecReset();
+				break;
+			case kSnapshot:
+			{
+				SnapshotResult* r = reinterpret_cast<SnapshotResult*>(h.a);
+				r->p = ExecSnapshot(&r->w, &r->h);
+				break;
+			}
+			default:
+				break;
+		}
+	}
+
+	void RingThreadInit(void*)
+	{
+		SetThreadDescription(GetCurrentThread(), L"GSThread");
+		// As MTGS::ThreadEntryPoint: default rounding (nearest, no FTZ), not whatever the creating thread had.
+		FPControlRegister::SetCurrent(FPControlRegister::GetDefault());
+	}
+
+	// Runs what is queued and ends the GS thread; later commands run inline. Called on the main thread at the child
+	// window's WM_DESTROY, which the runner reaches only after joining the game thread (the producer): the join
+	// orders every post before this one. Not a thread_local destructor at the game thread's exit: that runs under
+	// the loader lock, and the GS thread's own exit then waits for it (deadlock, seen in ob_pcsx2_gs_adapter_tests).
+	void StopGsThread(const char* why)
+	{
+		if (s_mode != Mode::Thread || !s_ring || !s_ring->running())
+			return;
+		s_ring->stop();
+		s_mode = Mode::Inline;
+		const obgs::Ring::Stats& st = s_ring->stats();
+		std::fprintf(stderr, "[pcsx2-gs] gs thread stopped (%s): %llu records, %llu sync waits\n", why,
+			(unsigned long long)st.records, (unsigned long long)st.syncWaits);
+		std::fflush(stderr);
+	}
+
+	// True: post to the ring. Decides once, on the first ob_gs_* command (env PS2X_GS_THREAD, default on).
+	bool Threaded()
+	{
+		if (s_mode == Mode::Undecided)
+		{
+			const char* e = std::getenv("PS2X_GS_THREAD");
+			s_mode = (e && e[0] == '0' && e[1] == 0) ? Mode::Inline : Mode::Thread;
+			if (s_mode == Mode::Thread)
+			{
+				s_ring = new obgs::Ring();
+				if (!s_ring->start(&RingHandler, &RingThreadInit, nullptr, kRingBytes, kQueueAheadVsyncs))
+					s_mode = Mode::Inline;
+			}
+			std::fprintf(stderr, "[pcsx2-gs] gs thread %s (PS2X_GS_THREAD=%s; ring %zu MiB, queue ahead %d vsyncs)\n",
+				s_mode == Mode::Thread ? "on" : "off", e ? e : "unset", kRingBytes >> 20, kQueueAheadVsyncs);
+			std::fflush(stderr);
+		}
+		if (s_mode != Mode::Thread)
+			return false;
+		const DWORD tid = GetCurrentThreadId();
+		if (tid != s_producer_tid)
+		{
+			// One producer at a time (the ring is SPSC): a hand-over (startup on the main thread, then the game thread)
+			// is fine; two threads posting at once is not. Logged so a second producer shows in the boot log.
+			if (s_producer_tid)
+			{
+				std::fprintf(stderr, "[pcsx2-gs] ring producer thread %lu -> %lu\n", s_producer_tid, tid);
+				std::fflush(stderr);
+			}
+			s_producer_tid = tid;
+		}
+		return true;
+	}
+} // namespace
+
+void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes)
+{
+	if (Threaded())
+	{
+		if (size_bytes >= 16) // ExecGif ignores anything shorter: not worth a record
+			s_ring->post(kGif, 0, path, 0, 0, data, size_bytes);
+		return;
+	}
+	std::lock_guard<std::mutex> lk(s_mu);
+	ExecGif(path, data, size_bytes);
+}
+
+void ob_gs_priv_write(uint32_t offset, uint64_t value)
+{
+	if (Threaded())
+	{
+		s_ring->post(kPriv, 0, offset, value, 0, nullptr, 0);
+		return;
+	}
+	std::lock_guard<std::mutex> lk(s_mu);
+	ExecPriv(offset, value);
+}
+
+void ob_gs_vsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint64_t busdir, uint64_t siglblid)
+{
+	if (Threaded())
+	{
+		VsyncArgs v;
+		std::memcpy(v.priv, priv, sizeof(v.priv));
+		v.csr = csr;
+		v.imr = imr;
+		v.busdir = busdir;
+		v.siglblid = siglblid;
+		s_ring->post(kVsync, obgs::Ring::kVsync, 0, 0, 0, &v, sizeof(v)); // stalls here past the queue-ahead limit
+		if (++s_vsyncs_posted % 1800 == 0)
+		{
+			const obgs::Ring::Stats& st = s_ring->stats();
+			std::fprintf(stderr, "[pcsx2-gs] gs thread: %llu vsyncs, %llu records, %llu MiB, sync waits %llu (%.1f ms), "
+				"queue-ahead stalls %llu (%.1f ms), ring full %llu, indirect %llu\n", (unsigned long long)s_vsyncs_posted,
+				(unsigned long long)st.records, (unsigned long long)(st.bytes >> 20), (unsigned long long)st.syncWaits,
+				st.syncWaitNs / 1e6, (unsigned long long)st.vsyncStalls, st.vsyncStallNs / 1e6,
+				(unsigned long long)st.fullStalls, (unsigned long long)st.indirect);
+			std::fflush(stderr);
+		}
+		return;
+	}
+	std::lock_guard<std::mutex> lk(s_mu);
+	ExecVsync(priv, csr, imr, busdir, siglblid);
+}
+
+uint32_t ob_gs_read_local(uint8_t* dst, uint32_t max_bytes)
+{
+	if (Threaded())
+	{
+		// MTGS::InitAndReadFIFO: SendPointerPacket + WaitGS. Every earlier draw executes first.
+		u32 result = 0;
+		s_ring->call(kReadLocal, max_bytes, reinterpret_cast<u64>(dst), reinterpret_cast<u64>(&result));
+		return result;
+	}
+	std::lock_guard<std::mutex> lk(s_mu);
+	return ExecReadLocal(dst, max_bytes);
+}
+
+void ob_gs_reset()
+{
+	if (Threaded())
+	{
+		s_ring->post(kReset, 0, 0, 0, 0, nullptr, 0);
+		return;
+	}
+	std::lock_guard<std::mutex> lk(s_mu);
+	ExecReset();
+}
+
+const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height)
+{
+	if (Threaded())
+	{
+		SnapshotResult r{nullptr, 0, 0};
+		s_ring->call(kSnapshot, 0, reinterpret_cast<u64>(&r), 0);
+		if (r.p)
+		{
+			*width = r.w;
+			*height = r.h;
+		}
+		return r.p; // s_rgba: only the next snapshot (posted by this same thread) rewrites it
+	}
+	std::lock_guard<std::mutex> lk(s_mu);
+	return ExecSnapshot(width, height);
+}
+
+int ob_gs_threaded()
+{
+	return s_mode == Mode::Thread && s_ring && s_ring->running() ? 1 : 0;
 }

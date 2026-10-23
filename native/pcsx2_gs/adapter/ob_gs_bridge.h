@@ -25,5 +25,8 @@ const uint8_t* ob_gs_snapshot(uint32_t* width, uint32_t* height);
 // Main thread, before the game thread starts: PCSX2 presents into a child of this native window (HWND).
 // visible picks the present mode (Mailbox) vs Disabled for a hidden window.
 void ob_gs_attach_window(void* hwnd, uint32_t w, uint32_t h, bool visible);
-// Main thread: resizes the child now; PCSX2 sees the new size at the next ob_gs_vsync (game thread).
+// Main thread: resizes the child now; PCSX2 sees the new size at the next executed ob_gs_vsync (GS thread).
 void ob_gs_window_resized(uint32_t w, uint32_t h);
+// 1 while the GS thread runs (PS2X_GS_THREAD unset/1, from the first command until the producer thread exits);
+// 0 inline. Call from the producer thread, or after it has exited (tests).
+int ob_gs_threaded();

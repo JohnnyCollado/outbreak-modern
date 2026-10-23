@@ -120,6 +120,15 @@ target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo winmm pathcch dwmapi OneCore)
 add_executable(ob_pcsx2_gs_smoke smoke/main.cpp)
 target_link_libraries(ob_pcsx2_gs_smoke PRIVATE ob_pcsx2_gs)
 
+# GS thread tests (ob.sh test): the command ring alone (header-only, no PCSX2), and the adapter (pcsx2_side.cpp over
+# ob_pcsx2_gs, SW renderer) end to end through the ring. Both run from this build dir (resources/ staged by ob.sh pcsx2-gs).
+add_executable(ob_gs_ring_tests tests/gs_ring_tests.cpp)
+target_include_directories(ob_gs_ring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
+target_compile_options(ob_gs_ring_tests PRIVATE /EHsc) # <chrono>/<thread>; this directory strips /EHsc for PCSX2
+add_executable(ob_pcsx2_gs_adapter_tests tests/adapter_tests.cpp adapter/pcsx2_side.cpp)
+target_include_directories(ob_pcsx2_gs_adapter_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
+target_link_libraries(ob_pcsx2_gs_adapter_tests PRIVATE ob_pcsx2_gs)
+
 # Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
 # PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
 # and links ob_pcsx2_gs_adapter PRIVATE so PCSX2's PUBLIC defines/options never reach ps2_runtime.

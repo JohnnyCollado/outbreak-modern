@@ -108,6 +108,20 @@ backend interface, privileged registers, readback, present and vblank).
   a play run never reads the GS back. 1:1 crop of the displayed rect read from `g_gs_renderer->m_mem` (circuit 1 if
   PMODE EN1 else 2; DISPFB FBP/FBW/PSM, DBX/DBY; size (DW+1)/(MAGH+1) x (DH+1)) after `Flush` +
   `InvalidateLocalMem` (SW sync). `GSSaveSnapshotToMemory` returns the whole 640x960 texture, not the display rect.
+- GS thread (default; `PS2X_GS_THREAD=0` = inline as before): PCSX2's MTGS scheme (`pcsx2/MTGS.cpp`). The game
+  thread only copies each command into a single-producer/single-consumer ring (`adapter/gs_ring.h`, 8 MiB = MTGS's
+  `1 << 19` qwords, 32-byte records: GIF with its path, PRIV, VSYNC with the 15 privileged regs + CSR/IMR/BUSDIR/
+  SIGLBLID, READ_LOCAL, RESET, SNAPSHOT); the GS thread `GSThread` runs every PCSX2 call in ring order, so the
+  arbiter's order is kept. Per-path carry and synthetic-tag strip run there (`ExecGif`, one place). Readback and
+  snapshot post a record and wait until the GS thread has run it (MTGS `SendPointerPacket` + `WaitGS`); a packet over
+  2 MiB goes by pointer and waits the same way. Frame pacing: after a vsync the game thread waits while more than 2
+  vsyncs are queued (`MTGS::PostVsyncStart`, `EmuConfig.GS.VsyncQueueSize`, default 2 in `Config.h`). CSR
+  SIGNAL/FINISH/FIELD stay ours (game thread). Window attach and resize stay on the main thread (the child window
+  must belong to the thread that pumps the parent); the resize is applied at the next vsync the GS thread runs.
+  Shutdown: the child's `WM_DESTROY` (the runner's `CloseWindow`, after it joined the game thread) drains the ring
+  and joins the GS thread; later calls run inline. Not a thread_local destructor at the game thread's exit: that
+  runs under the loader lock and deadlocks with the GS thread's own exit. Tests: `ob_gs_ring_tests` (the ring alone),
+  `ob_pcsx2_gs_adapter_tests` (the adapter end to end on the SW renderer).
 - Pitfall: never `GSReadLocalMemoryUnsync` for diagnostics or snapshots: it mutates PCSX2's transfer state
   (`GSState.cpp:3304-3333`) and broke the run. Readback (`readLocalToHost`) uses `GSInitAndReadFIFO`.
 - Staging: `cmd_recompile` configures with `-DPS2X_EXTERNAL_GS_DIR=native/pcsx2_gs -DOB_PCSX2 -DOB_PCSX2_DEPS` and

@@ -50,6 +50,12 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   EE banks cycles and the IOP runs when they reach its next event (thread wake, timer, DMA completion, callback),
   3072 EE cycles (PCSX2 `eeWaitCycles`), or an EE call into the IOP (RPC, SIF DMA/transfer, IOP memory, modules),
   which syncs it first. A performance switch, not a diagnostic.
+- `PS2X_GS_THREAD=0` (adapter, `native/pcsx2_gs`): run every PCSX2 GS call inline on the game thread, as before the
+  GS thread, for A/B speed runs; stderr `[pcsx2-gs] gs thread off`. Default (unset or anything else): PCSX2's MTGS
+  scheme, a GS thread fed by an 8 MiB ring; the game thread stalls at a vsync while more than 2 are queued (PCSX2
+  `VsyncQueueSize`); readback and snapshot wait for the ring to drain (`docs/ops/gs.md` "GS thread"). Every 1800
+  vsyncs stderr has a `[pcsx2-gs] gs thread:` stats line (sync waits, queue-ahead stalls, ring full). Only with
+  `PS2X_GS=pcsx2-sw|pcsx2-vk`. A performance switch, not a diagnostic.
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
 ## Host profiling: `OB_PROFILE=1` build and `tools/hostprof`
