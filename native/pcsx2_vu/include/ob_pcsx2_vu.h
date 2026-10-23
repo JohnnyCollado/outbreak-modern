@@ -44,6 +44,8 @@ namespace ObPcsx2Vu
 
 	void SetState(const State& s);
 	void GetState(State& s);
+	// Byte address where the next run continues (TPC * 8): set by the last E bit; an MSCNT starts here.
+	uint32_t Tpc();
 
 	// One MSCAL-style run from startPC (bytes). codeGeneration: when it differs from the previous run's,
 	// microVU's program cache is cleared (CpuMicroVU1.Clear(0, 0x4000), as VIF MPG does). MXCSR is set

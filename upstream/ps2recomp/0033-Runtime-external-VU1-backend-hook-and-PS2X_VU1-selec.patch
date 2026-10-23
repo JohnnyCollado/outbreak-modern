@@ -1,0 +1,409 @@
+From b63e9cb8d3a1c1f4c1d8923e162c33344c5902a1 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 04:17:58 -0400
+Subject: [PATCH] Runtime: external VU1 backend hook and PS2X_VU1 selector
+
+PS2ExternalVu1 (runtime/ps2_vu1_external.h, same shape as the external GS):
+mscal(memory, startPC, top, itop, fbrst) and mscnt(memory, top, itop, fbrst)
+return the D/T stop; setState/readState translate the architectural state.
+When set, the VIF1 MSCAL/MSCALF and MSCNT callbacks call it instead of the
+VU1 interpreter (with the PC sampler's vu1 flag set around the call), write
+VPU_STAT D/T from its result, and feed PS2X_VU1_CAPTURE through readState.
+syncCoreSubsystems hands it the interpreter's reset state.
+PS2Runtime::vu1State() reads the active backend's registers. The backend
+reads VU1 code/data and the code generation from PS2Memory and submits its
+XGKICK packets to PS2Memory::submitGifPacket(Path1), as finishXgkick does.
+
+PS2X_VU1=interp|mvu is read once in initialize (unset = interp; mvu needs a
+build with PS2X_EXTERNAL_VU1_DIR; unknown = "[vu1] unknown PS2X_VU1=...",
+exit 2). CMake PS2X_EXTERNAL_VU1_DIR add_subdirectory's a library defining
+ps2x_external_vu1 (after the external GS); PS2X_EXTERNAL_VU1=1 is a source
+property of ps2_runtime.cpp only, so generated game code keeps its flags.
+Null backend = unchanged behaviour.
+
+Test: a recording backend set before the subsystems bind gets the reset
+state, the MSCAL with start pc 0x40 and FBRST, its PATH1 packet reaches the
+GIF arbiter byte for byte, the interpreter does not run, VPU_STAT takes its
+T stop, MSCNT reaches it, and vu1State() returns its registers.
+---
+ ps2xRuntime/CMakeLists.txt                    | 12 +++
+ ps2xRuntime/include/ps2_runtime.h             |  3 +
+ .../include/runtime/ps2_vu1_external.h        | 41 +++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 87 ++++++++++++++++++-
+ ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp   | 18 ++++
+ ps2xTest/src/ps2_vu1_tests.cpp                | 84 ++++++++++++++++++
+ 6 files changed, 243 insertions(+), 2 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_vu1_external.h
+ create mode 100644 ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 53835dc..54eabd3 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -17,6 +17,7 @@ option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through ru
+ option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
+ option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
+ set(PS2X_EXTERNAL_GS_DIR "" CACHE PATH "Directory of an external GS library (target ps2x_external_gs); empty = CPU GS only")
++set(PS2X_EXTERNAL_VU1_DIR "" CACHE PATH "Directory of an external VU1 library (target ps2x_external_vu1); empty = VU1 interpreter only")
+ 
+ if(PS2X_EXTERNAL_GS_DIR AND PS2X_ENABLE_DEBUG_UI)
+     # An external GS may bring its own imgui; two imgui versions in one binary break the ODR.
+@@ -402,6 +403,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_runtime.cpp
+     src/lib/ps2_vif1_interpreter.cpp
+     src/lib/vu/ps2_vu1_capture.cpp
++    src/lib/vu/ps2_vu1_external.cpp
+     src/lib/vu/ps2_vu1_core.cpp
+     src/lib/vu/ps2_vu1_upper.cpp
+     src/lib/vu/ps2_vu1_lower.cpp
+@@ -537,6 +539,16 @@ if(PS2X_EXTERNAL_GS_DIR)
+     target_link_libraries(ps2_runtime PUBLIC ps2x_external_gs)
+     target_compile_definitions(ps2_runtime PUBLIC PS2X_EXTERNAL_GS=1)
+ endif()
++if(PS2X_EXTERNAL_VU1_DIR)
++    # After the external GS: an external VU1 library may reuse targets that directory defines.
++    add_subdirectory("${PS2X_EXTERNAL_VU1_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/external_vu1")
++    if(NOT TARGET ps2x_external_vu1)
++        message(FATAL_ERROR "PS2X_EXTERNAL_VU1_DIR=${PS2X_EXTERNAL_VU1_DIR} defines no ps2x_external_vu1 target")
++    endif()
++    target_link_libraries(ps2_runtime PUBLIC ps2x_external_vu1)
++    # PRIVATE: only ps2_runtime.cpp reads it; generated game code keeps its flags (no rebuild).
++    set_property(SOURCE src/lib/ps2_runtime.cpp APPEND PROPERTY COMPILE_DEFINITIONS PS2X_EXTERNAL_VU1=1)
++endif()
+ target_link_libraries(ps2EntryRunner
+     PRIVATE
+     ps2_runtime
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index c1eea9e..fa3a757 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -217,6 +217,9 @@ public:
+     inline const VU1Interpreter &vu0() const { return m_vu0; }
+     inline VU1Interpreter &vu1() { return m_vu1; }
+     inline const VU1Interpreter &vu1() const { return m_vu1; }
++    // The VU1 registers as the active backend holds them: the external VU1 (PS2X_VU1, ps2_vu1_external.h)
++    // when one is set, else the interpreter's state. Valid between programs.
++    VU1State vu1State();
+ 
+     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
+     inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1_external.h b/ps2xRuntime/include/runtime/ps2_vu1_external.h
+new file mode 100644
+index 0000000..d005d45
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_vu1_external.h
+@@ -0,0 +1,41 @@
++#ifndef PS2_VU1_EXTERNAL_H
++#define PS2_VU1_EXTERNAL_H
++
++#include <cstdint>
++
++class PS2Memory;
++struct VU1State;
++
++// Optional external VU1 backend (PS2X_VU1, read once in PS2Runtime::initialize). When set, the two
++// VU1 run sites (the VIF1 MSCAL/MSCALF and MSCNT callbacks) call it instead of the runtime's
++// VU1Interpreter, and the backend's own registers are the only VU1 state. Unset (the default), the
++// interpreter runs, unchanged.
++struct PS2Vu1RunResult
++{
++  bool stoppedByD = false; // D bit stop (VPU_STAT bit 0x200)
++  bool stoppedByT = false; // T bit stop (VPU_STAT bit 0x400)
++};
++
++class PS2ExternalVu1 {
++public:
++  virtual ~PS2ExternalVu1() = default;
++  // VIF1 MSCAL/MSCALF: run the microprogram at startPC (bytes) to its E bit. top/itop: VIF1 TOP/ITOP
++  // for XTOP/XITOP. fbrst: the EE-side VU0 FBRST (D enable bit 10, T enable bit 11). The backend
++  // reads VU1 code/data from memory (invalidating its code cache when getVU1CodeGeneration() changes)
++  // and hands every XGKICK packet to memory.submitGifPacket(GifPathId::Path1, ...), as the
++  // interpreter's finishXgkick does.
++  virtual PS2Vu1RunResult mscal(PS2Memory &memory, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst) = 0;
++  // VIF1 MSCNT: continue at the pc after the last E bit.
++  virtual PS2Vu1RunResult mscnt(PS2Memory &memory, uint32_t top, uint32_t itop, uint32_t fbrst) = 0;
++  // Architectural state translation, valid between programs: setState loads s (PS2Runtime passes the
++  // interpreter's state right after its reset), readState fills the registers, pc and flags of out.
++  virtual void setState(const VU1State &s) = 0;
++  virtual void readState(VU1State &out) = 0;
++};
++PS2ExternalVu1 *ps2ExternalVu1();            // null = the VU1 interpreter
++void ps2SetExternalVu1(PS2ExternalVu1 *vu1); // tests and startup
++#ifdef PS2X_EXTERNAL_VU1
++PS2ExternalVu1 *ps2CreateExternalVu1(const char *mode); // defined by the external library; null = failure
++#endif
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 64dc019..ed7b291 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2,6 +2,7 @@
+ #include "ps2_log.h"
+ #include "runtime/ps2_pc_sampler.h"
+ #include "runtime/ps2_vu1_capture.h"
++#include "runtime/ps2_vu1_external.h"
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+ #include "game_overrides.h"
+@@ -697,6 +698,17 @@ bool PS2Runtime::isIopMemoryRange(uint32_t address, size_t size) const
+     return m_iopSubsystem && m_iopSubsystem->isMemoryRange(address, size);
+ }
+ 
++VU1State PS2Runtime::vu1State()
++{
++    if (PS2ExternalVu1 *externalVu1 = ps2ExternalVu1())
++    {
++        VU1State s{};
++        externalVu1->readState(s);
++        return s;
++    }
++    return m_vu1.state();
++}
++
+ bool PS2Runtime::syncCoreSubsystems()
+ {
+     uint8_t *const rdram = m_memory.getRDRAM();
+@@ -717,13 +729,47 @@ bool PS2Runtime::syncCoreSubsystems()
+     m_memory.setGifArbiter(&m_gifArbiter);
+     // PS2X_VU1_CAPTURE (runtime/ps2_vu1_capture.h): null unless set; read when the callbacks bind.
+     std::shared_ptr<ps2x::vu1capture::Recorder> vu1Capture = ps2x::vu1capture::Recorder::fromEnv();
+-    m_memory.setVu1MscalCallback([this, vu1Capture](uint32_t startPC, uint32_t top, uint32_t itop)
++    // External VU1 (PS2X_VU1, runtime/ps2_vu1_external.h): runs instead of m_vu1 and holds the only VU1
++    // state; the capture reads that state through readState. Same VPU_STAT D/T update as the interpreter.
++    auto runExternalVu1 = [this, vu1Capture](PS2ExternalVu1 &externalVu1, R5900Context &cpuContext, bool mscal,
++                                             uint32_t startPC, uint32_t top, uint32_t itop)
++    {
++        const uint32_t fbrst = cpuContext.vu0_fbrst;
++        if (vu1Capture)
++        {
++            VU1State before{};
++            externalVu1.readState(before);
++            vu1Capture->begin(mscal ? ps2x::vu1capture::Mscal : ps2x::vu1capture::Mscnt, mscal ? startPC : before.pc,
++                              top, itop, fbrst, cpuContext.vu0_vpu_stat, 65536, m_memory.getVU1CodeGeneration(),
++                              m_memory.getVU1Code(), m_memory.getVU1Data(), before);
++        }
++        PS2Vu1RunResult result;
++        {
++            ps2x::pcsample::Scope vu1Scope(ps2x::pcsample::Vu1);
++            result = mscal ? externalVu1.mscal(m_memory, startPC, top, itop, fbrst)
++                           : externalVu1.mscnt(m_memory, top, itop, fbrst);
++        }
++        cpuContext.vu0_vpu_stat = (cpuContext.vu0_vpu_stat & ~0x0600u) | (result.stoppedByD ? 0x0200u : 0u) |
++                                  (result.stoppedByT ? 0x0400u : 0u);
++        if (vu1Capture)
++        {
++            VU1State after{};
++            externalVu1.readState(after);
++            vu1Capture->end(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
++        }
++    };
++    m_memory.setVu1MscalCallback([this, vu1Capture, runExternalVu1](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                      if (!cpuContext)
+                                      {
+                                          cpuContext = &m_cpuContext;
+                                      }
++                                     if (PS2ExternalVu1 *externalVu1 = ps2ExternalVu1())
++                                     {
++                                         runExternalVu1(*externalVu1, *cpuContext, true, startPC, top, itop);
++                                         return;
++                                     }
+                                      m_vu1.state().dBitEnabled =
+                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
+                                      m_vu1.state().tBitEnabled =
+@@ -742,13 +788,18 @@ bool PS2Runtime::syncCoreSubsystems()
+                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                      if (vu1Capture)
+                                          vu1Capture->end(m_memory.getVU1Data(), m_vu1.state(), cpuContext->vu0_vpu_stat); });
+-    m_memory.setVu1MscntCallback([this, vu1Capture](uint32_t top, uint32_t itop)
++    m_memory.setVu1MscntCallback([this, vu1Capture, runExternalVu1](uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                      if (!cpuContext)
+                                      {
+                                          cpuContext = &m_cpuContext;
+                                      }
++                                     if (PS2ExternalVu1 *externalVu1 = ps2ExternalVu1())
++                                     {
++                                         runExternalVu1(*externalVu1, *cpuContext, false, 0u, top, itop);
++                                         return;
++                                     }
+                                      m_vu1.state().dBitEnabled =
+                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
+                                      m_vu1.state().tBitEnabled =
+@@ -770,6 +821,8 @@ bool PS2Runtime::syncCoreSubsystems()
+     resetIop();
+     m_vu0.reset();
+     m_vu1.reset();
++    if (PS2ExternalVu1 *externalVu1 = ps2ExternalVu1())
++        externalVu1->setState(m_vu1.state()); // the external VU1 starts from the same reset state
+ 
+     m_boundRdram = rdram;
+     m_boundGSVram = gsVram;
+@@ -809,6 +862,36 @@ bool PS2Runtime::initialize(const char *title)
+         }
+         std::cout << "[gs] backend=" << gsMode << std::endl;
+     }
++    {
++        // PS2X_VU1 selects the VU1 backend: unset or "interp" = the VU1 interpreter; "mvu" needs a build
++        // with PS2X_EXTERNAL_VU1_DIR (PCSX2's microVU). Before syncCoreSubsystems, which hands it the reset state.
++        const char *vu1Env = std::getenv("PS2X_VU1");
++        const std::string vu1Mode = (vu1Env && *vu1Env) ? vu1Env : "interp";
++        if (vu1Mode == "mvu")
++        {
++#ifdef PS2X_EXTERNAL_VU1
++            PS2ExternalVu1 *externalVu1 = ps2CreateExternalVu1(vu1Mode.c_str());
++            if (!externalVu1)
++            {
++                std::cerr << "[vu1] backend " << vu1Mode << " failed to start" << std::endl;
++                std::cerr.flush();
++                std::_Exit(2);
++            }
++            ps2SetExternalVu1(externalVu1);
++#else
++            std::cerr << "[vu1] backend " << vu1Mode << " needs a build with PS2X_EXTERNAL_VU1_DIR" << std::endl;
++            std::cerr.flush();
++            std::_Exit(2);
++#endif
++        }
++        else if (vu1Mode != "interp")
++        {
++            std::cerr << "[vu1] unknown PS2X_VU1=" << vu1Mode << " (interp|mvu)" << std::endl;
++            std::cerr.flush();
++            std::_Exit(2);
++        }
++        std::cout << "[vu1] backend=" << vu1Mode << std::endl;
++    }
+ 
+     if (const char *scriptPath = std::getenv("PS2X_INPUT_SCRIPT"))
+     {
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp
+new file mode 100644
+index 0000000..1122610
+--- /dev/null
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_external.cpp
+@@ -0,0 +1,18 @@
++#include "runtime/ps2_vu1_external.h"
++
++#include <atomic>
++
++namespace
++{
++    std::atomic<PS2ExternalVu1 *> s_externalVu1{nullptr};
++}
++
++PS2ExternalVu1 *ps2ExternalVu1()
++{
++    return s_externalVu1.load(std::memory_order_acquire);
++}
++
++void ps2SetExternalVu1(PS2ExternalVu1 *vu1)
++{
++    s_externalVu1.store(vu1, std::memory_order_release);
++}
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index be09d24..7a029fb 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -5,6 +5,7 @@
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/ps2_vu1_capture.h"
++#include "runtime/ps2_vu1_external.h"
+ #include "ps2_runtime.h"
+ 
+ #include <cmath>
+@@ -1849,5 +1850,88 @@ void register_ps2_vu1_tests()
+             t.IsTrue(std::memcmp(bytes.data() + base + 4u, packet.data(), 32u) == 0, "packet bytes = GIFtag + IMAGE qword");
+             std::filesystem::remove_all(dir, ec);
+         });
++
++        tc.Run("an external VU1 receives MSCAL/MSCNT instead of the interpreter and its XGKICK reaches the GIF arbiter", [](TestCase &t)
++        {
++            // Recording backend: what the runtime hands it, and an XGKICK packet sent the way a real backend does.
++            struct RecordingVu1 final : PS2ExternalVu1
++            {
++                std::vector<uint8_t> packet;
++                uint32_t mscals = 0, mscnts = 0, setStates = 0;
++                uint32_t startPC = ~0u, top = ~0u, itop = ~0u, fbrst = ~0u, cntTop = ~0u;
++                PS2Memory *memory = nullptr;
++                PS2Vu1RunResult mscal(PS2Memory &mem, uint32_t pc, uint32_t t0, uint32_t i0, uint32_t fb) override
++                {
++                    ++mscals;
++                    memory = &mem;
++                    startPC = pc;
++                    top = t0;
++                    itop = i0;
++                    fbrst = fb;
++                    mem.submitGifPacket(GifPathId::Path1, packet.data(), static_cast<uint32_t>(packet.size()));
++                    PS2Vu1RunResult r;
++                    r.stoppedByT = true;
++                    return r;
++                }
++                PS2Vu1RunResult mscnt(PS2Memory &, uint32_t t0, uint32_t, uint32_t) override
++                {
++                    ++mscnts;
++                    cntTop = t0;
++                    return {};
++                }
++                void setState(const VU1State &) override { ++setStates; }
++                void readState(VU1State &out) override
++                {
++                    out = VU1State{};
++                    out.vi[1] = 42;
++                }
++            };
++            RecordingVu1 fake;
++            fake.packet.assign(32u, 0u);
++            const uint64_t gifTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
++            std::memcpy(fake.packet.data(), &gifTag, sizeof(gifTag));
++            for (uint32_t i = 0; i < 16u; ++i)
++                fake.packet[16u + i] = static_cast<uint8_t>(0xB0u + i);
++
++            struct Unset
++            {
++                ~Unset() { ps2SetExternalVu1(nullptr); }
++            } unset;
++            ps2SetExternalVu1(&fake);
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
++            t.Equals(fake.setStates, 1u, "the backend gets the reset state when the subsystems bind");
++            std::vector<std::vector<uint8_t>> arrived;
++            runtime.gifArbiter().setProcessPacketFn([&arrived](const uint8_t *data, uint32_t size)
++                                                    { arrived.emplace_back(data, data + size); });
++
++            // A program the interpreter would run (IADDIU vi1, vi0, 5 + E bit): it must not run.
++            uint8_t *code = runtime.memory().getVU1Code();
++            std::memset(code, 0, PS2_VU1_CODE_SIZE);
++            writeVuInstructionPair(code, 0x40u, makeVuIaddiu(1u, 0u, 5), kVuUpperNop | 0x40000000u);
++            writeVuInstructionPair(code, 0x48u, 0u, kVuUpperNop);
++            runtime.vu1().state().vi[1] = 0;
++            runtime.cpu().vu0_fbrst = 0x800u;
++            runtime.cpu().vu0_vpu_stat = 0u;
++
++            const uint32_t mscal = makeVifCmd(0x14u, 0u, 0x40u / 8u);
++            runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
++            t.Equals(fake.mscals, 1u, "MSCAL went to the external VU1");
++            t.Equals(fake.startPC, 0x40u, "with the start pc in bytes");
++            t.IsTrue(fake.memory == &runtime.memory(), "and the runtime's memory");
++            t.Equals(fake.fbrst, 0x800u, "and the EE-side FBRST");
++            t.Equals(runtime.vu1().state().vi[1], 0, "the interpreter did not run");
++            t.Equals(runtime.cpu().vu0_vpu_stat & 0x0600u, 0x0400u, "VPU_STAT takes the backend's T stop");
++            t.Equals(arrived.size(), static_cast<size_t>(1u), "the backend's XGKICK packet reached the arbiter");
++            if (arrived.size() == 1u)
++                t.IsTrue(arrived[0] == fake.packet, "byte for byte");
++
++            const uint32_t mscnt = makeVifCmd(0x17u, 0u, 0u);
++            runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&mscnt), sizeof(mscnt));
++            t.Equals(fake.mscnts, 1u, "MSCNT went to the external VU1");
++            t.Equals(runtime.cpu().vu0_vpu_stat & 0x0600u, 0u, "VPU_STAT D/T cleared by a run without a stop");
++            t.Equals(runtime.vu1State().vi[1], 42, "vu1State() reads the external backend's registers");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

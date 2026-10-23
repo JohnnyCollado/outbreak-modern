@@ -10,9 +10,10 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | PCSX2 GS library + smoke test | `bash tools/run.sh pcsx2-gs -- bash tools/ob.sh pcsx2-gs` | Clones/builds deps if missing (`gs.md`) |
 | Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`. ~16 s when generated code is unchanged; ~30 s after a runtime-internal change (patch 0028: game code sees only `ps2_runtime_api.h`); a full rebuild (~6 min) only when the recompiler output or the game-facing headers change |
 | VU1 interpreter vs microVU | `bash tools/ob.sh vucompare [DIR\|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]` | Builds `native/pcsx2_vu` + `ob_pcsx2_vu_compare.exe` into `C:\ob\pcsx2-vu-build` (first build ~55 s incl. its own copy of `ob_pcsx2_gs`; then 5-8 s), runs it on `C:\ob\vu1-captures`. Needs `ob.sh recompile` first (links the runner's `ps2_runtime.lib`). See "VU1 capture" below |
+| Dependency check | `bash tools/ob.sh depcheck` | ~12 s. Touches `gs_frontend.h` (mtime restored after), dry-runs the runner build (`cmake --build C:/ob/r --target ps2EntryRunner -- -n -f C:/ob/r/build.ninja` via `tools/ob/vc.bat`), counts the steps. Green = `depcheck: ok: gs_frontend.h rebuilds N runtime step(s), 0 generated game units`, exit 0; else exit 1 and the game units (`Unity\`) are listed. The `-f` with the absolute manifest path is needed: CMake's CONFIGURE_DEPENDS glob check is always dirty, and a plain `-n` stops after "Re-running CMake" with no steps. Run after any runtime change (patch 0028 keeps game code off runtime headers). Log `C:\ob\logs\ob-depcheck.log` |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
 | Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest |
-| Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`) |
+| Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> [PS2X_VU1=<interp\|mvu>] bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`). The gated screens end at character select, before any VU1 run: `PS2X_VU1` does not change them |
 | Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`) |
 | Visible boot | `PS2X_GS=pcsx2-vk bash tools/ob.sh boot --tag visible` | Opens a window: needs the developer's "proceed" each time |
 
@@ -61,6 +62,23 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   error, no run); MXCSR is set to `EmuConfig.Cpu.VU1FPCR` around each run; microVU's program cache is cleared when
   the code generation changes; PCSX2 config defaults are the verbatim `Pcsx2Config.cpp` constructor bodies
   (`src/config_defaults.cpp`, re-copy on a PCSX2 bump). No PCSX2 source edit.
+
+## VU1 backend in the runner: `PS2X_VU1=interp|mvu` (patch 0033)
+
+- Selector read once at startup (`ps2_runtime.cpp`, next to `PS2X_GS`): unset or `interp` = PS2Recomp's VU1
+  interpreter; `mvu` = PCSX2's microVU (`native/pcsx2_vu`); anything else = `[vu1] unknown PS2X_VU1=...`, exit 2.
+  The boot log prints `[vu1] backend=<mode>`, and on the first VU1 run `[vu1] mvu: <cache/data addresses, reach>`.
+  The gate passes it through: `PS2X_GS=pcsx2-sw PS2X_VU1=mvu bash tools/ob.sh gate`.
+- Seam (`runtime/ps2_vu1_external.h`): `PS2ExternalVu1::mscal/mscnt` replace the interpreter at the VIF1 MSCAL/MSCNT
+  callbacks; `setState/readState` translate state (reset; `PS2X_VU1_CAPTURE`; `PS2Runtime::vu1State()`). In mvu
+  mode PCSX2's `vuRegs[1]` is the only VU1 state. XGKICK packets go to `PS2Memory::submitGifPacket(Path1)`.
+- Two targets, as the GS: `native/pcsx2_vu/adapter/hook.cpp` (PS2Recomp headers and flags) implements the seam over
+  the plain-types `include/ob_pcsx2_vu.h`; `ob_pcsx2_vu` (PCSX2 headers and flags, links `ob_pcsx2_gs` PRIVATE) holds
+  microVU. CMake `-DPS2X_EXTERNAL_VU1_DIR=native/pcsx2_vu` (set by `cmd_recompile`); nothing extra is staged. The
+  compare tool is configured only in the standalone `ob.sh vucompare` build. `gate.py stamp` hashes `native/pcsx2_vu/`.
+- Differences from the interpreter (by design): D bit ignored (microVU compiles it out); per-run budget 3,000,000
+  cycles (PCSX2's `vu1RunCycles`) instead of 65,536, a program that does not reach its E bit is logged (first 8);
+  STATUS/MAC only computed where read (flag elimination, `reports/2026-10-23-gameplay.md` entry 6).
 
 ## Paths
 

@@ -255,6 +255,8 @@ namespace ObPcsx2Vu
 		s.tpc = v.VI[REG_TPC].UL << 3;
 	}
 
+	uint32_t Tpc() { return (vuRegs[1].VI[REG_TPC].UL << 3) & 0x3FF8u; }
+
 	RunResult Run(uint32_t startPC, uint32_t top, uint32_t itop, uint32_t fbrst, uint64_t codeGeneration, uint32_t cycles)
 	{
 		RunResult res{};

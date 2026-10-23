@@ -14,6 +14,7 @@
 #   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
 #                                            build native/pcsx2_vu + compare tool, diff interpreter vs microVU on
 #                                            PS2X_VU1_CAPTURE files (default $OB_ROOT/vu1-captures)
+#   tools/ob.sh depcheck                     dry run after touching gs_frontend.h: 0 generated game units must rebuild
 #
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
 # OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat;
@@ -123,9 +124,10 @@ cmd_recompile() {
     echo "sources: $out"
     out=$("$PY" -I "$REPO/tools/ob/sync_changed.py" "$(cygpath -w "$OB_SRC/ps2xRuntime/include")" "${hdrs[@]}") || { echo "headers: sync failed: $out"; return 1; }
     echo "headers: $out"
-    # Runner (build-runner.bat), with the PCSX2 external GS (native/pcsx2_gs; deps from ob.sh pcsx2-gs).
+    # Runner (build-runner.bat), with the PCSX2 external GS (native/pcsx2_gs; deps from ob.sh pcsx2-gs) and the
+    # external VU1 (native/pcsx2_vu, PCSX2 microVU; selected at run time by PS2X_VU1=mvu).
     local log="$OB_LOGS/ob-runner-build.log" start rc
-    local px="${OB_PCSX2:-$OB_ROOT/pcsx2}" pxd="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}" egs="$REPO/native/pcsx2_gs"
+    local px="${OB_PCSX2:-$OB_ROOT/pcsx2}" pxd="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}" egs="$REPO/native/pcsx2_gs" evu="$REPO/native/pcsx2_vu"
     [ -f "$pxd/bin/shaderc_shared.dll" ] || { echo "runner: $pxd/bin/shaderc_shared.dll missing; run ob.sh pcsx2-gs first"; return 1; }
     # Debug info: none by default (linking ~5,800 objects with /Zi took 5+ min); OB_DEBUG=1 for full PDBs.
     local cxxf="/O2 /DNDEBUG" ldf="/INCREMENTAL:NO"
@@ -133,9 +135,10 @@ cmd_recompile() {
     start=$(date +%s)
     {
         { { [ -f "$OB_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_R/CMakeCache.txt" &&
+              grep -qxF "PS2X_EXTERNAL_VU1_DIR:PATH=$evu" "$OB_R/CMakeCache.txt" &&
               grep -qxF "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=$cxxf" "$OB_R/CMakeCache.txt" &&
               grep -qxF "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=$ldf" "$OB_R/CMakeCache.txt"; } ||
-            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$cxxf" "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=$ldf" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd"; } &&
+            vc cmake -S "$OB_SRC" -B "$OB_R" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$cxxf" "-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=$ldf" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_T/_deps" "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DPS2X_EXTERNAL_VU1_DIR=$evu" "-DOB_PCSX2=$px" "-DOB_PCSX2_DEPS=$pxd"; } &&
         vc cmake --build "$OB_R" -j $JOBS --target ps2EntryRunner
     } > "$log" 2>&1
     rc=$?
@@ -274,6 +277,31 @@ cmd_vucompare() {
     "$b/ob_pcsx2_vu_compare.exe" "$dir" "$@"
 }
 
+# depcheck: proves a runtime-internal header change does not rebuild generated game code (patch 0028). Touches
+# gs_frontend.h, asks ninja what the runner build would run (dry run), restores the header's mtime, and counts the
+# steps: game units (`Unity/` or `Unity\` in the step name) must be 0, runtime steps (`ps2_runtime.dir`) > 0.
+# `-f <absolute build.ninja>`: with CMake's CONFIGURE_DEPENDS globs the manifest's verify-globs edge is always
+# dirty, and a dry run stops right after "Re-running CMake"; naming the manifest by another path skips that check.
+# Exit 0 ok, 1 game units would rebuild (listed) or no runtime step, 2 no runner build.
+cmd_depcheck() {
+    local h="$OB_SRC/ps2xRuntime/include/runtime/gs/gs_frontend.h" log="$OB_LOGS/ob-depcheck.log" ref game rt rc
+    [ -f "$OB_R/build.ninja" ] && [ -f "$h" ] || { echo "depcheck: no runner build in $OB_R or no $h (ob.sh recompile first)"; return 2; }
+    ref=$(mktemp) && touch -r "$h" "$ref" && touch "$h"
+    vc cmake --build "$OB_R" --target ps2EntryRunner -- -n -f "$OB_R/build.ninja" > "$log" 2>&1
+    rc=$?
+    touch -r "$ref" "$h"; rm -f "$ref"
+    [ $rc = 0 ] || { tail -5 "$log"; echo "depcheck: dry run failed, exit $rc ($log)"; return 1; }
+    game=$(grep -E '^\[[0-9]+/[0-9]+\]' "$log" | grep -cE 'Unity[/\\]')
+    rt=$(grep -E '^\[[0-9]+/[0-9]+\]' "$log" | grep -c 'ps2_runtime\.dir')
+    if [ "$game" = 0 ] && [ "$rt" -gt 0 ]; then
+        echo "depcheck: ok: gs_frontend.h rebuilds $rt runtime step(s), 0 generated game units"
+        return 0
+    fi
+    echo "depcheck: FAIL: gs_frontend.h rebuilds $rt runtime step(s), $game generated game unit(s) ($log)"
+    grep -E '^\[[0-9]+/[0-9]+\]' "$log" | grep -E 'Unity[/\\]' | head -40
+    return 1
+}
+
 case ${1:-} in
     tools) cmd_tools ;;
     test) cmd_test ;;
@@ -282,5 +310,6 @@ case ${1:-} in
     gate) shift; cmd_gate "$@" ;;
     pcsx2-gs) cmd_pcsx2_gs ;;
     vucompare) shift; cmd_vucompare "$@" ;;
-    *) sed -n '6,16p' "$0"; exit 2 ;;
+    depcheck) cmd_depcheck ;;
+    *) sed -n '6,17p' "$0"; exit 2 ;;
 esac

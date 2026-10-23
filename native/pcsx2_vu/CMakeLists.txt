@@ -28,6 +28,17 @@ target_include_directories(ob_pcsx2_vu PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
 # PRIVATE: PCSX2's defines/includes/flags (PUBLIC on ob_pcsx2_gs) reach only this library, not its users.
 target_link_libraries(ob_pcsx2_vu PRIVATE ob_pcsx2_gs)
 
+# ---- runner hookup (PS2Recomp PS2X_EXTERNAL_VU1_DIR add_subdirectory's us, after PS2X_EXTERNAL_GS_DIR) ----
+# ps2x_external_vu1 implements PS2ExternalVu1 with PS2Recomp's flags; it reaches microVU only through the
+# plain-types include/ob_pcsx2_vu.h, and ob_pcsx2_vu links ob_pcsx2_gs PRIVATE, so PCSX2's defines/options
+# never reach ps2_runtime (same two-target split as native/pcsx2_gs/adapter).
+if(TARGET ps2_runtime)
+    add_library(ps2x_external_vu1 STATIC adapter/hook.cpp)
+    target_compile_options(ps2x_external_vu1 PRIVATE /EHsc) # this directory strips /EHsc for PCSX2 (above)
+    target_link_libraries(ps2x_external_vu1 PRIVATE ps2_runtime ob_pcsx2_vu)
+    return() # the compare tool below is a standalone build (ob.sh vucompare), not part of the runner
+endif()
+
 # ---- compare tool (PS2Recomp side): links the runner's own ps2_runtime.lib for the interpreter ----
 set(OB_SRC "C:/ob/src" CACHE PATH "PS2Recomp built copy (headers)")
 set(OB_R "C:/ob/r" CACHE PATH "runner build dir (ps2_runtime.lib, ps2_iop.lib)")
