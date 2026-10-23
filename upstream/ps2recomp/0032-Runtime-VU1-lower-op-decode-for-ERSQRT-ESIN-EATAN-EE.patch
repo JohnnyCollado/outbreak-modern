@@ -1,0 +1,216 @@
+From f93258bdbd492c9e875c228fbd9fab1b9cf3bebd Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 03:59:42 -0400
+Subject: [PATCH] Runtime: VU1 lower-op decode for ERSQRT/ESIN/EATAN/EEXP
+
+The lower-special EFU codes follow PCSX2's tables (pcsx2/x86/microVU_Tables.inl
+mVULowerOP_T3_xx, pcsx2/VUops.cpp _vuLowerOP_T3_xx, which agree): 0x79 ERSQRT,
+0x7C ESIN, 0x7D EATAN, 0x7E EEXP. The interpreter had them at 0x77/0x79/0x7C/0x7D,
+so an ERSQRT ran as ESIN (Outbreak's program at 0x220/0x640: P = 0x7f7fffff instead
+of 1/sqrt). 0x77 and 0x7F are now reserved. The pipeline-usage table moves the
+latencies with the ops. Tests: one known input and expected P per op, and the
+latency table uses PCSX2's codes.
+---
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp  | 26 ++++++-------
+ ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp | 33 ++++++++--------
+ ps2xTest/src/ps2_vu1_tests.cpp           | 49 ++++++++++++++++++++++--
+ 3 files changed, 77 insertions(+), 31 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 590237e..8867cc0 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1439,12 +1439,12 @@ VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint32_t lower
+     case 0x74:
+     case 0x75:
+     case 0x76:
+-    case 0x77:
+     case 0x78:
+     case 0x79:
+     case 0x7A:
+     case 0x7C:
+     case 0x7D:
++    case 0x7E:
+         if (m_unit == Unit::VU0)
+         {
+             usage.reserved = true;
+@@ -1456,28 +1456,28 @@ VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint32_t lower
+         case 0x70:
+             usage.latency = 11u;
+             break;
+-        case 0x71:
+-        case 0x72:
+-        case 0x77:
++        case 0x71: // ERSADD
++        case 0x72: // ELENG
++        case 0x79: // ERSQRT
+             usage.latency = 18u;
+             break;
+-        case 0x73:
++        case 0x73: // ERLENG
+             usage.latency = 24u;
+             break;
+-        case 0x74:
+-        case 0x75:
+-        case 0x7C:
++        case 0x74: // EATANxy
++        case 0x75: // EATANxz
++        case 0x7D: // EATAN
+             usage.latency = 54u;
+             break;
+-        case 0x76:
+-        case 0x78:
+-        case 0x7A:
++        case 0x76: // ESUM
++        case 0x78: // ESQRT
++        case 0x7A: // ERCPR
+             usage.latency = 12u;
+             break;
+-        case 0x79:
++        case 0x7C: // ESIN
+             usage.latency = 29u;
+             break;
+-        case 0x7D:
++        case 0x7E: // EEXP
+             usage.latency = 44u;
+             break;
+         default:
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp
+index 94be789..7d631ff 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp
+@@ -723,7 +723,17 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
+                 queueP(sum, 12u);
+                 return;
+             }
+-            case 0x77: // ERSQRT
++            // EFU specials 0x78-0x7E follow PCSX2's lower-op tables (microVU_Tables.inl mVULowerOP_T3_xx
++            // rows 30-31, VUops.cpp _vuLowerOP_T3_xx): 0x78 ESQRT, 0x79 ERSQRT, 0x7A ERCPR, 0x7B WAITP,
++            // 0x7C ESIN, 0x7D EATAN, 0x7E EEXP; 0x77 and 0x7F are reserved.
++            case 0x78: // ESQRT
++            {
++                const uint32_t component = (instr >> 21) & 3u;
++                const float value = normalizeOperand(m_state.vf[vfS][component]);
++                queueP(value >= 0.0f ? std::sqrt(value) : value, 12u);
++                return;
++            }
++            case 0x79: // ERSQRT
+             {
+                 const uint32_t component = (instr >> 21) & 3u;
+                 const float value = normalizeOperand(m_state.vf[vfS][component]);
+@@ -737,36 +747,29 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
+                 queueP(result, 18u);
+                 return;
+             }
+-            case 0x78: // ESQRT
++            case 0x7A: // ERCPR
+             {
+                 const uint32_t component = (instr >> 21) & 3u;
+                 const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(value >= 0.0f ? std::sqrt(value) : value, 12u);
++                queueP(value != 0.0f ? 1.0f / value : value, 12u);
+                 return;
+             }
+-            case 0x79: // ESIN
+-            {
+-                const uint32_t component = (instr >> 21) & 3u;
+-                const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(vuEsin(value), 29u);
++            case 0x7B: // WAITP
+                 return;
+-            }
+-            case 0x7A: // ERCPR
++            case 0x7C: // ESIN
+             {
+                 const uint32_t component = (instr >> 21) & 3u;
+                 const float value = normalizeOperand(m_state.vf[vfS][component]);
+-                queueP(value != 0.0f ? 1.0f / value : value, 12u);
++                queueP(vuEsin(value), 29u);
+                 return;
+             }
+-            case 0x7B: // WAITP
+-                return;
+-            case 0x7C: // EATAN
++            case 0x7D: // EATAN
+             {
+                 const uint32_t component = (instr >> 21) & 3u;
+                 queueP(vuEatan(normalizeOperand(m_state.vf[vfS][component])), 54u);
+                 return;
+             }
+-            case 0x7D: // EEXP
++            case 0x7E: // EEXP
+             {
+                 const uint32_t component = (instr >> 21) & 3u;
+                 queueP(vuEexp(normalizeOperand(m_state.vf[vfS][component])), 44u);
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 3576492..be09d24 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -814,11 +814,13 @@ void register_ps2_vu1_tests()
+                 uint8_t opcode;
+                 uint32_t latency;
+             };
++            // Codes as PCSX2's lower-op tables (microVU_Tables.inl, VUops.cpp): 0x79 ERSQRT, 0x7C ESIN,
++            // 0x7D EATAN, 0x7E EEXP.
+             constexpr EfuCase cases[] = {
+                 {0x70u, 11u}, {0x71u, 18u}, {0x72u, 18u}, {0x73u, 24u},
+-                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u}, {0x77u, 18u},
+-                {0x78u, 12u}, {0x79u, 29u}, {0x7Au, 12u}, {0x7Cu, 54u},
+-                {0x7Du, 44u}};
++                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u}, {0x78u, 12u},
++                {0x79u, 18u}, {0x7Au, 12u}, {0x7Cu, 29u}, {0x7Du, 54u},
++                {0x7Eu, 44u}};
+ 
+             for (const EfuCase &efu : cases)
+             {
+@@ -849,6 +851,47 @@ void register_ps2_vu1_tests()
+             }
+         });
+ 
++        // One known input per EFU op whose code PCSX2 and PS2Recomp used to disagree on. Before the fix
++        // 0x79 ran ESIN, 0x7C EATAN, 0x7D EEXP and 0x7E was reserved, so each P below was different.
++        struct EfuValueCase
++        {
++            const char *name;
++            uint8_t opcode;
++            uint32_t latency;
++            float input;
++            float expected;
++        };
++        constexpr EfuValueCase efuValueCases[] = {
++            {"ERSQRT (0x79) of 4.0 gives P = 0.5", 0x79u, 18u, 4.0f, 0.5f},
++            {"ESIN (0x7C) of 1.0 gives P = sin(1)", 0x7Cu, 29u, 1.0f, 0.841471f},
++            // PCSX2 _vuCalculateEATAN (VUops.cpp:1696-1710): pi/4 + atan series of the input.
++            {"EATAN (0x7D) of 0.5 gives P = pi/4 + atan(0.5)", 0x7Du, 54u, 0.5f, 0.785398f + 0.463648f},
++            {"EEXP (0x7E) of 1.0 gives P = exp(-1)", 0x7Eu, 44u, 1.0f, 0.367879f},
++        };
++        for (const EfuValueCase &efu : efuValueCases)
++        {
++            tc.Run(efu.name, [efu](TestCase &t)
++            {
++                Vu1Fixture fx;
++                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++                writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(efu.opcode, 1u, 0u, 0u, 0u), kVuUpperNop);
++                writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop); // WAITP
++
++                VU1Interpreter vu1;
++                vu1.state().vf[1][0] = efu.input;
++                vu1.state().vf[1][1] = 9.0f; // other lanes must not be read (fsf = x)
++                vu1.state().vf[1][2] = 9.0f;
++                vu1.state().vf[1][3] = 9.0f;
++                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
++                            0u, 0u, 0u, efu.latency + 1u);
++
++                t.IsTrue(std::fabs(vu1.state().p - efu.expected) < 1e-3f,
++                         "P should hold the op's result for the known input");
++                t.Equals(vu1.state().cycles, static_cast<uint64_t>(efu.latency + 1u),
++                         "WAITP should wait for the op's own latency");
++            });
++        }
++
+         tc.Run("E and enabled D/T stop with their architectural delay rules", [](TestCase &t)
+         {
+             Vu1Fixture fx;
+-- 
+2.46.2.windows.1
+
