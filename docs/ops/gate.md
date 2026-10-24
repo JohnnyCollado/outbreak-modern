@@ -18,6 +18,15 @@ and share of pixels with delta > d; green = share <= p. d and p are frozen in `g
   full gate with them -> exit 2, T6): stamp vs `C:\ob\r\gate.stamp`; differ or runner exe missing -> recompile, then
   write the pre-recompile stamp (`gate: recompiled in <s> s` / `gate: not recompiled`); boot `gate/boot.script --tag gate`;
   `gate.py selftest`; `gate.py compare` on `C:\ob\frames-gate` + `C:\ob\logs\boot-gate.log`. `--selftest`: selftest only.
+- Sets (`gate/sets.json`, 2026-10-24): `menus` (the six screens above, the default of `gate.py`/`refs.py`) and `jsbar`
+  (M4: the J's Bar opening scene, refs `C:\ob\ref-jsbar`, manifest `gate/ref_manifest_jsbar.json`, boot
+  `gate/jsbar.script --tag gate-jsbar` under `PS2X_GS=pcsx2-sw PS2X_VU1=mvu` unless set). `ob.sh gate` runs `jsbar` after
+  `menus` once its manifest exists (else `gate: jsbar set skipped (no references ...)`); the worse result wins.
+  `gate.py --set S` and `refs.py --set S` pick a set. A set may exclude rectangles per screen (`exclude`, with
+  `exclude_why` and `exclude_approved`): pixels inside count neither as differing nor in the total; d/p stay those of
+  the frozen tolerance file. `jsbar` excludes the two window zombies (approved by the developer 2026-10-24); selftest
+  damage is placed outside excluded rectangles. Status: no `jsbar` references yet (one PCSX2 shot); the runner's scene
+  does not replay the same way run to run (`reports/2026-10-24-jsbar-gate.md`).
 - Exit: 0 green, 1 red, 2 refusal (no references, no tolerance, unknown screen in `advisory`, ref sha256/size !=
   manifest, captures per screen != manifest `window`, frame without tick), 3 boot failed, 4 recompile failed,
   5 selftest red.

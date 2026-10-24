@@ -14,7 +14,8 @@
 #                                            itself, returns the runner's exit code; dumps in $OB_ROOT/frames-<tag>
 #   tools/ob.sh boot --pad NAME [--secs N] [--tag T]  hidden boot driven live over \\.\pipe\NAME (PS2X_PAD_PIPE,
 #                                            ob_diag plugin; client tools/ob/pad.py); shots in $OB_ROOT/frames-<tag>
-#   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
+#   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare;
+#                                            then the J's Bar set (its own boot) once its references exist
 #   tools/ob.sh check [--tag T] [--paced]    fast J's Bar check: gate/check.script unpaced (PS2X_PACING=0), ticks
 #   tools/ob.sh pcsx2-gs                     PCSX2 GS static lib (native/pcsx2_gs): clone/deps if missing, build, smoke
 #   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
@@ -349,8 +350,30 @@ cmd_gate() {
             { echo "gate: boot failed, exit 3, wall $(( $(date +%s) - start )) s"; return 3; }
     fi
     "$PY" -I "$G" selftest --start "$start" "${tol[@]}" "${dp[@]}"; rc=$?
-    [ $selftest = 0 ] && [ $rc = 0 ] || return $rc
-    "$PY" -I "$G" compare --frames "$OB_ROOT/frames-gate" --log "$OB_LOGS/boot-gate.log" --start "$start" "${tol[@]}"
+    if [ $selftest = 0 ] && [ $rc = 0 ]; then
+        "$PY" -I "$G" compare --frames "$OB_ROOT/frames-gate" --log "$OB_LOGS/boot-gate.log" --start "$start" "${tol[@]}"; rc=$?
+    fi
+    # The J's Bar set (M4, gate/sets.json "jsbar"): its own boot (gate/jsbar.script, PCSX2 software GS + microVU
+    # unless PS2X_GS/PS2X_VU1 say otherwise), selftest and compare, once its references exist. A refusal or a red
+    # set wins over a green one; with --selftest only its selftest runs.
+    local jrc=0 jman="$REPO/gate/ref_manifest_jsbar.json"
+    if [ ! -f "$jman" ]; then
+        echo "gate: jsbar set skipped (no references: $jman)"
+    else
+        if [ $selftest = 0 ]; then
+            PS2X_GS="${PS2X_GS:-pcsx2-sw}" PS2X_VU1="${PS2X_VU1:-mvu}" cmd_boot --script "$REPO/gate/jsbar.script" --tag gate-jsbar ||
+                { echo "gate: jsbar boot failed, exit 3, wall $(( $(date +%s) - start )) s"; return 3; }
+        fi
+        "$PY" -I "$G" selftest --set jsbar --start "$start" "${tol[@]}" "${dp[@]}"; jrc=$?
+        if [ $selftest = 0 ] && [ $jrc = 0 ]; then
+            "$PY" -I "$G" compare --set jsbar --frames "$OB_ROOT/frames-gate-jsbar" --log "$OB_LOGS/boot-gate-jsbar.log" \
+                --start "$start" "${tol[@]}"; jrc=$?
+        fi
+    fi
+    # worst result: refusal 2 > red 1 (selftest 5, boot 3, recompile 4 returned above)
+    if [ $rc = 2 ] || [ $jrc = 2 ]; then return 2; fi
+    if [ $rc != 0 ]; then return $rc; fi
+    return $jrc
 }
 
 # pcsx2_png_deps <deps>: zlib + libpng for PCSX2's texture replacement (tools/ob/pcsx2-deps-png.bat) when

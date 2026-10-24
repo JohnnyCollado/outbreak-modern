@@ -4,11 +4,12 @@ Usage (cwd = repo root):
   python tools/gate/refs.py check-settings [--ini P]
       Effective PCSX2 settings (ini overlaid by ps2_emu/gamesettings/SLPM-65428*.ini)
       vs EXPECTED; prints each mismatch; exit 0 only if none.
-  python tools/gate/refs.py begin [--out D]
-      Writes the capture-session marker <out>/session.json (default out C:/ob/ref).
-  python tools/gate/refs.py intake [--dry-run] [--snaps D] [--out D] [--ini P] [--manifest P]
-      Maps snaps newer than the marker to ORDER screens (takes a then b), checks 512x448.
-      --dry-run writes nothing. A real run needs exactly 12 good snaps; it copies them
+  python tools/gate/refs.py begin [--set S] [--out D]
+      Writes the capture-session marker <out>/session.json (default out: the set's refs folder).
+  python tools/gate/refs.py intake [--set S] [--dry-run] [--snaps D] [--out D] [--ini P] [--manifest P]
+      Maps snaps newer than the marker to the set's screens in order (takes a then b), checks 512x448.
+      Sets: gate/sets.json ("menus", the default: 6 screens, C:/ob/ref; "jsbar": 1 screen, C:/ob/ref-jsbar).
+      --dry-run writes nothing. A real run needs exactly 2 x screens good snaps; it copies them
       (snaps are never moved or deleted) to <out>/<screen>-<take>.png, writes the
       manifest (default gate/ref_manifest.json) and <out>/sheet.png.
 """
@@ -23,14 +24,15 @@ import sys
 
 from PIL import Image, ImageDraw
 
-ORDER = ["savedata", "access", "capcom", "title", "mainmenu", "charselect"]
+with open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "gate", "sets.json"),
+          encoding="utf-8") as _f:
+    SETS = json.load(_f)
+ORDER = SETS["menus"]["screens"]  # replaced by the chosen set's screens in main()
 PCSX2_VERSION = "2.9.134"
 DEFAULT_INI = "ps2_emu/inis/PCSX2.ini"
 GAMESETTINGS_GLOB = "ps2_emu/gamesettings/SLPM-65428*.ini"
 DEFAULT_SNAPS = "ps2_emu/snaps"
-DEFAULT_OUT = "C:/ob/ref"
-DEFAULT_MANIFEST = "gate/ref_manifest.json"
-BOOT_SCRIPT = "gate/boot.script"
+BOOT_SCRIPT = "gate/boot.script"  # replaced by the chosen set's script in main()
 REF_SIZE = (512, 448)
 
 GS = "EmuCore/GS"
@@ -186,16 +188,28 @@ def main():
     c.add_argument("--ini", default=DEFAULT_INI)
     c.set_defaults(fn=cmd_check_settings)
     b = sub.add_parser("begin")
-    b.add_argument("--out", default=DEFAULT_OUT)
+    b.add_argument("--set", default="menus")
+    b.add_argument("--out")
     b.set_defaults(fn=cmd_begin)
     i = sub.add_parser("intake")
+    i.add_argument("--set", default="menus")
     i.add_argument("--dry-run", action="store_true")
     i.add_argument("--snaps", default=DEFAULT_SNAPS)
-    i.add_argument("--out", default=DEFAULT_OUT)
+    i.add_argument("--out")
     i.add_argument("--ini", default=DEFAULT_INI)
-    i.add_argument("--manifest", default=DEFAULT_MANIFEST)
+    i.add_argument("--manifest")
     i.set_defaults(fn=cmd_intake)
     a = p.parse_args()
+    if hasattr(a, "set"):
+        global ORDER, BOOT_SCRIPT
+        if a.set not in SETS:
+            print(f"unknown set {a.set} (sets: {', '.join(SETS)})")
+            return 2
+        st = SETS[a.set]
+        ORDER, BOOT_SCRIPT = st["screens"], st["script"]
+        a.out = a.out or st["refs"]
+        if hasattr(a, "manifest"):
+            a.manifest = a.manifest or st["manifest"]
     return a.fn(a)
 
 

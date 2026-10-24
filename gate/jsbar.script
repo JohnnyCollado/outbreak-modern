@@ -8,14 +8,16 @@
 #     (~4931) -> 4 at the event demo 0x20 (~9132, 0x00360000 = 0x20, demo flag 0x0048BF88 = 1).
 #   0x003065AA u16 = room number (the r%03d of the voice/lip/demo file names, sprintf at en/game/text.s:145783,
 #     :306694, :144201); 1 from tick ~2845, the whole time in J's Bar.
-# The first mode 2 after GAME.BIN is in is the scene start; jsbar-<k> covers ~20 s of it from there
-#   (600 frames ~ 1280 ticks: with every frame dumped a frame lands every ~2.1 ticks; ~215 MB per run).
+# The first mode 2 after GAME.BIN is in is the scene start; jsbar-<k> covers its first ~5 s (300 frames, one per
+#   tick on the 2026-10-24 build; ~2.1 ticks per frame on older builds). Also the gate's J's Bar set (gate/sets.json).
 # Status (boots jsbar1, jsbar2, jsbar4, 2026-10-24): the anchor holds (mode 2 at tick 4911/4912, the fade-in
 #   lines up), the camera is fixed for the whole capture, but the scene is NOT deterministic run to run:
 #   the window zombies and the wounded man (right edge) differ from the first lit frame (by tick: share>8
 #   ~0.007, max 56; best frame over a whole run 0.0054 against the frozen p 0.0001), and the dialogue starts
 #   at different ticks (first line at +1102 in jsbar1, none by +2136 in jsbar2). Kevin and the room match.
 #   Not gate-ready until that is explained (reports/2026-10-23-gameplay.md entry 28).
+#   Against the developer's PCSX2 shot (2026-10-24, windows excluded): jsbar1/jsbar4 match, jsbar2 and the fresh
+#   jsdet1/jsdet2 do not (dialogue and Cindy's entrance seconds early): reports/2026-10-24-jsbar-gate.md.
 timeout 900
 watch 0x0048BF60 2
 watch 0x003065AA 2
@@ -75,5 +77,5 @@ log J's Bar room (room number 1)
 wait mem 0x003065AA 2 == 1
 log J's Bar opening scene: GAME main mode 2 (first frame of the scene)
 wait mem 0x0048BF60 1 == 2
-capture jsbar 600
+capture jsbar 300
 quit

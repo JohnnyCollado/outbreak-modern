@@ -60,3 +60,21 @@ Shoot each when it is fully faded in and still, before any input on that screen.
 - charselect: character select as it first appears (within ~2 s), default character, portrait shown, no input.
   The runner captures it ~1.5 s after it appears; on the runner the portrait disappears ~2.3 s in (unverified on PCSX2:
   note it if PCSX2 does the same).
+
+## J's Bar set (M4 golden frames, 2026-10-24; gate/sets.json "jsbar")
+Separate session and folder: the boot-screen references in `C:\ob\ref` stay untouched. Same settings (step 1 above).
+Inputs match `gate/jsbar.script`, so both sides reach the same scene: every menu confirmed with Circle on its default.
+1. `PY tools/gate/refs.py check-settings` -> `settings OK`; then `PY tools/gate/refs.py begin --set jsbar`
+   (marker in `C:\ob\ref-jsbar`).
+2. Boot a: boot fresh. Save-data prompt: Left, Circle (as the boot screens). Let ACCESS/CAPCOM pass; title: Start;
+   main menu: Circle (single play); entry screen: Circle; Scenario Select: Circle (default scenario); character
+   select: Circle (default character, Kevin); Difficulty: Circle (default, NORMAL). No shots on these screens.
+3. After NOW LOADING the J's Bar opening scene fades in (Kevin behind the bar, zombies at the windows). One shot,
+   jsbar: as soon as the fade-in is complete (fully bright), before any subtitle or anyone walking in. Space, F8,
+   Space. Sooner is better: the runner captures the first ~5 s of the scene (300 frames from its first frame).
+4. Boot b: shut the VM down, boot fresh, repeat 2-3 exactly.
+5. `PY tools/gate/refs.py intake --set jsbar --dry-run` -> 2/2, 512x448 OK; then without `--dry-run`.
+Exactly one shot per boot; a stray shot: move it out of `ps2_emu/snaps/` or restart at step 1.
+Status 2026-10-24: one shot taken (boot a, ~4 s into the scene); boot b pending. The gate compares it with the two
+window rectangles excluded (`gate/sets.json`, approved 2026-10-24); the runner's scene does not yet replay the same
+way run to run (`reports/2026-10-24-jsbar-gate.md`), so do not run the intake until that is fixed.

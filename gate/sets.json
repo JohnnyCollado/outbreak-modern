@@ -1,0 +1,22 @@
+{
+  "menus": {
+    "what": "phase 1.2 boot and menu screens",
+    "screens": ["savedata", "access", "capcom", "title", "mainmenu", "charselect"],
+    "refs": "C:/ob/ref",
+    "manifest": "gate/ref_manifest.json",
+    "script": "gate/boot.script",
+    "tag": "gate"
+  },
+  "jsbar": {
+    "what": "M4: the J's Bar opening scene (first room of the offline scenario), just after the fade-in",
+    "screens": ["jsbar"],
+    "refs": "C:/ob/ref-jsbar",
+    "manifest": "gate/ref_manifest_jsbar.json",
+    "script": "gate/jsbar.script",
+    "tag": "gate-jsbar",
+    "env": {"PS2X_GS": "pcsx2-sw", "PS2X_VU1": "mvu"},
+    "exclude": {"jsbar": [[0, 95, 35, 175], [175, 100, 245, 170]]},
+    "exclude_why": "The zombies behind the left and centre windows move every frame; a hand-timed PCSX2 screenshot never shows the same instant of that motion as the runner's capture. Rectangles [x0, y0, x1, y1) cover their motion over 3 runner runs (x 0-30 / 180-240, y 100-170) plus a 5 px margin; Kevin (x >= 255) stays compared. Pixels inside are not counted, the share is over the rest; d and p stay as frozen in gate/tolerance.json.",
+    "exclude_approved": "developer, 2026-10-24"
+  }
+}

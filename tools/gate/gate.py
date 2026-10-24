@@ -1,14 +1,20 @@
 """Boot-screen gate (phase 1.2): runner captures vs PCSX2 references. Pillow only.
 
+Sets (gate/sets.json): "menus" (the six boot/menu screens, the default) and "jsbar" (M4: the J's Bar opening scene).
+A set names its screens, references, manifest, script and boot tag, and may exclude rectangles per screen
+("exclude", approved by the developer): pixels inside are not counted, share = count(delta > d) / (pixels outside).
+--set picks one; --refs/--manifest override the set's.
+
 Usage (any cwd; defaults resolve against the repo root):
-  python tools/gate/gate.py compare --frames D --log F [--refs D] [--manifest P] [--tolerance P] [--start EPOCH]
+  python tools/gate/gate.py compare --frames D --log F [--set S] [--refs D] [--manifest P] [--tolerance P] [--start EPOCH]
       Per screen: every frame <frames>/<screen>-<k>.png vs <refs>/<screen>-a.png, RGB only;
       delta = max(|dR|,|dG|,|dB|), share = count(delta > d) / (w*h); best frame = lowest share,
       then lowest max, then lowest k; tick from the boot log. GREEN = share <= p.
       Advisory screens print with " ADVISORY" and do not count: exit 0 iff every gated screen GREEN.
-  python tools/gate/gate.py selftest [--refs D] [--manifest P] [--tolerance P] [--d N] [--p F] [--start EPOCH]
+  python tools/gate/gate.py selftest [--set S] [--refs D] [--manifest P] [--tolerance P] [--d N] [--p F] [--start EPOCH]
       Refs a/b checked against the manifest (sha256, size) first. Per screen: ref b vs ref a must be GREEN; two damaged copies of ref a ("missing layer",
-      "shifted glyph") must be RED. Damaged copies live in .run/1.2/selftest-<pid>/, deleted after.
+      "shifted glyph") must be RED (both placed outside excluded rectangles). Damaged copies live in
+      .run/1.2/selftest-<pid>/, deleted after.
       Advisory screens' cases print with " advisory" and are not counted.
   python tools/gate/gate.py stamp
       sha256 over the recompile inputs (see stamp_entries).
@@ -36,9 +42,11 @@ import time
 from PIL import Image, ImageChops, ImageFilter
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SCREENS = ["savedata", "access", "capcom", "title", "mainmenu", "charselect"]
-DEFAULT_REFS = "C:/ob/ref"
-DEFAULT_MANIFEST = os.path.join(REPO, "gate", "ref_manifest.json")
+SETS_FILE = os.path.join(REPO, "gate", "sets.json")
+with open(SETS_FILE, encoding="utf-8") as _f:
+    SETS = json.load(_f)
+SCREENS = SETS["menus"]["screens"]  # synth and the default set
+ALL_SCREENS = [x for st in SETS.values() for x in st["screens"]]
 TOLERANCE = os.path.join(REPO, "gate", "tolerance.json")
 TEMP_ROOT = os.path.join(REPO, ".run", "1.2")
 TICK_RE = re.compile(r"\[script\] capture (\S+) k=(\d+) tick=(\d+)")
@@ -62,13 +70,43 @@ def load_rgb(path):
         return im.convert("RGB")
 
 
-def metric(ref, img, d):
-    """(max delta, share of pixels with delta > d); RGB only."""
+def metric(ref, img, d, boxes=()):
+    """(max delta, share of pixels with delta > d); RGB only. Pixels inside boxes ([x0, y0, x1, y1), the set's
+    excluded rectangles) count neither as differing nor in the total."""
     diff = ImageChops.difference(ref, img).split()
     m = ImageChops.lighter(diff[0], ImageChops.lighter(diff[1], diff[2]))
+    for b in boxes:
+        m.paste(0, tuple(b))
     hist = m.histogram()
     mx = max((v for v in range(256) if hist[v]), default=0)
-    return mx, sum(hist[d + 1:]) / (ref.width * ref.height)
+    return mx, sum(hist[d + 1:]) / (ref.width * ref.height - excluded_area(boxes, ref.size))
+
+
+def excluded_area(boxes, size):
+    """Pixels covered by the (possibly overlapping) boxes, clipped to the image."""
+    w, h = size
+    mask = Image.new("1", (w, h), 0)
+    for b in boxes:
+        mask.paste(1, tuple(b))
+    return mask.histogram()[255]
+
+
+def overlaps(box, boxes):
+    x0, y0, x1, y1 = box
+    return any(x0 < b[2] and b[0] < x1 and y0 < b[3] and b[1] < y1 for b in boxes)
+
+
+def apply_set(a):
+    """a.screens, a.boxes ({screen: [box]}) and the set's refs/manifest unless given."""
+    if a.set not in SETS:
+        raise SystemExit(f"gate: unknown set {a.set} (sets: {', '.join(SETS)})")
+    st = SETS[a.set]
+    a.screens = st["screens"]
+    a.boxes = st.get("exclude", {})
+    if a.refs is None:
+        a.refs = st["refs"]
+    if a.manifest is None:
+        a.manifest = os.path.join(REPO, st["manifest"])
 
 
 def wall(start):
@@ -84,7 +122,7 @@ def check_refs(a, takes):
     """No-references check (first); returns the manifest. Raises Refusal('no references (...)')."""
     if not os.path.isfile(a.manifest):
         raise Refusal(f"no references ({a.manifest} missing)")
-    for s in SCREENS:
+    for s in a.screens:
         for t in takes:
             p = os.path.join(a.refs, f"{s}-{t}.png")
             if not os.path.isfile(p):
@@ -104,10 +142,10 @@ def tolerance(a):
         adv = tol.get("advisory", [])
     elif d is None or p is None:
         raise Refusal(f"no tolerance (--d/--p not given and {a.tolerance} missing)")
-    unknown = [s for s in adv if s not in SCREENS] if isinstance(adv, list) else [repr(adv)]
+    unknown = [s for s in adv if s not in ALL_SCREENS] if isinstance(adv, list) else [repr(adv)]
     if unknown:
         raise Refusal(f"tolerance advisory: unknown screen(s) {', '.join(map(str, unknown))}")
-    return int(d), float(p), set(adv)
+    return int(d), float(p), set(adv) & set(a.screens)
 
 
 def verify_ref(man, refs, screen, take):
@@ -150,10 +188,10 @@ def cmd_compare(a):
     if os.path.isdir(a.frames):
         for name in sorted(os.listdir(a.frames)):
             m = FRAME_RE.match(name)
-            if m and m.group(1) in SCREENS:
+            if m and m.group(1) in a.screens:
                 frames.setdefault(m.group(1), []).append(int(m.group(2)))
     bad, refs = [], {}
-    for s in SCREENS:
+    for s in a.screens:
         refs[s], probs = verify_ref(man, a.refs, s, "a")
         bad += probs
         want = window.get(s) if isinstance(window, dict) else window
@@ -165,14 +203,14 @@ def cmd_compare(a):
                 bad.append(f"{s}-{k}: no tick in {a.log}")
     if not bad:
         results = []
-        for s in SCREENS:
+        for s in a.screens:
             best = None
             for k in sorted(frames[s]):
                 img = load_rgb(os.path.join(a.frames, f"{s}-{k}.png"))
                 if img.size != refs[s].size:
                     bad.append(f"{s}-{k}: size {img.size[0]}x{img.size[1]} != ref {refs[s].size[0]}x{refs[s].size[1]}")
                     continue
-                mx, share = metric(refs[s], img, d)
+                mx, share = metric(refs[s], img, d, a.boxes.get(s, ()))
                 key = (share, mx, k)
                 if best is None or key < best:
                     best = key
@@ -181,19 +219,19 @@ def cmd_compare(a):
         for b in bad:
             print(f"refused: {b}")
         return finish(2, a.start, f"refused ({len(bad)} problem(s))")
-    green, gated = 0, len(SCREENS) - len(adv)
+    green, gated = 0, len(a.screens) - len(adv)
     for s, (share, mx, k) in results:
         ok = share <= p
         green += ok and s not in adv
         print(f"{s} best k={k} tick={ticks[(s, k)]} max={mx} share={share:.6f} p={p:.6f} {'GREEN' if ok else 'RED'}"
-              f"{' ADVISORY' if s in adv else ''}")
+              f"{' ADVISORY' if s in adv else ''}{' (excluded rects: %d)' % len(a.boxes[s]) if a.boxes.get(s) else ''}")
     code = 0 if green == gated else 1
-    return finish(code, a.start, f"{green}/{gated} gated green, {len(adv)} advisory")
+    return finish(code, a.start, f"{'' if a.set == 'menus' else a.set + ': '}{green}/{gated} gated green, {len(adv)} advisory")
 
 
 # ---- selftest damage -------------------------------------------------------------------------
 
-def missing_layer(im):
+def missing_layer(im, boxes=()):
     """Fill the bbox of the top-scoring colour component with its 1-px ring's median colour.
     Components: 4-connected over colours quantized to 3 bits/channel; those > 25% of the image
     are excluded. Score = area x max-channel distance (component mean vs ring median).
@@ -224,7 +262,7 @@ def missing_layer(im):
         comps.append((area, minx, miny, maxx, maxy, sr, sg, sb))
     best = None  # (score, -miny, -minx, box, colour)
     for area, minx, miny, maxx, maxy, sr, sg, sb in sorted(comps, key=lambda t: -t[0]):
-        if area > 0.25 * w * h:
+        if area > 0.25 * w * h or overlaps((minx, miny, maxx + 1, maxy + 1), boxes):
             continue
         if best is not None and area * 255 < best[0]:
             break
@@ -246,7 +284,7 @@ def missing_layer(im):
     return out, f"bbox={best[3]} fill={best[4]}"
 
 
-def shifted_glyph(im):
+def shifted_glyph(im, boxes=()):
     """Shift the 24x24 window with the highest FIND_EDGES luminance energy (stride-4 grid)
     by +2 px in x. Ties: lowest y, then x. Returns (damaged copy, description)."""
     w, h = im.size
@@ -260,6 +298,8 @@ def shifted_glyph(im):
     best = None
     for y in range(0, h - 24 + 1, 4):
         for x in range(0, w - 26 + 1, 4):
+            if overlaps((x, y, x + 26, y + 24), boxes):
+                continue
             s = (integ[(y + 24) * (w + 1) + x + 24] - integ[y * (w + 1) + x + 24]
                  - integ[(y + 24) * (w + 1) + x] + integ[y * (w + 1) + x])
             if best is None or s > best[0]:
@@ -277,7 +317,7 @@ def cmd_selftest(a):
     except Refusal as e:
         return finish(2, a.start, str(e))
     bad, refs = [], {}
-    for s in SCREENS:
+    for s in a.screens:
         for t in ("a", "b"):
             refs[(s, t)], probs = verify_ref(man, a.refs, s, t)
             bad += probs
@@ -289,11 +329,12 @@ def cmd_selftest(a):
     os.makedirs(tmp, exist_ok=True)
     ok_n, total = 0, 0
     try:
-        for s in SCREENS:
+        for s in a.screens:
             ra, rb = refs[(s, "a")], refs[(s, "b")]
+            boxes = a.boxes.get(s, ())
             cases = [("b-vs-a", rb, "", True)]
             for name, fn in (("missing layer", missing_layer), ("shifted glyph", shifted_glyph)):
-                dmg, desc = fn(ra)
+                dmg, desc = fn(ra, boxes)
                 path = os.path.join(tmp, f"{s}-{name.replace(' ', '_')}.png")
                 dmg.save(path)
                 cases.append((name, load_rgb(path), desc, False))
@@ -301,7 +342,7 @@ def cmd_selftest(a):
                 if img.size != ra.size:
                     green, mx, share = False, -1, 1.0
                 else:
-                    mx, share = metric(ra, img, d)
+                    mx, share = metric(ra, img, d, boxes)
                     green = share <= p
                 ok = green == want_green
                 if s not in adv:
@@ -311,7 +352,7 @@ def cmd_selftest(a):
                       f"{'ok' if ok else 'FAIL'}{(' ' + desc) if desc else ''}{' advisory' if s in adv else ''}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return finish(0 if ok_n == total else 5, a.start, f"selftest {ok_n}/{total} ok")
+    return finish(0 if ok_n == total else 5, a.start, f"{'' if a.set == 'menus' else a.set + ' '}selftest {ok_n}/{total} ok")
 
 
 # ---- stamp -----------------------------------------------------------------------------------
@@ -463,8 +504,9 @@ def main():
         if name == "compare":
             sp.add_argument("--frames", required=True)
             sp.add_argument("--log", required=True)
-        sp.add_argument("--refs", default=DEFAULT_REFS)
-        sp.add_argument("--manifest", default=DEFAULT_MANIFEST)
+        sp.add_argument("--set", default="menus", help="gate/sets.json entry (default menus)")
+        sp.add_argument("--refs")
+        sp.add_argument("--manifest")
         sp.add_argument("--d", type=int)
         sp.add_argument("--p", type=float)
         sp.add_argument("--tolerance", default=TOLERANCE)
@@ -473,6 +515,8 @@ def main():
     sp = sub.add_parser("synth")
     sp.add_argument("dir")
     a = ap.parse_args()
+    if a.cmd in ("compare", "selftest"):
+        apply_set(a)
     return {"compare": cmd_compare, "selftest": cmd_selftest, "stamp": cmd_stamp, "synth": cmd_synth}[a.cmd](a)
 
 
