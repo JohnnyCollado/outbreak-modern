@@ -16,7 +16,8 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | Host profiler | `bash tools/ob.sh hostprof-build` | `C:\ob\hostprof-build\hostprof.exe` (~5 s). See "Host profiling" below |
 | Test | `bash tools/run.sh ob-test -- bash tools/ob.sh test` | ps2x_tests, IOP ctest, gs_cache ctest, `ob_diag` (the plugin's own tests; builds `native/ob_diag` into `C:\ob\diag-build`, ~3 s incremental), `pcsx2_vu` (`ob_pcsx2_vu_tests`: microVU placement under a crowded address space and the fallback; built in `C:\ob\pcsx2-vu-build`, links the runner's `ps2_runtime.lib`, so rebuild the runner after a runtime change) |
 | Gate | `PS2X_GS=<cpu\|pcsx2-sw\|pcsx2-vk> [PS2X_VU1=<interp\|mvu>] bash tools/ob.sh gate` | Hidden scripted boot + scoring (`gate.md`). The gated screens end at character select, before any VU1 run: `PS2X_VU1` does not change them |
-| Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`); loads the ob_diag plugin (`PS2X_DIAG`) |
+| Fast J's Bar check | `bash tools/ob.sh check [--tag T] [--paced]` | `gate/check.script` (play.script up to the `load90s` capture, J's Bar) unpaced (`PS2X_PACING=0`), pcsx2-vk + mvu unless set: ~63 s instead of ~150 s paced. Prints `check T: exit, wall, load60s/load90s ticks` (paced play.script: ~6454 / ~8259) |
+| Hidden scripted boot | `bash tools/ob.sh boot --script gate/boot.script --tag T` | Ends by itself (`boot.md`); loads the ob_diag plugin (`PS2X_DIAG`). Runs with `gate/defaults.ini` (no keys) unless `PS2X_SETTINGS` is set, so an `outbreak.ini` beside the exe never changes a scripted run |
 | Engine-only boot | `bash tools/ob.sh boot --no-diag --hidden --secs N --tag T` | No plugin, as a play build; speed from the `[fps]` log lines |
 | Live pad boot | `bash tools/ob.sh boot --pad ob_pad --secs 900 --tag T` + `python tools/ob/pad.py <cmd>` | Hidden; driven over a named pipe, one command at a time (`boot.md` "Live pad") |
 | Visible boot | `PS2X_GS=pcsx2-vk bash tools/ob.sh boot --tag visible` | Opens a window: needs the developer's "proceed" each time |
@@ -52,6 +53,12 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   EE banks cycles and the IOP runs when they reach its next event (thread wake, timer, DMA completion, callback),
   3072 EE cycles (PCSX2 `eeWaitCycles`), or an EE call into the IOP (RPC, SIF DMA/transfer, IOP memory, modules),
   which syncs it first. A performance switch, not a diagnostic.
+- `PS2X_PACING=0` (engine, patch 0051): no wall-clock pacing. Vsync, alarm and EE timer events fire when the guest's
+  cycle count reaches them, and while every guest thread is idle the scheduler jumps guest time to the next event
+  instead of sleeping; stderr `[ee] pacing off ...`. Guest timing is unchanged (ps2x test: the same vsync ticks);
+  the game runs as fast as the host and the GS thread's 2-frame queue allow (menus and loading ~150-1400 vsync/s,
+  J's Bar ~65-75). For scripted checks (`ob.sh check`), not play. With ob_diag, capture steps hold the guest at a
+  vsync until the previous vsync's frame is taken, so captures land on consecutive ticks paced or not.
 - `PS2X_IOP_FASTLOOP=0` (engine, patch 0049): the IOP interpreter's full checks after every instruction (take a
   DMA start, walk the pending DMAs and callbacks, ask the import registry), as before 0049, for A/B speed runs;
   stderr `[iop] fast loop off ...`. Default: each check is one inline compare (a DMA start flag, the earliest DMA

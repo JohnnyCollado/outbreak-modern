@@ -81,6 +81,11 @@ public:
     void commitCapture(bool written);
     // Any thread: a capture step is active and still needs frames (the external GS snapshot demand).
     bool captureWanted() const;
+    // Vsync thread: a capture step still needs a frame and the frame of vsync <tick> - 1 (published after the
+    // previous onVsync) has not been taken yet; never at the step's first vsync. The plugin
+    // holds the guest at this vsync until it is false, so captures land on consecutive guest ticks however fast
+    // the guest runs (PS2X_PACING=0) relative to the main thread's frames.
+    bool captureNeedsTick(uint64_t tick) const;
 
     // Main thread: wall-clock timeout, measured from start(). On timeout, message holds
     // "[script] TIMEOUT step <i> line <L>: <text>".

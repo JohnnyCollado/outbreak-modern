@@ -403,6 +403,18 @@ bool Ps2InputScript::captureWanted() const
     return m_captureActive && m_index < m_steps.size() && m_captureWritten < m_steps[m_index].count;
 }
 
+bool Ps2InputScript::captureNeedsTick(uint64_t tick) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_captureActive || m_index >= m_steps.size() || m_captureWritten >= m_steps[m_index].count)
+        return false;
+    // The scheduler publishes vsync N's snapshot after the plugin's onVsync(N), on the same thread, so at vsync N the
+    // newest frame the main thread can have is N-1's: wait for that one, once the step covers N-1.
+    if (tick <= m_captureStartTick)
+        return false;
+    return !(m_hasCaptureTick && m_lastCaptureTick >= tick - 1u);
+}
+
 void Ps2InputScript::commitCapture(bool written)
 {
     std::lock_guard<std::mutex> lock(m_mutex);

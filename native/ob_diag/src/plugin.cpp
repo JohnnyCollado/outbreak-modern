@@ -20,6 +20,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 
 #if defined(_WIN32)
 #define OB_DIAG_EXPORT extern "C" __declspec(dllexport)
@@ -136,6 +137,14 @@ namespace
                                       return host.readGuest(host.user, addr, &out, width);
                                   },
                                   std::cout);
+                // Capture steps: hold the guest at this vsync until the main thread has taken its frame, so the
+                // captures are tick-exact even unpaced (PS2X_PACING=0, several guest vsyncs per host frame).
+                // 2 s cap: a frame that never comes must not hang the run (the step then continues as before).
+                const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (m_script->captureNeedsTick(tick) && std::chrono::steady_clock::now() < until)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (m_script->captureNeedsTick(tick))
+                    std::cerr << "[script] capture hold at tick " << tick << " timed out (2 s): no frame" << std::endl;
             }
             if (m_pad)
                 m_pad->onVsync(tick);

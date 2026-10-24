@@ -1,0 +1,188 @@
+From f5ffc3a0bd0a9ce69df7b7c4085ebb4ecc45bcd6 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:12:49 -0400
+Subject: [PATCH] Runtime: PS2X_PACING=0 runs the guest without wall-clock
+ pacing
+
+Scripted checks waited for real time: a J's Bar check took ~150 s, most
+of it vsyncs paced to 16.7 ms while every guest thread was idle (menus,
+logos, loading).
+
+EeScheduler::setPaced(false) (PS2X_PACING=0, stderr "[ee] pacing off"):
+- scheduleEvent stores every event's host deadline as already past
+  (clock epoch + 1 ns: not the epoch, which processDueDeadlines uses as
+  "none", and not time_point::min(), whose distance to now overflows in
+  wait_until), so VBlank, alarms and EE timers fire when the guest cycle
+  count reaches them;
+- waitForEvent, with every guest thread idle, picks the earlier of the
+  next deadline and the next EE timer by guest cycle and jumps guest time
+  there instead of sleeping.
+Guest timing is unchanged: the guest sees the same vsync ticks. The game
+runs as fast as the host and an external GS's frame queue allow. Default
+paced; a switch for scripted checks, not play.
+
+Test (ps2x, EeSchedulerFrameTime): a guest waiting 30 vsyncs resumes at
+the same vsync ticks paced and unpaced; paced takes >= 30 x 16 ms,
+unpaced under a fifth of that. Fails without: no setPaced (compile
+error); with setPaced ignored the unpaced run takes as long as the paced.
+In the game (outbreak-modern ob.sh check, play.script to J's Bar):
+63 s unpaced vs 140 s paced, load60s/load90s at ticks 6449/8253 vs
+6448/8252, twice the same unpaced.
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h |  7 ++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp | 17 +++++++-
+ ps2xRuntime/src/lib/ps2_runtime.cpp        |  7 ++++
+ ps2xTest/src/ps2_gs_external_tests.cpp     | 48 ++++++++++++++++++++++
+ 4 files changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 8dbf65d..4c9a2ae 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -278,6 +278,12 @@ public:
+     EeScheduler &operator=(const EeScheduler &) = delete;
+ 
+     void reset(uint8_t *rdram, const R5900Context &mainContext);
++    // Patch 0051 (PS2X_PACING=0): false = no wall-clock pacing. VBlank and EE timer events fire when the guest's
++    // cycle count reaches them, and while every guest thread is idle the scheduler jumps guest time to the next
++    // event instead of sleeping. Guest timing is unchanged; the game runs as fast as the host (and the external
++    // GS's frame queue) allow. A test-speed switch; default true. Set before reset.
++    void setPaced(bool paced) noexcept { m_paced = paced; }
++    [[nodiscard]] bool paced() const noexcept { return m_paced; }
+     void run();
+     void requestStop();
+     void postEvent(EeEvent event);
+@@ -461,4 +467,5 @@ private:
+     // the scheduler sums its idle (pacing) wait for PS2DiagHooks::onVsync.
+     PS2DiagHooks *m_diag = nullptr;
+     uint64_t m_pacingWaitNs = 0;
++    bool m_paced = true; // setPaced
+ };
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 0e7d95d..4e88ede 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -39,6 +39,9 @@ namespace
+     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
+     constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
+     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
++    // setPaced(false): a host deadline that is always past (clock epoch + 1 ns; not the epoch, which
++    // processDueDeadlines uses as "none"; not time_point::min(), whose distance to now overflows in wait_until).
++    constexpr auto kUnpacedHostDeadline = std::chrono::steady_clock::time_point{} + std::chrono::nanoseconds(1);
+     constexpr uint64_t kAlarmTickMicroseconds = 64u;
+     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
+ 
+@@ -2082,7 +2085,14 @@ void EeScheduler::waitForEvent()
+         deadlineCycle = next->deadlineCycle;
+         hostDeadline = next->hostDeadline;
+     }
+-    if (hasTimerDeadline)
++    if (hasTimerDeadline && !m_paced)
++    {
++        // Unpaced (setPaced): every host deadline is in the past, so pick the earlier guest cycle and do not sleep.
++        if (m_deadlines.empty() || m_eeCycle + timerCycles < deadlineCycle)
++            deadlineCycle = m_eeCycle + timerCycles;
++        hostDeadline = kUnpacedHostDeadline;
++    }
++    else if (hasTimerDeadline)
+     {
+         const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
+         if (timerHostDeadline < hostDeadline)
+@@ -2119,6 +2129,11 @@ void EeScheduler::scheduleEvent(uint64_t deadlineCycle,
+                                 std::chrono::steady_clock::time_point hostDeadline,
+                                 EeEvent event)
+ {
++    if (!m_paced)
++    {
++        // Already due on the host side: only the guest cycle decides (setPaced).
++        hostDeadline = kUnpacedHostDeadline;
++    }
+     {
+         std::lock_guard lock(m_eventMutex);
+         m_deadlines.push_back(ScheduledEvent{deadlineCycle, hostDeadline, event, ++m_eventSequence});
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 74a99be..959f21e 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -563,6 +563,13 @@ PS2Runtime::PS2Runtime()
+     }
+ 
+     m_eeScheduler = std::make_unique<EeScheduler>(*this);
++    // PS2X_PACING=0 (patch 0051): no wall-clock pacing; guest timing unchanged, the game runs as fast as it can.
++    // For scripted checks, not play.
++    if (const char *pacingEnv = std::getenv("PS2X_PACING"); pacingEnv && std::string_view(pacingEnv) == "0")
++    {
++        m_eeScheduler->setPaced(false);
++        std::cerr << "[ee] pacing off (PS2X_PACING=0): vsyncs and timers follow guest cycles only" << std::endl;
++    }
+ 
+     // Assign rather than memset: R5900Context's constructor zeroes itself and
+     // then applies the COP0 reset values, which a memset here would discard.
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index b5d9f04..ab245f1 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -330,6 +330,42 @@ namespace
+ #endif
+     }
+ 
++    // Patch 0051 (setPaced): the guest waits kPacingVSyncs vsyncs, recording the vsync tick it resumes at each time.
++    constexpr uint32_t kPacingVSyncs = 30u;
++    std::vector<uint64_t> s_pacingSeen;
++
++    void pacingDrive(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        EeScheduler &ee = runtime->eeScheduler();
++        s_pacingSeen.push_back(ee.currentVSyncTick());
++        if (s_pacingSeen.size() > kPacingVSyncs)
++        {
++            ctx->pc = 0u;
++            runtime->requestStop();
++            return;
++        }
++        ctx->pc = kDrivePc;
++        ee.waitVSync(ee.currentVSyncTick());
++    }
++
++    // Wall milliseconds for kPacingVSyncs vsyncs; the vsync ticks seen in seen.
++    double runPacing(bool paced, std::vector<uint64_t> &seen)
++    {
++        std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++        PS2Runtime runtime;
++        runtime.registerFunction(kDrivePc, pacingDrive);
++        runtime.eeScheduler().setPaced(paced);
++        s_pacingSeen.clear();
++        R5900Context mainContext{};
++        mainContext.pc = kDrivePc;
++        const auto start = std::chrono::steady_clock::now();
++        runtime.eeScheduler().reset(rdram.data(), mainContext);
++        runtime.eeScheduler().run();
++        const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++        seen = s_pacingSeen;
++        return ms;
++    }
++
+ }
+ 
+ void register_ps2_gs_external_tests()
+@@ -566,5 +602,17 @@ void register_ps2_gs_external_tests()
+             t.IsFalse(std::filesystem::exists(pcSample), "no PC sample CSV");
+             std::filesystem::remove_all(dir, ec);
+         });
++
++        tc.Run("unpaced (PS2X_PACING=0): the same vsync ticks, without waiting for the wall clock", [](TestCase &t)
++        {
++            std::vector<uint64_t> paced, unpaced;
++            const double pacedMs = runPacing(true, paced);
++            const double unpacedMs = runPacing(false, unpaced);
++            t.Equals(paced.size(), static_cast<size_t>(kPacingVSyncs + 1u), "paced: every wait resumed");
++            t.IsTrue(unpaced == paced, "unpaced: the guest resumes at the same vsync ticks");
++            t.IsTrue(pacedMs >= kPacingVSyncs * 16.0, "paced: ~16.7 ms per vsync (" + std::to_string(pacedMs) + " ms)");
++            t.IsTrue(unpacedMs * 5.0 < pacedMs, "unpaced: far faster than real time (" + std::to_string(unpacedMs) +
++                                                     " ms vs " + std::to_string(pacedMs) + " ms)");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

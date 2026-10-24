@@ -17,6 +17,9 @@ image reaches J's Bar (`C:\ob\frames-playiso\load240s-1.png`). A plain runner st
 ## Scripted boot (the normal form)
 `bash tools/ob.sh boot --script gate/boot.script --tag T` — hidden window, the script drives the pad on guest vsyncs
 (no host input), `capture` steps write `<screen>-<k>.png` to C:\ob\frames-<T>, log C:\ob\logs\boot-<T>.log.
+A capture step holds the guest at each vsync until the previous vsync's frame is written (2 s cap, logged as
+`[script] capture hold at tick N timed out`), so its frames are consecutive guest ticks, paced or unpaced
+(`PS2X_PACING=0`, `ob.sh check`). Settings: `gate/defaults.ini` unless `PS2X_SETTINGS` is set.
 Exit codes (ob.sh returns the runner's): 0 `quit` reached; 2 script parse error or capture without a dump dir;
 3 wall-clock timeout (`[script] TIMEOUT step <i> line <L>`); 4 game ended before `quit`.
 Grammar: header of `native/ob_diag/src/input_script.h` (was `upstream/ps2recomp/0020-*.patch`) and the T4 summary (phase 1.1): `timeout`, `wait vsync`,

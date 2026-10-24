@@ -190,6 +190,33 @@ void register_input_script_tests()
             script.onVSync(12, read, log);
             t.IsTrue(script.quitRequested(), "capture completes after n written frames"); });
 
+        tc.Run("captureNeedsTick: vsync N is held until the frame of vsync N-1 is taken", [](TestCase &t)
+               {
+            Ps2InputScript script;
+            t.IsTrue(parseOk(script, "capture title 3\nquit\n"), "parse");
+            FakeMemory mem;
+            std::ostringstream log;
+            const auto read = mem.reader();
+            std::string fileName;
+            std::string screen;
+            uint32_t k = 0;
+
+            t.IsFalse(script.captureNeedsTick(5), "no capture step yet: nothing held");
+            script.onVSync(10, read, log);
+            t.IsFalse(script.captureNeedsTick(10), "the step's first vsync is never held (its frame is published after)");
+            script.onVSync(11, read, log);
+            t.IsTrue(script.captureNeedsTick(11), "vsync 11 waits for frame 10");
+            t.IsTrue(script.takeCapture(10, fileName, screen, k), "frame 10 taken");
+            t.IsFalse(script.captureNeedsTick(11), "released once frame 10 is taken");
+            script.commitCapture(true);
+            script.onVSync(12, read, log);
+            t.IsTrue(script.captureNeedsTick(12), "vsync 12 waits for frame 11");
+            t.IsTrue(script.takeCapture(11, fileName, screen, k), "frame 11");
+            script.commitCapture(true);
+            t.IsTrue(script.takeCapture(12, fileName, screen, k), "frame 12, the third");
+            script.commitCapture(true);
+            t.IsFalse(script.captureNeedsTick(13), "all written: nothing held"); });
+
         tc.Run("capture wants frames only during its step and refuses frames older than the step", [](TestCase &t)
                {
             Ps2InputScript script;

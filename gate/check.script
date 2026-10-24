@@ -1,0 +1,95 @@
+# gate/check.script - the fast J's Bar check (2026-10-24): play.script up to the load90s capture (the J's Bar
+# opening scene), then quit. Run unpaced for speed:
+#   PS2X_PACING=0 PS2X_GS=pcsx2-vk PS2X_VU1=mvu bash tools/ob.sh boot --script gate/check.script --tag <T>
+# (ob.sh check does this). Guest steps are play.script's, so capture ticks match it (load60s ~6454, load90s ~8261).
+# Steps to character select are boot.script's (captures dropped except charselect). Predicates after it:
+#   *0x003065FC+4 u8 SelectWork state: 9 character select -> 10 -> 11 (func_00544330/func_00544350,
+#     title.c:2692-2700, :3517-3521); state 11 sel 3 sets TitleWork unk70 = 1 (title.c:3554-3558).
+#   TitleWork unk70 -> func_00540B10 (title.c:916-917; demo/text.s) -> func_001B6880 (single play, unk64 0):
+#     task slot 4 fn = func_005CD580 (in GAME.BIN, en/game/text.s:163563), pending overlays
+#     D_00239F88 = 2 (GAME) and D_00239F8C = 8 (SINGLE) offline / 7 (NETAQ) online (main/text.s:222301-222329).
+#   0x002F8654 u32 = task pool D_002F85D0 slot 4 (+0x20 each) fn pointer (+4) (main/text.s:222109-222137).
+#   0x00239F30 s8 = overlay in 0x540000 (1 DEMO, 2 GAME); 0x00239F34 s8 = overlay in 0x820000 (8 SINGLE)
+#     (overlay.c:56-60; names D_002136C0, main/data/vu_data.data.s:90138).
+# Status (boot play2, 2026-10-23): stops at the first wall: the jalr to func_005CD580 has no recompiled
+#   target ([guest-branch:missing-target] source=0x1b652c), GAME and SINGLE are not built (tools/ob.sh overlay
+#   loop: demo submain netdnas). The first-room and walk steps (hold up, watch the player position) wait for
+#   that, and for the player-position field, which needs the GAME overlay's code (no decomp for it yet).
+timeout 600
+watch *0x003065FC+4 1
+watch *0x003065FC+5 1
+watch *0x003065FC+6 1
+watch 0x00239F30 1
+watch 0x00239F34 1
+watch 0x00239F88 1
+watch 0x00239F8C 1
+watch 0x002F8654 4
+
+log save-data screen (memory-card prompt): boot task step 1 sub 4
+wait mem 0x002F85D8 2 == 0x0401
+wait vsync 120
+press left 8
+wait vsync 30
+press circle 8
+
+log ACCESS logo: boot task step 1 sub 9 (128 vsyncs)
+wait mem 0x002F85D8 2 == 0x0901
+wait vsync 100
+
+log CAPCOM logo: title state 0 sub 0 step 1
+wait mem *0x0023BE34+0 4 == 0x00010000
+wait vsync 120
+
+log title PRESS START: title state 0 sub 2 step 3
+wait mem *0x0023BE34+0 4 == 0x00030200
+wait vsync 120
+press start 8
+
+log main menu input wait: title state 1 sub 5 step 5
+wait mem *0x0023BE34+0 4 == 0x00050501
+wait vsync 60
+press circle 8
+
+log single-play entry screen: title state 2 sub 2 step 2
+wait mem *0x0023BE34+0 4 == 0x00020202
+wait vsync 60
+press circle 8
+
+log Scenario Select: select state 8 (t4dbg boot)
+wait mem *0x003065FC+4 1 == 8
+wait vsync 120
+press circle 8
+
+log character select: select state 9 (10/11 = Difficulty)
+wait mem *0x003065FC+4 1 == 9
+wait vsync 90
+capture charselect 6
+press circle 8
+wait vsync 60
+capture charsel-after 2
+
+log select state 11 = Difficulty (EASY/NORMAL); state 10 passes in 2 ticks (play1 watch)
+wait mem *0x003065FC+4 1 == 11
+wait vsync 90
+capture sel11 2
+press circle 8
+wait vsync 60
+capture sel11-after 2
+
+log game task installed in slot 4 (func_005CD580, GAME.BIN)
+wait mem 0x002F8654 4 == 0x005CD580
+log GAME.BIN in 0x540000
+wait mem 0x00239F30 1 == 2
+capture gameload 2
+wait vsync 300
+capture load5s 2
+wait vsync 600
+capture load15s 2
+wait vsync 900
+capture load30s 2
+log scenario loading: sample every 30 s up to ~4 min (first room not yet identified)
+wait vsync 1800
+capture load60s 2
+wait vsync 1800
+capture load90s 2
+quit

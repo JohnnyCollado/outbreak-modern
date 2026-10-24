@@ -15,6 +15,7 @@
 #   tools/ob.sh boot --pad NAME [--secs N] [--tag T]  hidden boot driven live over \\.\pipe\NAME (PS2X_PAD_PIPE,
 #                                            ob_diag plugin; client tools/ob/pad.py); shots in $OB_ROOT/frames-<tag>
 #   tools/ob.sh gate [--selftest] [--d N --p F]  recompile if stamp changed, scripted boot, gate.py selftest + compare
+#   tools/ob.sh check [--tag T] [--paced]    fast J's Bar check: gate/check.script unpaced (PS2X_PACING=0), ticks
 #   tools/ob.sh pcsx2-gs                     PCSX2 GS static lib (native/pcsx2_gs): clone/deps if missing, build, smoke
 #   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
 #                                            build native/pcsx2_vu + compare tool, diff interpreter vs microVU on
@@ -264,6 +265,11 @@ cmd_boot() {
         frames="$OB_ROOT/frames-$tag"; rm -rf "$frames"; mkdir -p "$frames"
         export PS2X_INPUT_SCRIPT; PS2X_INPUT_SCRIPT=$(cygpath -w "$(realpath "$script")")
         export PS2X_HIDDEN=1
+        # Default settings (gate/defaults.ini, no keys) unless PS2X_SETTINGS names a file: an outbreak.ini beside
+        # the exe (the developer's play settings: upscale, textures, mods) must not change scripted runs.
+        if [ -z "${PS2X_SETTINGS:-}" ]; then
+            export PS2X_SETTINGS; PS2X_SETTINGS=$(cygpath -w "$REPO/gate/defaults.ini")
+        fi
     fi
     if [ -n "$pad" ]; then
         # Live pad: hidden window, the plugin owns pad port 0 and serves \\.\pipe\<name>; shots (one frame each)
@@ -286,6 +292,27 @@ cmd_boot() {
         'exited by itself, code ' + \$p.ExitCode; exit \$p.ExitCode"
     local rc=$?
     echo "boot $tag: exit $rc; game $OB_GAME; log $OB_LOGS/boot-$tag.log; frames $frames"
+    return $rc
+}
+
+# check [--tag T] [--paced]: the fast J's Bar check. gate/check.script (play.script up to the load90s capture)
+# unpaced (PS2X_PACING=0: guest timing unchanged, no wall-clock waits), pcsx2-vk + mvu unless set. Prints the wall
+# time and the load60s/load90s capture ticks (play.script: ~6454 / ~8261).
+cmd_check() {
+    local tag=check pacing=0 start rc
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --tag) tag=$2; shift 2 ;;
+            --paced) pacing=1; shift ;;
+            *) echo "check: unknown arg $1"; return 2 ;;
+        esac
+    done
+    start=$(date +%s)
+    PS2X_PACING=$pacing PS2X_GS="${PS2X_GS:-pcsx2-vk}" PS2X_VU1="${PS2X_VU1:-mvu}" \
+        cmd_boot --script "$REPO/gate/check.script" --tag "$tag" > "$OB_LOGS/check-$tag.txt" 2>&1
+    rc=$?
+    local ticks; ticks=$(grep -oE 'capture load(60|90)s k=0 tick=[0-9]+' "$OB_LOGS/boot-$tag.log" | sed 's/ k=0//' | tr '\n' ' ')
+    echo "check $tag: exit $rc, wall $(( $(date +%s) - start )) s, pacing=$pacing, ${ticks:-no captures}(frames $OB_ROOT/frames-$tag)"
     return $rc
 }
 
@@ -446,10 +473,11 @@ case ${1:-} in
     recompile) cmd_recompile ;;
     boot) shift; cmd_boot "$@" ;;
     gate) shift; cmd_gate "$@" ;;
+    check) shift; cmd_check "$@" ;;
     pcsx2-gs) cmd_pcsx2_gs ;;
     vucompare) shift; cmd_vucompare "$@" ;;
     depcheck) cmd_depcheck ;;
     hostprof-build) cmd_hostprof_build ;;
     android) shift; bash "$REPO/tools/ob/android.sh" "$@" ;;
-    *) sed -n '6,26p' "$0"; exit 2 ;;
+    *) sed -n '6,27p' "$0"; exit 2 ;;
 esac
