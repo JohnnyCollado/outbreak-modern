@@ -71,6 +71,42 @@ namespace obgpu
 
 	constexpr uint32_t kVendorQualcomm = 0x5143;
 
+	// How PCSX2's Vulkan renderer reads the colour already drawn when a draw blends with it (outbreak.ini
+	// gs_self_read, PS2Recomp patch 0054). PCSX2 2.9.134 picks the in-pass read (rasterization-order framebuffer
+	// fetch where the driver offers it, else a texture barrier, GSDeviceVK.cpp CheckFeatures) on every device.
+	// Qualcomm's own Adreno driver returns stale colour there: J's Bar's light glows come out black on the Odin
+	// (reports/2026-10-24-android.md entries 11-12). ARMSX2 reads the destination from a copy of the target on
+	// Adreno and gates fetch off on the Qualcomm driver for Adreno 8xx (its GSDeviceVK.cpp, 90126bd, :4030-4146).
+	enum class SelfRead
+	{
+		Auto,    // copy on Qualcomm's own driver, PCSX2's choice elsewhere
+		Copy,    // texture barriers off: the renderer reads a copy of the target (OverrideTextureBarriers = 0)
+		Barrier, // in-pass read with texture barriers, no framebuffer fetch
+		Fetch,   // PCSX2's choice: framebuffer fetch where offered, else barriers
+	};
+	struct SelfReadChoice
+	{
+		SelfRead mode = SelfRead::Auto;
+		std::string error; // non-empty: the value was rejected (Auto is used)
+	};
+	// "auto" (or empty), "copy", "barrier", "fetch"; any case and surrounding blanks.
+	SelfReadChoice ParseSelfReadSetting(std::string_view value);
+	// Qualcomm's proprietary driver (not Turnip or another Mesa build) on a Qualcomm GPU. Without driver properties
+	// (no driverName) a Qualcomm GPU counts as the proprietary driver: Mesa's drivers always report a name.
+	bool IsQualcommProprietary(const DeviceInfo& d);
+	// The two PCSX2 GS options it sets, and the log line's road and reason.
+	struct SelfReadDecision
+	{
+		int override_texture_barriers = -1;    // GSOptions::OverrideTextureBarriers (-1 = PCSX2's automatic)
+		bool disable_framebuffer_fetch = false; // GSOptions::DisableFramebufferFetch
+		std::string road;                        // "copy", "barrier", "fetch" (PCSX2's choice)
+		std::string why;                         // "auto: Qualcomm's driver" / "auto" / "outbreak.ini"
+	};
+	// device: the driver PCSX2 opens (null = not probed, e.g. on desktop: Auto leaves PCSX2's choice).
+	SelfReadDecision DecideSelfRead(SelfRead setting, const DeviceInfo* device);
+	// "[gpu] self-read=<road> (<why>)"
+	std::string SelfReadLine(const SelfReadDecision& d);
+
 	// Folder sync from the external files dir (where the player drops the package) to the internal one (the only
 	// place a driver may be dlopen'ed from): one "name size mtime" line per file, sorted by name.
 	struct FileStamp

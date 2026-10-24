@@ -16,6 +16,10 @@ void ob_gs_init(ObGsRenderer renderer);
 // outbreak.ini gpu_driver ("system", empty, or a driver folder name), before the first GS call. Android picks the
 // Vulkan driver from it at GSopen (gpu_driver_android.h); other platforms ignore it.
 void ob_gs_set_gpu_driver(const char* name);
+// outbreak.ini gs_self_read ("auto", empty, "copy", "barrier", "fetch"; PS2Recomp patch 0054), before the first GS
+// call: how PCSX2's renderer reads the colour already drawn (gpu_driver.h DecideSelfRead). Auto = a copy of the target
+// on Qualcomm's own Adreno driver, PCSX2's choice elsewhere (always on desktop, where no driver is probed).
+void ob_gs_set_self_read(const char* mode);
 // Before the first GS call: render resolution multiplier (outbreak.ini upscale, 1..8; others = 1; the Vulkan
 // renderer only) and display aspect (ObGsAspect; a pnach gsaspectratio). Both default to today's: 1, Auto.
 enum class ObGsAspect : int

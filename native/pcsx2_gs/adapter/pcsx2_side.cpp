@@ -20,6 +20,7 @@
 #include "ob_pcsx2_gs.h"
 #include "ob_gs_bridge.h"
 #include "gs_ring.h"
+#include "gpu_driver.h"
 
 #include <algorithm>
 #include <atomic>
@@ -63,6 +64,8 @@ namespace
 	bool s_visible = false;   // parent window visible at attach: Mailbox present, else Disabled
 	std::atomic<u64> s_pending_size{0}; // (w << 32) | h from ob_gs_window_resized; 0 = none; applied in ob_gs_vsync
 	std::string s_gpu_driver;           // outbreak.ini gpu_driver (ob_gs_set_gpu_driver); used on Android only
+	std::string s_self_read;            // outbreak.ini gs_self_read (ob_gs_set_self_read)
+	obgpu::SelfReadDecision s_self_read_road; // decided at GSopen from s_self_read and the driver (MakeOptions)
 	float s_upscale = 1.0f;             // outbreak.ini upscale (ob_gs_set_display)
 	AspectRatioType s_aspect = AspectRatioType::RAuto4_3_3_2; // pnach gsaspectratio (ob_gs_set_display)
 	std::string s_textures;             // outbreak.ini textures root (ob_gs_set_textures); empty = off
@@ -223,7 +226,30 @@ namespace
 		o.TVShader = 0;
 		o.CASMode = GSCASMode::Disabled;
 		o.DisableShaderCache = false; // cache in EmuFolders::Cache: shaders compile once, not on every launch
+		// The destination read (gpu_driver.h DecideSelfRead): PCSX2's automatic choice unless the driver or
+		// outbreak.ini says otherwise. Software renderer: unused.
+		o.OverrideTextureBarriers = s_self_read_road.override_texture_barriers;
+		o.DisableFramebufferFetch = s_self_read_road.disable_framebuffer_fetch;
 		return o;
+	}
+
+	// s_self_read_road for the driver PCSX2 is about to open (Android: the one ObGpuSelectDriver probed; desktop:
+	// none, so auto keeps PCSX2's choice). One "[gpu] self-read=..." line for the Vulkan renderer.
+	void DecideSelfRead(GSRendererType t)
+	{
+		const obgpu::SelfReadChoice choice = obgpu::ParseSelfReadSetting(s_self_read);
+#if defined(__ANDROID__)
+		const obgpu::DeviceInfo* device = ObGpuDevice();
+#else
+		const obgpu::DeviceInfo* device = nullptr;
+#endif
+		s_self_read_road = obgpu::DecideSelfRead(choice.mode, device);
+		if (t != GSRendererType::VK)
+			return;
+		if (!choice.error.empty())
+			std::fprintf(stderr, "[gpu] %s; using auto\n", choice.error.c_str());
+		std::fprintf(stderr, "%s\n", obgpu::SelfReadLine(s_self_read_road).c_str());
+		std::fflush(stderr);
 	}
 
 	// Caller holds s_mu. Opens once; a failed open is not retried.
@@ -258,13 +284,16 @@ namespace
 		// Every Android renderer presents through PCSX2's Vulkan device (SW too): pick its driver first
 		// (outbreak.ini gpu_driver, gpu_driver_android.h). A custom driver PCSX2 cannot open falls back once.
 		const bool custom_driver = ObGpuSelectDriver(s_gpu_driver);
+		DecideSelfRead(t);
 		s_open = s_child && GSopen(MakeOptions(t, true), t, s_basemem, vsync, false);
 		if (!s_open && custom_driver)
 		{
 			ObGpuDropCustom("PCSX2 could not create its Vulkan device with it");
+			DecideSelfRead(t); // the system driver now: its own answer
 			s_open = GSopen(MakeOptions(t, true), t, s_basemem, vsync, false);
 		}
 #else
+		DecideSelfRead(t);
 		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t, s_child && s_visible), t, s_basemem, vsync, false);
 #endif
 		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d upscale=%g aspect=%s textures=%s serial=%s replacements=%s\n",
@@ -323,6 +352,12 @@ void ob_gs_init(ObGsRenderer renderer)
 {
 	std::lock_guard<std::mutex> lk(s_mu);
 	s_renderer = renderer;
+}
+
+void ob_gs_set_self_read(const char* mode)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	s_self_read = mode ? mode : "";
 }
 
 void ob_gs_set_gpu_driver(const char* name)

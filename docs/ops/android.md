@@ -96,6 +96,24 @@ How it works (`native/pcsx2_gs/adapter/gpu_driver*.{h,cpp}`, PCSX2 patch `upstre
   drivers are Android only`.
 - libadrenotools pin and license: `docs/ops/pins.md`, `CREDITS.md`.
 
+## Destination read (`gs_self_read`, PS2Recomp patch 0054)
+
+Some draws blend with the colour already drawn (J's Bar's light glows, the in-game menu's backdrop). PCSX2 2.9.134
+reads it in-pass on every device (framebuffer fetch where offered, else a texture barrier). Qualcomm's own Adreno
+driver returns stale colour there: on the Odin the glows came out as black disks and the menu backdrop black
+(`reports/2026-10-24-android.md` entries 11-12; ARMSX2 documents the same driver bug). The adapter decides per driver
+(`native/pcsx2_gs/adapter/gpu_driver.h` `DecideSelfRead`, host-tested in `ob_gpu_driver_tests`) before GSopen:
+
+- `gs_self_read = auto` (default): Qualcomm's proprietary driver (vendor 0x5143, driverName with "Qualcomm", not
+  Mesa/Turnip; no driverName counts as proprietary) -> `copy`; any other driver, and desktop (no probe) -> PCSX2's
+  choice. Logcat: `[gpu] self-read=copy (auto: Qualcomm's driver)` after the `[gpu] driver=` line.
+- `copy`: `OverrideTextureBarriers = 0` + `DisableFramebufferFetch` (the renderer reads a copy of the target);
+  `barrier`: `OverrideTextureBarriers = 1` + `DisableFramebufferFetch`; `fetch`: PCSX2's choice. Logged as
+  `(outbreak.ini)`. A bad value logs `[settings] line N: ...` and auto is used.
+- Verified on the Odin (2026-10-24, Adreno 830, driver 512.800.72): J's Bar glows and windows and the menu backdrop
+  match Windows; 60.0 fps mean over 4 min (`C:\ob\logs\odin-run3-copy.log`). Turnip and Mali keep PCSX2's choice
+  (not tested: no device); the Mali gaps of unmodified PCSX2 (push descriptors required) are open (entry 11).
+
 ## VU1 on arm64: vucompare on the device (each command needs the developer's "proceed")
 
 `tools/ob/vucompare_a64.sh` builds `native/pcsx2_vu/a64` standalone into `C:\ob\android-vu-build`: `libob_a64vu.so`

@@ -172,6 +172,51 @@ namespace
 		Check("line: unknown vendor", obgpu::VendorName(0x1234) == "0x1234");
 	}
 
+	void TestSelfRead()
+	{
+		using obgpu::SelfRead;
+		Check("self-read setting: empty = auto", obgpu::ParseSelfReadSetting("").mode == SelfRead::Auto);
+		Check("self-read setting: case and blanks", obgpu::ParseSelfReadSetting("  Copy ").mode == SelfRead::Copy);
+		Check("self-read setting: barrier, fetch", obgpu::ParseSelfReadSetting("barrier").mode == SelfRead::Barrier &&
+			obgpu::ParseSelfReadSetting("FETCH").mode == SelfRead::Fetch);
+		const obgpu::SelfReadChoice bad = obgpu::ParseSelfReadSetting("fast");
+		Check("self-read setting: rejected", bad.mode == SelfRead::Auto && !bad.error.empty(), bad.error);
+
+		obgpu::DeviceInfo qcom; // the Odin's line: Qualcomm(0x5143) ... (Qualcomm Technologies Inc. Adreno Vulkan Driver ...)
+		qcom.vendor_id = obgpu::kVendorQualcomm;
+		qcom.driver_name = "Qualcomm Technologies Inc. Adreno Vulkan Driver";
+		obgpu::DeviceInfo turnip = qcom;
+		turnip.driver_name = "turnip Mesa driver";
+		obgpu::DeviceInfo noname = qcom;
+		noname.driver_name.clear();
+		obgpu::DeviceInfo mali;
+		mali.vendor_id = 0x13B5;
+		mali.driver_name = "Mali-G715";
+		Check("qualcomm proprietary: yes", obgpu::IsQualcommProprietary(qcom));
+		Check("qualcomm proprietary: Turnip no", !obgpu::IsQualcommProprietary(turnip));
+		Check("qualcomm proprietary: no driver name counts", obgpu::IsQualcommProprietary(noname));
+		Check("qualcomm proprietary: Mali no", !obgpu::IsQualcommProprietary(mali));
+
+		const obgpu::SelfReadDecision a = obgpu::DecideSelfRead(SelfRead::Auto, &qcom);
+		Check("auto on Qualcomm = copy", a.override_texture_barriers == 0 && a.disable_framebuffer_fetch && a.road == "copy",
+			obgpu::SelfReadLine(a));
+		Check("auto line", obgpu::SelfReadLine(a) == "[gpu] self-read=copy (auto: Qualcomm's driver)", obgpu::SelfReadLine(a));
+		const obgpu::SelfReadDecision t = obgpu::DecideSelfRead(SelfRead::Auto, &turnip);
+		Check("auto on Turnip = PCSX2's choice", t.override_texture_barriers == -1 && !t.disable_framebuffer_fetch &&
+			t.road == "fetch" && t.why == "auto");
+		const obgpu::SelfReadDecision m = obgpu::DecideSelfRead(SelfRead::Auto, &mali);
+		Check("auto on Mali = PCSX2's choice (unchanged)", m.override_texture_barriers == -1 && !m.disable_framebuffer_fetch);
+		const obgpu::SelfReadDecision n = obgpu::DecideSelfRead(SelfRead::Auto, nullptr);
+		Check("auto without a probe (desktop) = PCSX2's choice", n.override_texture_barriers == -1 && !n.disable_framebuffer_fetch);
+		const obgpu::SelfReadDecision f = obgpu::DecideSelfRead(SelfRead::Fetch, &qcom);
+		Check("fetch forced on Qualcomm", f.override_texture_barriers == -1 && !f.disable_framebuffer_fetch &&
+			obgpu::SelfReadLine(f) == "[gpu] self-read=fetch (outbreak.ini)", obgpu::SelfReadLine(f));
+		const obgpu::SelfReadDecision b = obgpu::DecideSelfRead(SelfRead::Barrier, nullptr);
+		Check("barrier forced", b.override_texture_barriers == 1 && b.disable_framebuffer_fetch && b.road == "barrier");
+		const obgpu::SelfReadDecision c = obgpu::DecideSelfRead(SelfRead::Copy, &turnip);
+		Check("copy forced on Turnip", c.override_texture_barriers == 0 && c.disable_framebuffer_fetch);
+	}
+
 	void TestStamps()
 	{
 		const std::string a = obgpu::FormatStamps({{"vulkan.x.so", 100, 5}, {"meta.json", 7, 6}});
@@ -190,6 +235,7 @@ int main()
 	TestLibrary();
 	TestDecision();
 	TestLines();
+	TestSelfRead();
 	TestStamps();
 	std::printf("Passed: %d\nTotal Tests: %d\n", g_passed, g_total);
 	return g_passed == g_total ? 0 : 1;

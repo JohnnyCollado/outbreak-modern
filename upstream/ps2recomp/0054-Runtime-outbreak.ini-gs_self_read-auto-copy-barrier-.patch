@@ -1,0 +1,106 @@
+From cf07f631813928fda9fca730ac08faf519ea8ae0 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 18:02:07 -0400
+Subject: [PATCH] Runtime: outbreak.ini gs_self_read (auto|copy|barrier|fetch)
+ for an external GPU GS
+
+Records how an external GPU GS should read the colour already drawn when it blends with it. outbreak-modern's PCSX2 Vulkan adapter uses it: auto picks a copy of the target on Qualcomm's own Adreno driver (stale in-pass reads: black light glows on the Odin), PCSX2's choice elsewhere. A bad value is one [settings] line and leaves it unset; the start-up line shows it.
+---
+ ps2xRuntime/include/runtime/ps2_game_source.h |  5 +++++
+ ps2xRuntime/src/lib/ps2_game_source.cpp       | 12 +++++++++++-
+ ps2xTest/src/ps2_game_source_tests.cpp        | 19 +++++++++++++++++++
+ 3 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index 5edb54a..ca23849 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -22,6 +22,10 @@
+ //                       default) or a driver package in <files dir>/drivers/<name>/ (outbreak-modern
+ //                       native/pcsx2_gs/adapter/gpu_driver_android.cpp); recorded as given. Ignored elsewhere,
+ //                       with one "[settings] gpu_driver=... ignored" line
++//   gs_self_read = auto | copy | barrier | fetch   how an external GPU GS reads the colour already drawn when it
++//                       blends with it (outbreak-modern: PCSX2's Vulkan renderer; native/pcsx2_gs/adapter/gpu_driver.h
++//                       DecideSelfRead): auto (the default) = a copy of the target on Qualcomm's own Adreno driver,
++//                       PCSX2's choice elsewhere; copy / barrier / fetch force one road. Recorded only.
+ //   vu1 = mvu | interp  the VU1 backend when PS2X_VU1 is unset (PS2X_VU1 wins); unset = the platform default
+ //                       (Android with the external VU1: mvu, else interp; ps2_platform_defaults.h).
+ //   upscale = 1..8      render resolution multiplier of an external GPU GS (outbreak-modern: PCSX2's
+@@ -44,6 +48,7 @@ namespace ps2game
+         std::filesystem::path textures; // empty = not set
+         std::filesystem::path mods;     // empty = not set
+         std::string gpuDriver;          // gpu_driver as written; empty = not set (system)
++        std::string gsSelfRead;         // gs_self_read: auto|copy|barrier|fetch (lower case); empty = not set (auto)
+         std::string vu1;                // vu1: "mvu" or "interp" (lower case); empty = not set (platform default)
+         uint32_t upscale = 0u;          // upscale 1..8; 0 = not set (1)
+         uint32_t windowWidth = 0u;      // window W x H; 0 = not set (built-in size)
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index f356d78..e4f7756 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -148,6 +148,15 @@ namespace ps2game
+                 settings.gpuDriver = value; // a name, not a path: checked where it is used
+                 continue;
+             }
++            if (key == "gs_self_read")
++            {
++                const std::string mode = lower(value);
++                if (mode.empty() || mode == "auto" || mode == "copy" || mode == "barrier" || mode == "fetch")
++                    settings.gsSelfRead = mode;
++                else
++                    bad("gs_self_read must be auto, copy, barrier or fetch, not '" + value + "'");
++                continue;
++            }
+             if (key == "vu1")
+             {
+                 const std::string mode = lower(value);
+@@ -194,7 +203,7 @@ namespace ps2game
+                 target = &settings.mods;
+             else
+             {
+-                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, vu1, upscale, window)");
++                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, gs_self_read, vu1, upscale, window)");
+                 continue;
+             }
+             if (value.empty())
+@@ -278,6 +287,7 @@ namespace ps2game
+                   << " textures=" << (settings.textures.empty() ? "-" : settings.textures.string())
+                   << " mods=" << (settings.mods.empty() ? "-" : settings.mods.string())
+                   << " gpu_driver=" << (settings.gpuDriver.empty() ? "system" : settings.gpuDriver)
++                  << " gs_self_read=" << (settings.gsSelfRead.empty() ? "auto" : settings.gsSelfRead)
+                   << " vu1=" << (settings.vu1.empty() ? "-" : settings.vu1)
+                   << " upscale=" << (settings.upscale ? std::to_string(settings.upscale) : std::string("-"))
+                   << " window="
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 901ed05..f12ab94 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -372,6 +372,25 @@ void register_ps2_game_source_tests()
+                      "reason given: " + (messages.empty() ? std::string() : messages[0]));
+         });
+ 
++        tc.Run("settings: gs_self_read = auto|copy|barrier|fetch (any case); anything else is a bad line", [](TestCase &t)
++        {
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("GS_SELF_READ = Copy\n", {}, s, messages);
++            t.Equals(messages.size(), size_t{0}, "gs_self_read is a known key");
++            t.Equals(s.gsSelfRead, std::string("copy"), "recorded in lower case");
++            ps2game::parseSettingsIni("gs_self_read = fetch\ngs_self_read = barrier\n", {}, s, messages);
++            t.Equals(s.gsSelfRead, std::string("barrier"), "the last line wins");
++            ps2game::Settings bad;
++            ps2game::parseSettingsIni("gs_self_read = fast\n", {}, bad, messages);
++            t.Equals(messages.size(), size_t{1}, "one bad line");
++            t.IsTrue(bad.gsSelfRead.empty(), "a bad value leaves it unset");
++            t.IsTrue(messages[0].find("gs_self_read must be auto, copy, barrier or fetch") != std::string::npos,
++                     "reason: " + messages[0]);
++            ps2game::parseSettingsIni("gs_self_read =\n", {}, s, messages);
++            t.IsTrue(s.gsSelfRead.empty(), "an empty value clears");
++        });
++
+         tc.Run("settings: upscale = 1..8 and window = WxH; out-of-range values are bad lines that leave them unset",
+                [](TestCase &t)
+         {
+-- 
+2.46.2.windows.1
+

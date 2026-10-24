@@ -186,7 +186,7 @@ else()
     add_executable(ob_gs_ring_tests tests/gs_ring_tests.cpp)
     target_include_directories(ob_gs_ring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
     target_compile_options(ob_gs_ring_tests PRIVATE /EHsc) # <chrono>/<thread>; this directory strips /EHsc for PCSX2
-    add_executable(ob_pcsx2_gs_adapter_tests tests/adapter_tests.cpp adapter/pcsx2_side.cpp)
+    add_executable(ob_pcsx2_gs_adapter_tests tests/adapter_tests.cpp adapter/pcsx2_side.cpp adapter/gpu_driver.cpp)
     target_include_directories(ob_pcsx2_gs_adapter_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
     target_link_libraries(ob_pcsx2_gs_adapter_tests PRIVATE ob_pcsx2_gs)
     # Android GPU driver choice, pure part (adapter/gpu_driver.cpp): setting, meta.json, fall-back decision, log lines.
@@ -198,7 +198,8 @@ endif()
 # PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
 # and links ob_pcsx2_gs_adapter PRIVATE so PCSX2's PUBLIC defines/options never reach ps2_runtime.
 if(TARGET ps2_runtime)
-    add_library(ob_pcsx2_gs_adapter STATIC adapter/pcsx2_side.cpp)
+    # gpu_driver.cpp: the pure GPU-driver decisions (driver choice on Android, gs_self_read everywhere).
+    add_library(ob_pcsx2_gs_adapter STATIC adapter/pcsx2_side.cpp adapter/gpu_driver.cpp)
     target_include_directories(ob_pcsx2_gs_adapter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
     target_link_libraries(ob_pcsx2_gs_adapter PUBLIC ob_pcsx2_gs)
     if(ANDROID)
@@ -211,7 +212,7 @@ if(TARGET ps2_runtime)
         # (tools/ob/android.sh package takes them from <build>/adrenotools/src/hook).
         set(OB_ADRENOTOOLS "C:/ob/adrenotools" CACHE PATH "libadrenotools source tree (pinned commit)")
         add_subdirectory("${OB_ADRENOTOOLS}" "${CMAKE_BINARY_DIR}/adrenotools" EXCLUDE_FROM_ALL)
-        target_sources(ob_pcsx2_gs_adapter PRIVATE adapter/gpu_driver.cpp adapter/gpu_driver_android.cpp)
+        target_sources(ob_pcsx2_gs_adapter PRIVATE adapter/gpu_driver_android.cpp)
         target_link_libraries(ob_pcsx2_gs_adapter PRIVATE adrenotools)
         add_dependencies(ob_pcsx2_gs_adapter main_hook hook_impl)
     endif()

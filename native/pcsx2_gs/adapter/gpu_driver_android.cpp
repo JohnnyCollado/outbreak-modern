@@ -42,6 +42,8 @@ namespace Vulkan
 namespace
 {
 	std::string s_custom_name; // the custom driver handed to PCSX2; empty = system
+	obgpu::DeviceInfo s_device; // what the last probe of the driver PCSX2 opens found (ObGpuDevice)
+	bool s_device_ok = false;
 
 	void Log(const std::string& line)
 	{
@@ -162,8 +164,12 @@ namespace
 		void* sys = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL); // kept open: PCSX2 opens it next anyway
 		obgpu::DeviceInfo d;
 		std::string reason;
-		if (sys && Probe(sys, d, reason))
+		s_device_ok = sys && Probe(sys, d, reason);
+		if (s_device_ok)
+		{
+			s_device = d;
 			Log(obgpu::DriverLine(false, "", d));
+		}
 		else
 			Log("[gpu] driver=system (probe failed: " + (sys ? reason : std::string("dlopen libvulkan.so: ") + dlerror()) + ")");
 	}
@@ -399,8 +405,15 @@ bool ObGpuSelectDriver(const std::string& setting)
 	}
 	Vulkan::SetPreloadedVulkanLibrary(handle);
 	s_custom_name = name;
+	s_device = d;
+	s_device_ok = true;
 	Log(obgpu::DriverLine(true, name, d));
 	return true;
+}
+
+const obgpu::DeviceInfo* ObGpuDevice()
+{
+	return s_device_ok ? &s_device : nullptr;
 }
 
 void ObGpuDropCustom(const char* reason)

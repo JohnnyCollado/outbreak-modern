@@ -42,6 +42,12 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 ; Ignored on Windows. Steps: docs/ops/android.md "GPU driver".
 ; gpu_driver = system
 
+; gs_self_read: how the Vulkan renderer reads back what it has just drawn when a draw blends with it (light glows,
+; menu backgrounds). auto (the default) = through a copy of the picture on Qualcomm's own Adreno driver, whose fast
+; read returns stale colour (black glows), PCSX2's own choice everywhere else. copy / barrier / fetch force one way,
+; for testing a phone or driver. The log shows the choice: [gpu] self-read=... Steps: docs/ops/android.md.
+; gs_self_read = auto
+
 ; vu1: the PS2's second vector unit (it transforms the 3D geometry). mvu = a recompiler (fast: Windows PCSX2's
 ; microVU, Android ARMSX2's ARM64 microVU), interp = the interpreter (slow, the reference). Default: interp on
 ; Windows, mvu on Android. The PS2X_VU1 environment variable wins over this. If mvu cannot load or start, the log

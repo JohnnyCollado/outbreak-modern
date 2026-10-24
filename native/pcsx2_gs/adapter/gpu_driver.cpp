@@ -2,6 +2,7 @@
 #include "gpu_driver.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -462,6 +463,81 @@ namespace obgpu
 		std::snprintf(b, sizeof(b), " api=%u.%u.%u", d.api_version >> 22, (d.api_version >> 12) & 0x3FF, d.api_version & 0xFFF);
 		s += b;
 		return s;
+	}
+
+	SelfReadChoice ParseSelfReadSetting(std::string_view value)
+	{
+		size_t b = 0, e = value.size();
+		while (b < e && std::isspace(static_cast<unsigned char>(value[b])))
+			++b;
+		while (e > b && std::isspace(static_cast<unsigned char>(value[e - 1])))
+			--e;
+		std::string v;
+		for (char c : value.substr(b, e - b))
+			v += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		SelfReadChoice r;
+		if (v.empty() || v == "auto")
+			r.mode = SelfRead::Auto;
+		else if (v == "copy")
+			r.mode = SelfRead::Copy;
+		else if (v == "barrier")
+			r.mode = SelfRead::Barrier;
+		else if (v == "fetch")
+			r.mode = SelfRead::Fetch;
+		else
+			r.error = "gs_self_read=" + std::string(value) + " is not auto, copy, barrier or fetch";
+		return r;
+	}
+
+	bool IsQualcommProprietary(const DeviceInfo& d)
+	{
+		if (d.vendor_id != kVendorQualcomm)
+			return false;
+		if (d.driver_name.empty())
+			return true;
+		std::string n;
+		for (char c : d.driver_name)
+			n += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return n.find("qualcomm") != std::string::npos && n.find("mesa") == std::string::npos &&
+			   n.find("turnip") == std::string::npos;
+	}
+
+	SelfReadDecision DecideSelfRead(SelfRead setting, const DeviceInfo* device)
+	{
+		SelfReadDecision d;
+		SelfRead road = setting;
+		if (setting == SelfRead::Auto)
+		{
+			const bool qualcomm = device && IsQualcommProprietary(*device);
+			road = qualcomm ? SelfRead::Copy : SelfRead::Fetch;
+			d.why = qualcomm ? "auto: Qualcomm's driver" : "auto";
+		}
+		else
+			d.why = "outbreak.ini";
+		switch (road)
+		{
+			case SelfRead::Copy:
+				d.override_texture_barriers = 0;
+				d.disable_framebuffer_fetch = true;
+				d.road = "copy";
+				break;
+			case SelfRead::Barrier:
+				d.override_texture_barriers = 1;
+				d.disable_framebuffer_fetch = true;
+				d.road = "barrier";
+				break;
+			default:
+				d.override_texture_barriers = -1;
+				d.disable_framebuffer_fetch = false;
+				d.road = "fetch";
+				break;
+		}
+		return d;
+	}
+
+	std::string SelfReadLine(const SelfReadDecision& d)
+	{
+		return "[gpu] self-read=" + d.road + " (" + d.why + ")";
 	}
 
 	std::string FormatStamps(std::vector<FileStamp> files)
