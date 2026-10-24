@@ -30,7 +30,7 @@ ps2EntryRunner.exe at run time
   GS (graphics) .. PS2X_GS=cpu        PS2Recomp CPU rasteriser (fallback, unfixed)
                    PS2X_GS=pcsx2-sw   PCSX2 2.9.134 software GS (used to verify)
                    PS2X_GS=pcsx2-vk   PCSX2 2.9.134 Vulkan GS (the display path)
-  IOP ............ interpreter running the game's own IRX modules; runs in batches at its next event (patch 0042)
+  IOP ............ interpreter running the game's own IRX modules; runs in batches at its next event (patch 0042), one-compare checks per instruction (0049)
   SPU2 (sound) ... not producing sound yet
   window/input ... raylib window and pad (bindings: input.ini, patches 0038/0040); PCSX2 Vulkan draws into a child window;
                    title = frame counter

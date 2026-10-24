@@ -52,6 +52,11 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   EE banks cycles and the IOP runs when they reach its next event (thread wake, timer, DMA completion, callback),
   3072 EE cycles (PCSX2 `eeWaitCycles`), or an EE call into the IOP (RPC, SIF DMA/transfer, IOP memory, modules),
   which syncs it first. A performance switch, not a diagnostic.
+- `PS2X_IOP_FASTLOOP=0` (engine, patch 0049): the IOP interpreter's full checks after every instruction (take a
+  DMA start, walk the pending DMAs and callbacks, ask the import registry), as before 0049, for A/B speed runs;
+  stderr `[iop] fast loop off ...`. Default: each check is one inline compare (a DMA start flag, the earliest DMA
+  completion cycle, the `jr ra` word an import stub starts with), and the full work runs only when it can do
+  something. Same instructions and cycles either way (`ps2_iop_batch_tests`). A performance switch, not a diagnostic.
 - `PS2X_GS_THREAD=0` (adapter, `native/pcsx2_gs`): run every PCSX2 GS call inline on the game thread, as before the
   GS thread, for A/B speed runs; stderr `[pcsx2-gs] gs thread off`. Default (unset or anything else): PCSX2's MTGS
   scheme, a GS thread fed by an 8 MiB ring; the game thread stalls at a vsync while more than 2 are queued (PCSX2

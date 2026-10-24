@@ -1,0 +1,435 @@
+From ba5a2c5e26d442b1ed5e0c3b4b72190324e209a0 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 09:12:43 -0400
+Subject: [PATCH] IOP: cheaper per-instruction checks in the interpreter loop
+
+The interpreter did three pieces of bookkeeping after every IOP
+instruction, almost always for nothing:
+- schedulePendingDma(): an out-of-line call that copied and cleared the
+  memory's optional DMA start, although only a store to an SPU2 DMA
+  CHCR can set it. Now IopMemory::hasDmaStart() (inline) is tested at
+  the call site in step() and inside schedulePendingDma().
+- servicePendingDmaInterrupts(): walked the pending-DMA map after every
+  instruction while any DMA was pending, which with SPU2 streams taking
+  playback time (patch 0015) is most of the time. Now the earliest
+  completion cycle is kept (nextDmaCompletionCycle, recomputed when an
+  entry is added, replaced or completed) and the service runs only when
+  totalCycles reaches it. Guest callbacks likewise only when the first
+  is due.
+- imports.decode(pc): an out-of-line call that reads the word at pc and
+  returns nothing unless it is jr ra. Now that word is tested inline for
+  an aligned RAM pc (IopMemory::ramWord) before decode is called.
+- IopMemory::physicalAddress, called twice per instruction by step(), is
+  now inline in the header.
+
+The service calls do nothing when nothing is due, so the IOP executes
+the same instructions with the same cycle counts.
+IopSubsystem/IopEmulator::setFastLoop(false) restores the full checks;
+the runtime sets it for PS2X_IOP_FASTLOOP=0 (stderr "[iop] fast loop
+off"), for A/B speed runs.
+
+Tests (ps2_iop_batch_tests): an IRX thread starts a block SPU2 DMA
+(16 bytes, 3072 cycles) and a voice DMA (64 cycles) with CPU stores and
+counts its MADR polls until each completes: 17 and 752 polls,
+8017 instructions, the same with the fast loop on and off, batched and
+per checkpoint; a DelayThread wake (import stubs) is seen at the same
+EE cycle and a spinning thread runs the same instructions both ways.
+A speed-only change: these tests pass without it too (the project's
+fail-without rule is waived for this patch by the developer); breaking
+the deadline update makes the DMA test fail.
+---
+ ps2xIOP/include/ps2x/iop/iop_subsystem.h |   5 +
+ ps2xIOP/src/emulator/core/iop_memory.cpp |   5 -
+ ps2xIOP/src/emulator/core/iop_memory.h   |  13 ++-
+ ps2xIOP/src/emulator/iop_emulator.cpp    |  49 +++++++++-
+ ps2xIOP/src/emulator/iop_emulator.h      |   2 +
+ ps2xIOP/src/iop_subsystem.cpp            |  10 ++
+ ps2xIOP/tests/iop_batch_tests.cpp        | 111 ++++++++++++++++++++++-
+ ps2xRuntime/src/lib/ps2_runtime.cpp      |   7 ++
+ 8 files changed, 193 insertions(+), 9 deletions(-)
+
+diff --git a/ps2xIOP/include/ps2x/iop/iop_subsystem.h b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+index 3f304b8..3ddf1e8 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_subsystem.h
++++ b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+@@ -36,6 +36,11 @@ namespace ps2x::iop
+         // at every runEeCycles call (per checkpoint), as before. A performance switch; default on.
+         void setEeBatching(bool enabled) noexcept;
+         [[nodiscard]] bool eeBatching() const noexcept;
++        // Patch 0049: the interpreter's per-instruction checks (DMA start, DMA/callback due, import stub) are
++        // one inline compare each. Off: the full checks after every instruction, as before. Same results
++        // either way; a performance switch, default on.
++        void setFastLoop(bool enabled) noexcept;
++        [[nodiscard]] bool fastLoop() const noexcept;
+         // Run the IOP up to the EE's time now.
+         void syncEe() noexcept;
+ 
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index 23ca035..92deea1 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -40,11 +40,6 @@ namespace ps2x::iop::detail
+         m_dmaStart.reset();
+     }
+ 
+-    uint32_t IopMemory::physicalAddress(uint32_t address) noexcept
+-    {
+-        return address & 0x1FFFFFFFu;
+-    }
+-
+     uint8_t IopMemory::read8(uint32_t address) const
+     {
+         const uint32_t phys = physicalAddress(address);
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index ece10a3..842cdac 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -2,6 +2,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <cstring>
+ #include <optional>
+ #include <span>
+ #include <string>
+@@ -70,10 +71,20 @@ namespace ps2x::iop::detail
+         void setInterruptControl(uint32_t value) noexcept { m_interruptControl = value & 1u; }
+ 
+         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
++        // Inline checks for the interpreter's per-instruction path (patch 0049): is a DMA start waiting to be
++        // taken, and the RAM word at a 4-aligned physical address below RamSize.
++        [[nodiscard]] bool hasDmaStart() const noexcept { return m_dmaStart.has_value(); }
++        [[nodiscard]] uint32_t ramWord(uint32_t phys) const noexcept
++        {
++            uint32_t value;
++            std::memcpy(&value, m_ram.data() + phys, sizeof(value));
++            return value;
++        }
+         void completeDma(const DmaStart &dma);
+         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
+ 
+-        [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;
++        // Inline: the interpreter calls it for every instruction (patch 0049).
++        [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept { return address & 0x1FFFFFFFu; }
+ 
+     private:
+         [[nodiscard]] uint32_t readHardware32(uint32_t address) const;
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index b226da8..81b82d6 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -30,6 +30,7 @@ namespace ps2x::iop::detail
+     namespace
+     {
+         constexpr uint32_t kRamSize = IopMemory::RamSize;
++        constexpr uint32_t kImportStubFirstWord = 0x03E00008u; // jr ra (IopImportRegistry::decode)
+         constexpr uint32_t kKernelHeapBase = IopMemory::HeapBase;
+         constexpr uint32_t kKernelHeapLimit = IopMemory::HeapLimit;
+         constexpr uint32_t kCallStackBase = kKernelHeapLimit;
+@@ -133,6 +134,7 @@ namespace ps2x::iop::detail
+             timrman.reset();
+             ioman.reset();
+             pendingDmaInterrupts.clear();
++            nextDmaCompletionCycle = UINT64_MAX;
+             pendingGuestCallbacks.clear();
+             nextModuleId = 1;
+             moduleCursor = kModuleLoadBase;
+@@ -186,8 +188,22 @@ namespace ps2x::iop::detail
+ 
+         void schedulePendingDma()
+         {
++            if (fastLoop && !memory.hasDmaStart())
++                return;
+             if (const auto dma = memory.takeDmaStart())
++            {
+                 pendingDmaInterrupts[dma->irq] = PendingDma{totalCycles + dma->delayCycles, *dma};
++                updateNextDmaCompletion();
++            }
++        }
++
++        // The earliest completion cycle in pendingDmaInterrupts (UINT64_MAX: none), so the per-instruction
++        // check is one compare (patch 0049). A restart of a channel replaces its entry: recompute, don't min.
++        void updateNextDmaCompletion() noexcept
++        {
++            nextDmaCompletionCycle = UINT64_MAX;
++            for (const auto &[irq, pending] : pendingDmaInterrupts)
++                nextDmaCompletionCycle = std::min(nextDmaCompletionCycle, pending.completionCycle);
+         }
+ 
+         bool readRam(uint32_t address, void *destination, size_t size) const
+@@ -394,7 +410,12 @@ namespace ps2x::iop::detail
+             if (checkInterrupt(cpu))
+                 return true;
+ 
+-            if (const auto import = imports.decode(cpu.pc))
++            // decode() returns nothing unless the word at pc is `jr ra` (an import stub's first word): test that
++            // inline first for an aligned RAM pc, the only case where decode()'s read32 is this same RAM read.
++            const uint32_t physicalPc = physicalAddress(cpu.pc);
++            const bool maybeImport = !fastLoop || (physicalPc & 3u) != 0u ||
++                                     memory.ramWord(physicalPc) == kImportStubFirstWord;
++            if (const auto import = maybeImport ? imports.decode(cpu.pc) : std::nullopt)
+             {
+                 const ImportDisposition disposition = dispatchImport(*import, cpu);
+                 ++totalInstructions;
+@@ -407,7 +428,8 @@ namespace ps2x::iop::detail
+             }
+ 
+             const bool running = cpuCore.executeInstruction(cpu);
+-            schedulePendingDma();
++            if (!fastLoop || memory.hasDmaStart())
++                schedulePendingDma();
+             ++totalInstructions;
+             ++totalCycles;
+             return running;
+@@ -422,6 +444,16 @@ namespace ps2x::iop::detail
+             {
+                 if (!step(cpu))
+                     break;
++                if (fastLoop)
++                {
++                    // Patch 0049: only when something is due. The service calls do nothing otherwise.
++                    if (!servicingDmaInterrupts && totalCycles >= nextDmaCompletionCycle)
++                        servicePendingDmaInterrupts();
++                    if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty() &&
++                        pendingGuestCallbacks.begin()->first <= totalCycles)
++                        servicePendingGuestCallbacks();
++                    continue;
++                }
+                 if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
+                     servicePendingDmaInterrupts();
+                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+@@ -516,6 +548,7 @@ namespace ps2x::iop::detail
+                 completed.push_back(it->first);
+                 it = pendingDmaInterrupts.erase(it);
+             }
++            updateNextDmaCompletion();
+             try
+             {
+                 for (const int irq : completed)
+@@ -853,12 +886,14 @@ namespace ps2x::iop::detail
+             IopMemory::DmaStart dma;
+         };
+         std::map<int, PendingDma> pendingDmaInterrupts;
++        uint64_t nextDmaCompletionCycle = UINT64_MAX; // earliest completionCycle above (patch 0049)
+         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
+         uint32_t nextModuleId = 1;
+         uint32_t moduleCursor = kModuleLoadBase;
+         uint64_t totalCycles = 0;
+         uint64_t totalInstructions = 0;
+         bool eeBatching = true;       // patch 0042; a setting, kept across reset()
++        bool fastLoop = true;         // patch 0049: cheap per-instruction checks; a setting, kept across reset()
+         uint64_t pendingEeCycles = 0; // EE cycles the IOP has not run yet (with the sub-IOP-cycle remainder)
+         uint64_t flushAtEeCycles = 0; // run the IOP when pendingEeCycles reaches this (0: at the next checkpoint)
+         uint32_t iopDepth = 0u;       // > 0 while IOP code runs (runCycles or an EE call into the IOP)
+@@ -928,6 +963,16 @@ namespace ps2x::iop::detail
+         return m_impl->eeBatching;
+     }
+ 
++    void IopEmulator::setFastLoop(bool enabled) noexcept
++    {
++        m_impl->fastLoop = enabled;
++    }
++
++    bool IopEmulator::fastLoop() const noexcept
++    {
++        return m_impl->fastLoop;
++    }
++
+     uint64_t IopEmulator::pendingEeCycles() const noexcept
+     {
+         return m_impl->pendingEeCycles;
+diff --git a/ps2xIOP/src/emulator/iop_emulator.h b/ps2xIOP/src/emulator/iop_emulator.h
+index fa71471..a861850 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.h
++++ b/ps2xIOP/src/emulator/iop_emulator.h
+@@ -31,6 +31,8 @@ namespace ps2x::iop::detail
+         void syncEe() noexcept;
+         void setEeBatching(bool enabled) noexcept;
+         [[nodiscard]] bool eeBatching() const noexcept;
++        void setFastLoop(bool enabled) noexcept;
++        [[nodiscard]] bool fastLoop() const noexcept;
+         [[nodiscard]] uint64_t pendingEeCycles() const noexcept;
+         [[nodiscard]] uint64_t runCount() const noexcept;
+         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index 99a0a02..5927838 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -191,6 +191,16 @@ namespace ps2x::iop
+         return m_impl->emulator.eeBatching();
+     }
+ 
++    void IopSubsystem::setFastLoop(bool enabled) noexcept
++    {
++        m_impl->emulator.setFastLoop(enabled);
++    }
++
++    bool IopSubsystem::fastLoop() const noexcept
++    {
++        return m_impl->emulator.fastLoop();
++    }
++
+     void IopSubsystem::syncEe() noexcept
+     {
+         m_impl->emulator.syncEe();
+diff --git a/ps2xIOP/tests/iop_batch_tests.cpp b/ps2xIOP/tests/iop_batch_tests.cpp
+index c8893c2..c0f1fa2 100644
+--- a/ps2xIOP/tests/iop_batch_tests.cpp
++++ b/ps2xIOP/tests/iop_batch_tests.cpp
+@@ -121,11 +121,12 @@ namespace
+     }
+ 
+     // The EE cycle (after the thread is delayed) at which the woken thread's putchar is seen.
+-    uint64_t wakeSeenAt(bool batching, uint64_t &runs)
++    uint64_t wakeSeenAt(bool batching, uint64_t &runs, bool fastLoop = true)
+     {
+         Host host;
+         IopSubsystem iop(host);
+         iop.setEeBatching(batching);
++        iop.setFastLoop(fastLoop);
+         load(iop, host, delayThenMarkModule());
+         iop.runEeCycles(8u * 64u); // the thread starts and calls DelayThread
+         iop.syncEe();
+@@ -195,6 +196,112 @@ namespace
+                     "an EE call into the IOP must first run the IOP up to the EE's time");
+         }
+     }
++
++    // Patch 0049 (the fast loop) must not change what the IOP computes or when. The thread starts two SPU2
++    // DMAs with CPU stores to the channel registers: core 0 a block (streaming) transfer of 16 bytes
++    // (16 x 192 = 3072 cycles), core 1 a voice transfer (64 cycles). It polls each channel's MADR, which moves
++    // past the data when the DMA completes, counting its reads, and stores the counts (core 1, core 0) and a
++    // done flag at IOP 0x20000. The counts pin each completion to the instruction.
++    Irx spu2DmaModule()
++    {
++        return threadModule({
++            0x00008821u, 0x00009021u, // s1 = s2 = 0
++            0x3C081F80u,              // lui t0, 0x1F80
++            0x3C0B1F90u,              // lui t3, 0x1F90
++            0x340C0001u,              // ori t4, zero, 1
++            0xAD6C01B0u,              // sw t4, 0x1B0(t3): core 0 block-transfer mode (libsd)
++            0x3C090001u, 0x35292000u, // t1 = 0x12000 (MADR)
++            0x3C0A0001u, 0x354A0004u, // t2 = 1 block of 4 words (BCR)
++            0x3C0D0100u, 0x35AD0201u, // t5 = 0x01000201 (CHCR: start)
++            0xAD0910C0u, 0xAD0A10C4u, // core 0 MADR, BCR
++            0xAD091500u, 0xAD0A1504u, // core 1 MADR, BCR
++            0xAD0D10C8u,              // start core 0
++            0xAD0D1508u,              // start core 1
++            0x252E0010u,              // t6 = 0x12010: MADR after the transfer
++            0x8D0F1500u, 0x26310001u, 0x15EEFFFDu, 0u, // poll core 1 MADR, ++s1
++            0x8D0F10C0u, 0x26520001u, 0x15EEFFFDu, 0u, // poll core 0 MADR, ++s2
++            0x3C130002u,                                // s3 = 0x20000
++            0xAE710000u, 0xAE720004u,                   // store s1, s2
++            0x24140001u, 0xAE740008u,                   // store done = 1 (s4)
++            0x1000FFFFu, 0u,                            // b .
++        });
++    }
++
++    struct DmaRun
++    {
++        uint32_t voicePolls = 0u; // MADR reads until the core 1 DMA completed: its completion instruction
++        uint32_t blockPolls = 0u; // ... core 0
++        uint64_t cycles = 0u;
++        uint64_t instructions = 0u;
++    };
++
++    DmaRun runSpu2Dma(bool fastLoop, bool batching)
++    {
++        Host host;
++        IopSubsystem iop(host);
++        iop.setFastLoop(fastLoop);
++        iop.setEeBatching(batching);
++        require(iop.fastLoop() == fastLoop, "setFastLoop did not take");
++        load(iop, host, spu2DmaModule());
++        for (uint32_t i = 0; i < 2000u; ++i) // 64000 EE cycles = 8000 IOP cycles, past both DMAs
++            iop.runEeCycles(kEeCheckpoint);
++        iop.syncEe();
++        DmaRun run;
++        uint32_t polls[3]{};
++        require(iop.readMemory(0x20000u, polls, sizeof(polls)), "could not read the poll counts");
++        require(polls[2] == 1u, "the thread did not get past both DMAs");
++        run.voicePolls = polls[0];
++        run.blockPolls = polls[1];
++        const DebugSnapshot after = iop.debugSnapshot();
++        run.cycles = after.emulatorCycles;
++        run.instructions = after.emulatorInstructions;
++        return run;
++    }
++
++    void fastLoopKeepsDmaTiming()
++    {
++        for (const bool batching : {true, false})
++        {
++            const DmaRun off = runSpu2Dma(false, batching);
++            const DmaRun on = runSpu2Dma(true, batching);
++            std::cout << "  " << (batching ? "batched" : "per-checkpoint") << ": polls core 1 " << off.voicePolls
++                      << " / " << on.voicePolls << ", core 0 " << off.blockPolls << " / " << on.blockPolls
++                      << ", instructions " << off.instructions << " / " << on.instructions << " (full checks / fast loop)\n";
++            // The voice DMA takes 64 cycles, the block DMA 3072 (one poll = 4 instructions = 4 cycles).
++            require(off.voicePolls >= 8u && off.voicePolls <= 32u, "the voice transfer did not take ~64 cycles");
++            require(off.voicePolls * 4u + off.blockPolls * 4u >= 3072u, "the block transfer finished before its playback time");
++            require(on.voicePolls == off.voicePolls && on.blockPolls == off.blockPolls,
++                    "the fast loop changed when a DMA completed");
++            require(on.cycles == off.cycles && on.instructions == off.instructions,
++                    "the fast loop changed how many IOP instructions ran");
++        }
++    }
++
++    // The fast loop's import pre-check: stub calls (DelayThread, putchar) still dispatch at the same EE cycle,
++    // and a thread that never calls one runs the same instructions both ways.
++    void fastLoopKeepsImportsAndPlainCode()
++    {
++        uint64_t runsOff = 0u, runsOn = 0u;
++        const uint64_t off = wakeSeenAt(true, runsOff, false);
++        const uint64_t on = wakeSeenAt(true, runsOn, true);
++        require(on == off && runsOn == runsOff, "the fast loop changed when an import call's wake was seen");
++        const Irx spin = spinModule();
++        auto spinRun = [&](bool fastLoop) {
++            Host host;
++            IopSubsystem iop(host);
++            iop.setFastLoop(fastLoop);
++            load(iop, host, spin);
++            for (int i = 0; i < 4000; ++i)
++                iop.runEeCycles(kEeCheckpoint);
++            iop.syncEe();
++            return iop.debugSnapshot().emulatorInstructions;
++        };
++        const uint64_t spinOff = spinRun(false);
++        const uint64_t spinOn = spinRun(true);
++        std::cout << "  spinning thread: " << spinOff << " / " << spinOn << " instructions; DelayThread wake at EE +"
++                  << off << " / +" << on << " (full checks / fast loop)\n";
++        require(spinOn == spinOff, "the fast loop changed a plain thread's instruction count");
++    }
+ }
+ 
+ int main()
+@@ -203,6 +310,8 @@ int main()
+         {"batching runs the IOP fewer times for the same EE cycles", batchingRunsTheIopFewerTimes},
+         {"an IOP event fires no later than its EE deadline", iopEventFiresOnTime},
+         {"an EE call into the IOP (SIF, RPC, memory) syncs it first", eeCallsIntoTheIopSyncFirst},
++        {"the fast loop completes SPU2 DMAs at the same cycles", fastLoopKeepsDmaTiming},
++        {"the fast loop keeps import calls and plain code", fastLoopKeepsImportsAndPlainCode},
+     };
+     return run(tests);
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 8aef221..32de966 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -552,6 +552,13 @@ PS2Runtime::PS2Runtime()
+             m_iopSubsystem->setEeBatching(false);
+             std::cerr << "[iop] batching off (PS2X_IOP_BATCH=0): the IOP runs at every EE checkpoint" << std::endl;
+         }
++        // PS2X_IOP_FASTLOOP=0: the interpreter's full per-instruction checks (pre-0049). Same results; A/B runs.
++        const char *iopFastLoopEnv = std::getenv("PS2X_IOP_FASTLOOP");
++        if (iopFastLoopEnv && std::string_view(iopFastLoopEnv) == "0")
++        {
++            m_iopSubsystem->setFastLoop(false);
++            std::cerr << "[iop] fast loop off (PS2X_IOP_FASTLOOP=0): full checks after every IOP instruction" << std::endl;
++        }
+     }
+ 
+     m_eeScheduler = std::make_unique<EeScheduler>(*this);
+-- 
+2.46.2.windows.1
+
