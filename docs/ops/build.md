@@ -114,6 +114,9 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
   after the window `StackWalk64` unwinds each copy (code read live) and the report adds, for the thread's top 12
   functions, their most frequent 3-frame caller chains. Export-only DLLs (VCRUNTIME140) name a sample after the
   nearest export, so `memchr` there can be any copy routine: read its callers, not its name (2026-10-24).
+- Lines: `--lines processVIF1Data` (a substring of a function name) adds, per busy thread, that function's samples by
+  source line (`SymGetLineFromAddr64`, the PDB of an `OB_PROFILE=1` build). Optimised code smears lines a little: read
+  the hottest few lines and the code around them.
 - Developer run: `play-profile.bat` (git-ignored, beside `play.bat`: the same line on `C:\ob\r-profile`), walk into
   J's Bar, run the hostprof command above from a second shell.
 

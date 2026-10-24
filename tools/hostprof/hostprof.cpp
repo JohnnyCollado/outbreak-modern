@@ -144,6 +144,7 @@ struct Args {
     std::string out;
     uint64_t minCycles = 50000;
     std::string stacks; // thread name for --stacks; empty = off
+    std::string lines;  // --lines FUNC: per source line breakdown of that function's samples (substring match)
 };
 
 bool parseArgs(int argc, char** argv, Args& a) {
@@ -161,6 +162,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (k == "--out") { if (!(v = val("--out"))) return false; a.out = v; }
         else if (k == "--min-cycles") { if (!(v = val("--min-cycles"))) return false; a.minCycles = std::strtoull(v, nullptr, 10); }
         else if (k == "--stacks") { if (!(v = val("--stacks"))) return false; a.stacks = v; }
+        else if (k == "--lines") { if (!(v = val("--lines"))) return false; a.lines = v; }
         else { std::fprintf(stderr, "hostprof: unknown argument %s\n", argv[i]); return false; }
     }
     if ((a.pid == 0) == a.name.empty()) { std::fprintf(stderr, "hostprof: give exactly one of --pid N, --name EXE\n"); return false; }
@@ -236,7 +238,7 @@ int main(int argc, char** argv) {
     Args a;
     if (!parseArgs(argc, argv, a)) {
         std::fprintf(stderr, "usage: hostprof (--pid N | --name EXE) [--secs 30] [--hz 1000] [--out FILE] [--min-cycles 50000]"
-                             " [--stacks THREAD]\n");
+                             " [--stacks THREAD] [--lines FUNC]\n");
         return 2;
     }
     if (!a.name.empty()) {
@@ -465,6 +467,34 @@ int main(int argc, char** argv) {
                          k.module.substr(0, 28).c_str(), k.name.c_str());
         }
         std::fprintf(out, "\n");
+        if (!a.lines.empty()) {
+            // --lines: the thread's samples in functions whose name contains a.lines, by source line (PDB lines).
+            std::map<std::pair<std::string, DWORD>, uint64_t> byLine;
+            uint64_t inFunc = 0;
+            for (size_t s = 0; s < n; ++s) {
+                if (samples[s].thread != i || sym.funcs[fid[s]].name.find(a.lines) == std::string::npos) continue;
+                ++inFunc;
+                IMAGEHLP_LINE64 ln{};
+                ln.SizeOfStruct = sizeof(ln);
+                DWORD disp = 0;
+                if (SymGetLineFromAddr64(proc, samples[s].rip, &disp, &ln)) {
+                    std::string file = ln.FileName ? ln.FileName : "?";
+                    file = file.substr(file.find_last_of("\\/") + 1);
+                    ++byLine[{file, ln.LineNumber}];
+                } else {
+                    ++byLine[{"(no line)", 0}];
+                }
+            }
+            if (inFunc) {
+                std::vector<std::pair<std::pair<std::string, DWORD>, uint64_t>> ls(byLine.begin(), byLine.end());
+                std::sort(ls.begin(), ls.end(), [](auto& x, auto& y) { return x.second > y.second; });
+                std::fprintf(out, "   lines of *%s* (%llu samples):\n", a.lines.c_str(), (unsigned long long)inFunc);
+                for (size_t l = 0; l < ls.size() && l < 25; ++l)
+                    std::fprintf(out, "      %5.1f%%  %s:%lu\n", pct(ls[l].second, inFunc), ls[l].first.first.c_str(),
+                                 ls[l].first.second);
+                std::fprintf(out, "\n");
+            }
+        }
         if (!t.wantStack || stackN == 0)
             continue;
         // --stacks: callers of the top functions, from StackWalk64 over each sample's copied stack.
