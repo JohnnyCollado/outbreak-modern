@@ -149,7 +149,9 @@ backend interface, privileged registers, readback, present and vblank).
 
 ## High resolution, widescreen, texture packs (2026-10-24, PS2Recomp 0050)
 
-All three are off by default, so the gate and every default run are unchanged. Set in `outbreak.ini`
+On Windows all three are off by default, so the gate and every default run are unchanged. On Android an unset
+`upscale` is 3 and `scaling` (PS2Recomp 0055, `smooth|sharp`, PCSX2's `LinearPresent`) is smooth; on Windows 1 and
+sharp (`adapter/pcsx2_side.cpp` `kDefaultUpscale`/`kDefaultSmooth`; `reports/2026-10-24-android.md` entries 14-15). Set in `outbreak.ini`
 (`native/outbreak.ini.example`); shown in the start-up line `[pcsx2-gs] open ... upscale=N aspect=A textures=T
 serial=S replacements=found|none|not built`.
 - **Upscale** (`upscale = 1..8`): `GSOptions.UpscaleMultiplier` in `MakeOptions` (`adapter/pcsx2_side.cpp`), Vulkan

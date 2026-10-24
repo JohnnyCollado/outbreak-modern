@@ -1,0 +1,109 @@
+From d0bcc828447ca575aab97d6ed3904be0c5842681 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 18:52:55 -0400
+Subject: [PATCH] Runtime: outbreak.ini scaling (smooth|sharp) for an external
+ GPU GS; upscale unset = the GS's platform default
+
+Records how an external GPU GS stretches the finished picture to the window. outbreak-modern's PCSX2 adapter: smooth (bilinear present) by default on Android, sharp (nearest) elsewhere; with upscale unset it renders at 3x on Android, 1x elsewhere. A bad value is one [settings] line and leaves it unset; the start-up line shows it.
+---
+ ps2xRuntime/include/runtime/ps2_game_source.h |  9 +++++++--
+ ps2xRuntime/src/lib/ps2_game_source.cpp       | 12 +++++++++++-
+ ps2xTest/src/ps2_game_source_tests.cpp        | 18 ++++++++++++++++++
+ 3 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index ca23849..653a1b3 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -29,7 +29,11 @@
+ //   vu1 = mvu | interp  the VU1 backend when PS2X_VU1 is unset (PS2X_VU1 wins); unset = the platform default
+ //                       (Android with the external VU1: mvu, else interp; ps2_platform_defaults.h).
+ //   upscale = 1..8      render resolution multiplier of an external GPU GS (outbreak-modern: PCSX2's
+-//                       UpscaleMultiplier, Vulkan renderer only); unset = 1 (native)
++//                       UpscaleMultiplier, Vulkan renderer only); unset = the GS's platform default (outbreak-modern:
++//                       3 on Android, 1 elsewhere)
++//   scaling = smooth | sharp   how an external GPU GS stretches the finished picture to the window (outbreak-modern:
++//                       PCSX2's LinearPresent, bilinear or nearest); unset = the GS's platform default
++//                       (outbreak-modern: smooth on Android, sharp elsewhere)
+ //   window = <W>x<H>    the host window's size at start-up (e.g. 1280x960); unset = the built-in size
+ // A bad line is reported once ("[settings] line N: ...") and ignored.
+ 
+@@ -50,7 +54,8 @@ namespace ps2game
+         std::string gpuDriver;          // gpu_driver as written; empty = not set (system)
+         std::string gsSelfRead;         // gs_self_read: auto|copy|barrier|fetch (lower case); empty = not set (auto)
+         std::string vu1;                // vu1: "mvu" or "interp" (lower case); empty = not set (platform default)
+-        uint32_t upscale = 0u;          // upscale 1..8; 0 = not set (1)
++        uint32_t upscale = 0u;          // upscale 1..8; 0 = not set (the GS's platform default)
++        std::string scaling;            // scaling: "smooth" or "sharp" (lower case); empty = not set
+         uint32_t windowWidth = 0u;      // window W x H; 0 = not set (built-in size)
+         uint32_t windowHeight = 0u;
+     };
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index e4f7756..a09ea4a 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -166,6 +166,15 @@ namespace ps2game
+                     bad("vu1 must be mvu or interp, not '" + value + "'");
+                 continue;
+             }
++            if (key == "scaling")
++            {
++                const std::string mode = lower(value);
++                if (mode.empty() || mode == "smooth" || mode == "sharp")
++                    settings.scaling = mode;
++                else
++                    bad("scaling must be smooth or sharp, not '" + value + "'");
++                continue;
++            }
+             if (key == "upscale")
+             {
+                 uint32_t n = 0u;
+@@ -203,7 +212,7 @@ namespace ps2game
+                 target = &settings.mods;
+             else
+             {
+-                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, gs_self_read, vu1, upscale, window)");
++                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, gs_self_read, vu1, upscale, scaling, window)");
+                 continue;
+             }
+             if (value.empty())
+@@ -290,6 +299,7 @@ namespace ps2game
+                   << " gs_self_read=" << (settings.gsSelfRead.empty() ? "auto" : settings.gsSelfRead)
+                   << " vu1=" << (settings.vu1.empty() ? "-" : settings.vu1)
+                   << " upscale=" << (settings.upscale ? std::to_string(settings.upscale) : std::string("-"))
++                  << " scaling=" << (settings.scaling.empty() ? "-" : settings.scaling)
+                   << " window="
+                   << (settings.windowWidth ? std::to_string(settings.windowWidth) + "x" + std::to_string(settings.windowHeight)
+                                            : std::string("-"))
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index f12ab94..d76612a 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -391,6 +391,24 @@ void register_ps2_game_source_tests()
+             t.IsTrue(s.gsSelfRead.empty(), "an empty value clears");
+         });
+ 
++        tc.Run("settings: scaling = smooth|sharp (any case); anything else is a bad line", [](TestCase &t)
++        {
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("Scaling = SHARP\n", {}, s, messages);
++            t.Equals(messages.size(), size_t{0}, "scaling is a known key");
++            t.Equals(s.scaling, std::string("sharp"), "recorded in lower case");
++            ps2game::parseSettingsIni("scaling = smooth\n", {}, s, messages);
++            t.Equals(s.scaling, std::string("smooth"), "smooth");
++            ps2game::Settings bad;
++            ps2game::parseSettingsIni("scaling = bilinear\n", {}, bad, messages);
++            t.Equals(messages.size(), size_t{1}, "one bad line");
++            t.IsTrue(bad.scaling.empty(), "a bad value leaves it unset");
++            t.IsTrue(messages[0].find("scaling must be smooth or sharp") != std::string::npos, "reason: " + messages[0]);
++            ps2game::parseSettingsIni("scaling =\n", {}, s, messages);
++            t.IsTrue(s.scaling.empty(), "an empty value clears");
++        });
++
+         tc.Run("settings: upscale = 1..8 and window = WxH; out-of-range values are bad lines that leave them unset",
+                [](TestCase &t)
+         {
+-- 
+2.46.2.windows.1
+

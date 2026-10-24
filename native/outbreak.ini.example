@@ -28,9 +28,13 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 ;   patch=1,EE,20239d48,extended,3fe38e38
 ; mods = D:\Games\PS2\mods
 
-; upscale: render resolution multiplier, 1 (native, the default) to 8. Vulkan renderer only (PS2X_GS=pcsx2-vk);
-; 3 is about 1080p. Make the window bigger to see the detail (window below, or resize it).
+; upscale: render resolution multiplier, 1 (native) to 8. Vulkan renderer only (PS2X_GS=pcsx2-vk); 3 is about
+; 1080p. Default: 3 on Android, 1 on Windows. Make the window bigger to see the detail (window below, or resize it).
 ; upscale = 3
+
+; scaling: how the finished picture is stretched to the window: smooth (bilinear) or sharp (nearest, hard pixel
+; edges). Default: smooth on Android, sharp on Windows.
+; scaling = smooth
 
 ; window: the window's size at start-up, <width>x<height> (at least 320x224). Default: 640x448, or 797x448 with a
 ; 16:9 pnach. The window can be resized while playing.

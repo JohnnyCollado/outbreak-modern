@@ -66,7 +66,18 @@ namespace
 	std::string s_gpu_driver;           // outbreak.ini gpu_driver (ob_gs_set_gpu_driver); used on Android only
 	std::string s_self_read;            // outbreak.ini gs_self_read (ob_gs_set_self_read)
 	obgpu::SelfReadDecision s_self_read_road; // decided at GSopen from s_self_read and the driver (MakeOptions)
-	float s_upscale = 1.0f;             // outbreak.ini upscale (ob_gs_set_display)
+	// Platform defaults for unset outbreak.ini keys: on Android (the developer's platform from 2026-10-24) a 3x
+	// render presented smoothly at the display's resolution, 60 fps in J's Bar on the Odin
+	// (reports/2026-10-24-android.md entry 14); elsewhere native and sharp, as the gate runs.
+#if defined(__ANDROID__)
+	constexpr float kDefaultUpscale = 3.0f;
+	constexpr bool kDefaultSmooth = true;
+#else
+	constexpr float kDefaultUpscale = 1.0f;
+	constexpr bool kDefaultSmooth = false;
+#endif
+	float s_upscale = kDefaultUpscale;  // outbreak.ini upscale (ob_gs_set_display)
+	bool s_smooth = kDefaultSmooth;     // outbreak.ini scaling (ob_gs_set_scaling)
 	AspectRatioType s_aspect = AspectRatioType::RAuto4_3_3_2; // pnach gsaspectratio (ob_gs_set_display)
 	std::string s_textures;             // outbreak.ini textures root (ob_gs_set_textures); empty = off
 
@@ -209,14 +220,14 @@ namespace
 	{
 		Pcsx2Config::GSOptions o;
 		o.Renderer = r;
-		o.UpscaleMultiplier = s_upscale; // 1 unless outbreak.ini upscale; the SW renderer ignores it
+		o.UpscaleMultiplier = s_upscale; // outbreak.ini upscale, else kDefaultUpscale; the SW renderer ignores it
 		o.AspectRatio = s_aspect;
 #if defined(OB_TEXTURE_REPLACEMENTS)
 		// Texture packs (outbreak.ini textures): loaded on demand on a worker thread, as PCSX2's defaults.
 		o.LoadTextureReplacements = !s_textures.empty() && r == GSRendererType::VK;
 #endif
 		o.InterlaceMode = visible ? GSInterlaceMode::Automatic : GSInterlaceMode::Off; // was Off for every window
-		o.LinearPresent = GSPostBilinearMode::Off;
+		o.LinearPresent = s_smooth ? GSPostBilinearMode::BilinearSmooth : GSPostBilinearMode::Off; // outbreak.ini scaling
 		o.Dithering = 2;
 		o.PCRTCAntiBlur = true;
 		o.FXAA = false;
@@ -296,11 +307,12 @@ namespace
 		DecideSelfRead(t);
 		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t, s_child && s_visible), t, s_basemem, vsync, false);
 #endif
-		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d upscale=%g aspect=%s textures=%s serial=%s replacements=%s\n",
+		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d upscale=%g scaling=%s aspect=%s textures=%s serial=%s replacements=%s\n",
 			static_cast<int>(t), s_open ? "ok" : "FAILED", s_child ? "child" : "hidden", static_cast<int>(vsync),
 			s_open && g_gs_device ? static_cast<int>(g_gs_device->GetVSyncMode()) : -1,
 			s_open && g_gs_device ? g_gs_device->GetWindowWidth() : 0, s_open && g_gs_device ? g_gs_device->GetWindowHeight() : 0,
-			static_cast<double>(s_upscale), Pcsx2Config::GSOptions::AspectRatioNames[static_cast<int>(s_aspect)],
+			static_cast<double>(s_upscale), s_smooth ? "smooth" : "sharp",
+			Pcsx2Config::GSOptions::AspectRatioNames[static_cast<int>(s_aspect)],
 			s_textures.empty() ? "-" : s_textures.c_str(), ob_disc_serial.empty() ? "-" : ob_disc_serial.c_str(),
 #if defined(OB_TEXTURE_REPLACEMENTS)
 			s_open && GSTextureReplacements::HasAnyReplacementTextures() ? "found" : "none");
@@ -369,10 +381,17 @@ void ob_gs_set_gpu_driver(const char* name)
 void ob_gs_set_display(uint32_t upscale, ObGsAspect aspect)
 {
 	std::lock_guard<std::mutex> lk(s_mu);
-	s_upscale = (upscale >= 1u && upscale <= 8u) ? static_cast<float>(upscale) : 1.0f;
+	s_upscale = (upscale >= 1u && upscale <= 8u) ? static_cast<float>(upscale) : kDefaultUpscale;
 	s_aspect = aspect == ObGsAspect::R16_9 ? AspectRatioType::R16_9
 	         : aspect == ObGsAspect::R4_3  ? AspectRatioType::R4_3
 	                                       : AspectRatioType::RAuto4_3_3_2;
+}
+
+void ob_gs_set_scaling(const char* mode)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	const std::string m = mode ? mode : "";
+	s_smooth = m == "smooth" ? true : m == "sharp" ? false : kDefaultSmooth;
 }
 
 void ob_gs_set_textures(const char* root, const char* serial)

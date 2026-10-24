@@ -58,6 +58,7 @@ PS2ExternalGS* ps2CreateExternalGS(const char* mode)
 		return nullptr;
 	ob_gs_set_gpu_driver(ps2game::activeSettings().gpuDriver.c_str()); // outbreak.ini, PS2Recomp patch 0046
 	ob_gs_set_self_read(ps2game::activeSettings().gsSelfRead.c_str());  // outbreak.ini, PS2Recomp patch 0054
+	ob_gs_set_scaling(ps2game::activeSettings().scaling.c_str());       // outbreak.ini, PS2Recomp patch 0055
 	// outbreak.ini upscale (PS2Recomp 0050); pnach gsaspectratio (0051), read before the runtime opens the GS.
 	const std::string& aspect = ps2game::activePnach().aspect;
 	ob_gs_set_display(ps2game::activeSettings().upscale,

@@ -20,8 +20,9 @@ void ob_gs_set_gpu_driver(const char* name);
 // call: how PCSX2's renderer reads the colour already drawn (gpu_driver.h DecideSelfRead). Auto = a copy of the target
 // on Qualcomm's own Adreno driver, PCSX2's choice elsewhere (always on desktop, where no driver is probed).
 void ob_gs_set_self_read(const char* mode);
-// Before the first GS call: render resolution multiplier (outbreak.ini upscale, 1..8; others = 1; the Vulkan
-// renderer only) and display aspect (ObGsAspect; a pnach gsaspectratio). Both default to today's: 1, Auto.
+// Before the first GS call: render resolution multiplier (outbreak.ini upscale, 1..8; 0 = unset = the platform
+// default: 3 on Android, 1 elsewhere; the Vulkan renderer only) and display aspect (ObGsAspect; a pnach
+// gsaspectratio, default Auto).
 enum class ObGsAspect : int
 {
 	Auto, // PCSX2's Auto 4:3/3:2
@@ -29,6 +30,9 @@ enum class ObGsAspect : int
 	R16_9,
 };
 void ob_gs_set_display(uint32_t upscale, ObGsAspect aspect);
+// Before the first GS call: outbreak.ini scaling ("smooth", "sharp", empty = the platform default: smooth on
+// Android, sharp elsewhere; PS2Recomp patch 0055): PCSX2's LinearPresent, bilinear or nearest.
+void ob_gs_set_scaling(const char* mode);
 // Before the first GS call: texture replacement root (outbreak.ini textures; PCSX2 layout
 // <root>/<serial>/replacements) and the game's serial. Empty root = off. Vulkan renderer only; Android: ignored.
 void ob_gs_set_textures(const char* root, const char* serial);
