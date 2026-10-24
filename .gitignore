@@ -25,3 +25,6 @@ play.bat
 
 # Johnny's profiling playtest launcher (play.bat on the OB_PROFILE=1 copy in C:/ob/r-profile)
 play-profile.bat
+
+# Johnny's VU1 capture playtest launcher (play.bat + ob_diag PS2X_VU1_CAPTURE into C:/ob/vu1-captures-play)
+play-capture.bat
