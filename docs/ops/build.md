@@ -206,6 +206,7 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
   STATUS/MAC left at input), cycle count equal 120/120; 2.0-2.1 ns per VU1 cycle weighted vs microVU 0.8 (2.4-2.5x
   slower); with the exactness helpers stubbed out 0.84 vs 0.81 (`C:\ob\logs\vu1aot-floor-avx.log`, 8 captures then
   differ). Report `reports/2026-10-24-vu1-aot-emitter.md`.
+- `--mode mvu` (`ob.sh vu1aot --mode mvu`: `C:\ob\vu1aot\gen-mvu`, `build-mvu`, run with `--golden C:\ob\vu1-captures\golden`): microVU's semantics (PCSX2 VU1 MXCSR with DAZ/FTZ, microVU's operand clamps, MAX/MINI/FTOI/CLIP/DIV/RSQRT/ERSQRT/ERLENG as microVU) instead of the interpreter's. Result (2026-10-24, `C:\ob\logs\vu1aot-mvu-final.log`): vs the x86 golden 112/120 bit for bit, 8 differ only in the final STATUS/MAC register (unread); 0.62 ns per VU1 cycle weighted vs microVU 0.75.
 - Toolchain: MSVC with `/arch:AVX2` on the generated files (no clang-cl on this machine); SSE4.1/AVX intrinsics, x86
   only so far.
 

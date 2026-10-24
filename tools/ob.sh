@@ -20,7 +20,7 @@
 #   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
 #                                            build native/pcsx2_vu + compare tool, diff interpreter vs microVU on
 #                                            PS2X_VU1_CAPTURE files (default $OB_ROOT/vu1-captures)
-#   tools/ob.sh vu1aot [DIR] [--repeat N] [--verbose]  VU1 ahead-of-time code: tools/vu1aot/emit.py -> $OB_ROOT/vu1aot/gen
+#   tools/ob.sh vu1aot [DIR] [--mode mvu] [--repeat N]  VU1 ahead-of-time code: tools/vu1aot/emit.py -> $OB_ROOT/vu1aot/gen
 #                                            (game-derived), compare tool with it in $OB_ROOT/vu1aot/build, compare --aot
 #   tools/ob.sh depcheck                     dry run after touching gs_frontend.h: 0 generated game units must rebuild
 #   tools/ob.sh hostprof-build               external sampling profiler tools/hostprof into $OB_HOSTPROF_BUILD
@@ -432,16 +432,25 @@ cmd_vucompare() {
 
 # vu1aot: generate the VU1 ahead-of-time code for the captured programs (emit.py writes only changed files, so an
 # unchanged program does not recompile), build the compare tool with it in its own directory (first build ~3-4 min:
-# its own copy of ob_pcsx2_gs), run it with --aot. Exit: emit.py's (1 = a program could not be generated) or the tool's.
+# its own copy of ob_pcsx2_gs), run it with --aot. --mode mvu: microVU semantics (emit.py --mode mvu) in gen-mvu /
+# build-mvu, compared also against the x86 microVU golden files (DIR/golden). Exit: emit.py's (1 = a program could not
+# be generated) or the tool's.
 cmd_vu1aot() {
-    local dir="$OB_ROOT/vu1-captures" gen="$OB_ROOT/vu1aot/gen" rc
+    local dir="$OB_ROOT/vu1-captures" mode=exact sfx="" rc
     if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then dir=$1; shift; fi
+    if [ $# -gt 1 ] && [ "$1" = --mode ]; then mode=$2; shift 2; fi
+    [ "$mode" = mvu ] && sfx=-mvu
+    local gen="$OB_ROOT/vu1aot/gen$sfx" b="$OB_ROOT/vu1aot/build$sfx"
     "$PY" -I "$REPO/tools/vu1aot/emit.py" --elf "$(cygpath -w "$OB_RUN/SLPM_654.28")" --captures "$(cygpath -w "$dir")" \
-        --out "$(cygpath -w "$gen")"; rc=$?
+        --out "$(cygpath -w "$gen")" --mode "$mode"; rc=$?
     [ $rc = 0 ] || { echo "vu1aot: emit exit $rc"; return $rc; }
-    OB_PCSX2_VU_BUILD="$OB_ROOT/vu1aot/build" OB_PCSX2_VU_CMAKE_EXTRA="-DOB_VU1AOT_GEN=$(cygpath -m "$gen")" pcsx2_vu_build; rc=$?
+    OB_PCSX2_VU_BUILD="$b" OB_PCSX2_VU_CMAKE_EXTRA="-DOB_VU1AOT_GEN=$(cygpath -m "$gen")" pcsx2_vu_build; rc=$?
     [ $rc = 0 ] || return $rc
-    "$OB_ROOT/vu1aot/build/ob_pcsx2_vu_compare.exe" "$(cygpath -w "$dir")" --aot "$@"
+    if [ "$mode" = mvu ]; then
+        "$b/ob_pcsx2_vu_compare.exe" "$(cygpath -w "$dir")" --aot --golden "$(cygpath -w "$dir/golden")" "$@"
+    else
+        "$b/ob_pcsx2_vu_compare.exe" "$(cygpath -w "$dir")" --aot "$@"
+    fi
 }
 
 # depcheck: proves a runtime-internal header change does not rebuild generated game code (patch 0028). Touches

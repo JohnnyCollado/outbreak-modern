@@ -773,6 +773,9 @@ int main(int argc, char **argv)
     double sumAotNs = 0, sumAotCycles = 0, sumAotMvuNs = 0, sumAotInterpNs = 0;
     std::map<std::string, int> aotFieldKinds;
     std::map<std::string, std::pair<double, int>> aotPerKey; // key -> (sum of ns per interpreter cycle, n)
+    // --aot with --golden: the AOT outputs against x86 microVU's (the golden files), the reference for --mode mvu
+    int aotGoldRun = 0, aotGoldMatch = 0, aotGoldFlagsOnly = 0;
+    std::map<std::string, int> aotGoldKinds;
 #endif
 
     for (const auto &f : files)
@@ -968,6 +971,40 @@ int main(int argc, char **argv)
                 if (verbose || !onlyKnown)
                     for (size_t k = 0; k < aDiffs.size() && k < 12; ++k)
                         std::printf("      %s\n", aDiffs[k].c_str());
+                if (!goldenDir.empty())
+                {
+                    // STATUS/MAC: microVU computes only the flag instances a reader needs, the AOT code computes no
+                    // STATUS and MAC only for FMAND readers, so the final registers may differ; reported apart.
+                    Golden g;
+                    std::string gerr;
+                    if (readGolden(goldenPath(goldenDir, c), g, gerr) && g.codeHash == c.h.codeHash && g.inputHash == c.h.inputHash)
+                    {
+                        ++aotGoldRun;
+                        int nG = 0;
+                        std::vector<std::string> gDiffs;
+                        const std::string gd = diff(g.out, aOut, "mvu-golden", "aot", nG, &gDiffs);
+                        std::map<std::string, int> gk;
+                        for (const auto &x : gDiffs)
+                            gk[x.substr(0, x.find_first_of(" :."))] = 1;
+                        bool flagsOnly = true;
+                        for (const auto &[k, one] : gk)
+                        {
+                            aotGoldKinds[k] += one;
+                            if (k != "STATUS" && k != "MAC")
+                                flagsOnly = false;
+                        }
+                        if (rc == 0 && gd.empty())
+                            ++aotGoldMatch;
+                        else if (rc == 0 && flagsOnly)
+                            ++aotGoldFlagsOnly;
+                        std::printf("    aot vs x86 microVU golden: %s\n", gd.empty() ? "match" : (flagsOnly ? ("STATUS/MAC only: " + gd).c_str() : ("MISMATCH " + gd).c_str()));
+                        if (verbose || !flagsOnly)
+                            for (size_t k = 0; k < gDiffs.size() && k < 12; ++k)
+                                std::printf("      %s\n", gDiffs[k].c_str());
+                    }
+                    else
+                        std::printf("    aot vs x86 microVU golden: no golden file for this capture\n");
+                }
             }
         }
 #endif
@@ -1032,6 +1069,13 @@ int main(int argc, char **argv)
                     static_cast<unsigned long long>(vu1aot_denormal_kept));
         for (const auto &[k, n] : aotFieldKinds)
             std::printf("  aot field %-10s differs in %d captures\n", k.c_str(), n);
+        if (!goldenDir.empty())
+        {
+            std::printf("aot vs x86 microVU golden: compared %d, bit for bit %d, differing only in STATUS/MAC %d, anything else %d\n",
+                        aotGoldRun, aotGoldMatch, aotGoldFlagsOnly, aotGoldRun - aotGoldMatch - aotGoldFlagsOnly);
+            for (const auto &[k, n] : aotGoldKinds)
+                std::printf("  aot vs golden: field %-10s differs in %d captures\n", k.c_str(), n);
+        }
         std::printf("aot timing (median of %d warm runs, per interpreter cycle, captures with a program): aot %.2f ns, "
                     "mvu %.2f ns, interp %.2f ns\n",
                     repeat, sumAotNs / std::max(1.0, sumAotCycles), sumAotMvuNs / std::max(1.0, sumAotCycles),

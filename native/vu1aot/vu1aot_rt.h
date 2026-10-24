@@ -546,13 +546,110 @@ inline uint64_t vu_xg_drain(Vu1AotCtx &c, Vu1AotXg &xg)
     return xg.endCycle;
 }
 
+// ---- microVU semantics (emit.py --mode mvu): PCSX2 microVU's results, not the interpreter's ----
+// PCSX2's default VU1 configuration (Pcsx2Config.cpp:36-40, 459-466): MXCSR round toward zero + DAZ + FTZ, overflow
+// clamping on, extra/sign overflow off. So results are never clamped; operands are clamped (mVUclamp2 -> mVUclamp1,
+// microVU_Clamp.inl:25-57) only where the opcode table asks for it (microVU_Upper.inl:582-663, emit.py).
+// mVUclamp1: min with FLT_MAX, then max with -FLT_MAX (a NaN becomes +FLT_MAX).
+VU_INLINE __m128 vm_clamp(__m128 v)
+{
+    return _mm_max_ps(_mm_min_ps(v, _mm_castsi128_ps(_mm_set1_epi32(0x7F7FFFFF))),
+                      _mm_castsi128_ps(_mm_set1_epi32(int(0xFF7FFFFFu))));
+}
+VU_INLINE float vm_clamp1(float v) { return _mm_cvtss_f32(vm_clamp(_mm_set_ss(v))); }
+// MAX/MINI: integer compare of the bits made two's-complement ordered (MIN_MAX_PS, microVU_Misc.inl:380-428); a tie
+// takes the second operand
+VU_INLINE __m128i vm_ord(__m128 v)
+{
+    const __m128i b = _mm_castps_si128(v);
+    return _mm_xor_si128(b, _mm_srli_epi32(_mm_srai_epi32(b, 31), 1));
+}
+VU_INLINE __m128 vm_max(__m128 a, __m128 b)
+{
+    const __m128 m = _mm_castsi128_ps(_mm_cmpgt_epi32(vm_ord(a), vm_ord(b)));
+    return _mm_or_ps(_mm_and_ps(a, m), _mm_andnot_ps(m, b));
+}
+VU_INLINE __m128 vm_min(__m128 a, __m128 b)
+{
+    const __m128 m = _mm_castsi128_ps(_mm_cmpgt_epi32(vm_ord(b), vm_ord(a)));
+    return _mm_or_ps(_mm_and_ps(a, m), _mm_andnot_ps(m, b));
+}
+// FTOI (mVU_FTOIx, microVU_Upper.inl:477-505): scale, truncate; float bits > 0x4effffff (as signed ints) turn the
+// cvttps2dq overflow value 0x80000000 into 0x7fffffff
+VU_INLINE __m128 vm_ftoi_s(__m128 v, float scale, bool doScale)
+{
+    const __m128 x = doScale ? _mm_mul_ps(v, _mm_set1_ps(scale)) : v;
+    const __m128i t = _mm_cmpgt_epi32(_mm_castps_si128(x), _mm_set1_epi32(0x4effffff));
+    return _mm_castsi128_ps(_mm_xor_si128(_mm_cvttps_epi32(x), t));
+}
+VU_INLINE __m128 vm_ftoi0(__m128 v) { return vm_ftoi_s(v, 1.0f, false); }
+VU_INLINE __m128 vm_ftoi4(__m128 v) { return vm_ftoi_s(v, 16.0f, true); }
+VU_INLINE __m128 vm_ftoi12(__m128 v) { return vm_ftoi_s(v, 4096.0f, true); }
+VU_INLINE __m128 vm_ftoi15(__m128 v) { return vm_ftoi_s(v, 32768.0f, true); }
+// CLIP (mVU_CLIP, microVU_Upper.inl:533-576): fs lanes with a zero exponent count as +0; limit |ft.w| as raw bits
+VU_INLINE uint32_t vm_clip(__m128 fs, __m128 ft)
+{
+    const __m128i b = _mm_castps_si128(fs);
+    const __m128i den = _mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7F800000)), _mm_setzero_si128());
+    const __m128i t1 = _mm_andnot_si128(den, b);
+    const __m128i w = _mm_and_si128(_mm_shuffle_epi32(_mm_castps_si128(ft), 0xFF), _mm_set1_epi32(0x7FFFFFFF));
+    const __m128i pos = _mm_cmpgt_epi32(t1, w);
+    const __m128i neg = _mm_cmpgt_epi32(_mm_xor_si128(t1, _mm_set1_epi32(int(0x80000000u))), w);
+    const int p = _mm_movemask_ps(_mm_castsi128_ps(pos)), n = _mm_movemask_ps(_mm_castsi128_ps(neg));
+    return static_cast<uint32_t>((p & 1) | ((n & 1) << 1) | ((p & 2) << 1) | ((n & 2) << 2) | ((p & 4) << 2) | ((n & 4) << 3));
+}
+// MAC flags as microVU computes them (mVUupdateFlags, microVU_Upper.inl:27-119; overflow hack off): Z = lane == 0,
+// S = sign bit, per dest lane, from the result
+template <int Dest>
+VU_INLINE uint32_t vm_mac(__m128 r)
+{
+    constexpr int m = vu_lanes(Dest);
+    const int s = _mm_movemask_ps(r) & m, z = _mm_movemask_ps(_mm_cmpeq_ps(r, _mm_setzero_ps())) & m;
+    auto flip = [](int x) { return static_cast<uint32_t>(((x & 1) << 3) | ((x & 2) << 1) | ((x & 4) >> 1) | ((x & 8) >> 3)); };
+    return flip(z) | (flip(s) << 4);
+}
+// DIV/SQRT/RSQRT (microVU_Lower.inl:34-155): operands raw (DAZ), zero tests by float compare
+VU_INLINE float vm_div(float fs, float ft)
+{
+    if (ft == 0.0f)
+        return vu_bits(((vu_ubits(fs) ^ vu_ubits(ft)) & 0x80000000u) | 0x7F7FFFFFu);
+    return vm_clamp1(fs / ft);
+}
+VU_INLINE float vm_sqrt(float ft)
+{
+    const __m128 a = _mm_min_ss(_mm_set_ss(vu_bits(vu_ubits(ft) & 0x7FFFFFFFu)), _mm_set_ss(vu_bits(0x7F7FFFFFu)));
+    return _mm_cvtss_f32(_mm_sqrt_ss(a));
+}
+VU_INLINE float vm_rsqrt(float fs, float ft)
+{
+    const float d = _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(vu_bits(vu_ubits(ft) & 0x7FFFFFFFu))));
+    if (d == 0.0f)
+        return vu_bits((vu_ubits(fs) & 0x80000000u) | 0x7F7FFFFFu);
+    return vm_clamp1(fs / d);
+}
+// EFU (microVU_Lower.inl): only the two the 27 programs use
+VU_INLINE float vm_ersqrt(float fs)
+{
+    return 1.0f / _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(vu_bits(vu_ubits(fs) & 0x7FFFFFFFu))));
+}
+VU_INLINE float vm_erleng(__m128 fs)
+{
+    return 1.0f / _mm_cvtss_f32(_mm_sqrt_ss(_mm_dp_ps(fs, fs, 0x71)));
+}
+
 // ---- function frame: VU state in locals (the compiler keeps them in registers) ----
 #define VU1AOT_VF(n) __m128 v##n = _mm_loadu_ps(c.vf[n]);
 #define VU1AOT_VI(n) int32_t i##n = c.vi[n];
 #define VU1AOT_NV(k) __m128 n##k = _mm_setzero_ps(); (void)n##k;
+// MXCSR: interpreter mode round toward zero only (fesetround); microVU mode PCSX2's VU1FPCR (+ DAZ + FTZ)
+#if defined(VU1AOT_MVU)
+#define VU1AOT_CSR 0xE040u
+#else
+#define VU1AOT_CSR 0x6000u
+#endif
 #define VU1AOT_PROLOGUE                                                                                            \
     const unsigned int vu_csr = _mm_getcsr();                                                                      \
-    _mm_setcsr((vu_csr & ~0xE040u) | 0x6000u); /* round toward zero, no FTZ/DAZ */                                 \
+    _mm_setcsr((vu_csr & ~0xE040u) | VU1AOT_CSR);                                                                  \
     VU1AOT_VF(1) VU1AOT_VF(2) VU1AOT_VF(3) VU1AOT_VF(4) VU1AOT_VF(5) VU1AOT_VF(6) VU1AOT_VF(7) VU1AOT_VF(8)         \
     VU1AOT_VF(9) VU1AOT_VF(10) VU1AOT_VF(11) VU1AOT_VF(12) VU1AOT_VF(13) VU1AOT_VF(14) VU1AOT_VF(15) VU1AOT_VF(16)  \
     VU1AOT_VF(17) VU1AOT_VF(18) VU1AOT_VF(19) VU1AOT_VF(20) VU1AOT_VF(21) VU1AOT_VF(22) VU1AOT_VF(23)              \

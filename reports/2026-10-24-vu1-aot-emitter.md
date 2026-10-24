@@ -9,6 +9,10 @@
   microVU's pattern) and reproduces its cycle count 120/120. Speed: 2.0-2.2 ns per VU1 cycle weighted by in-game
   cycles, microVU 0.73-0.97 in the same runs: 2.3-2.5x slower. The cost is the interpreter-exact float semantics: with
   those helpers stubbed out the same code runs at 0.84 vs microVU 0.81.
+  **Follow-up the same day, microVU-semantics mode (`emit.py --mode mvu`):** PCSX2's MXCSR (DAZ/FTZ, round toward
+  zero) and microVU's own operand clamps and op variants; on all 120 captures equal to the x86 microVU golden files on
+  every field but STATUS/MAC (112 bit for bit, 8 differ only in the final STATUS/MAC register); 0.62 ns per VU1 cycle
+  weighted vs microVU 0.75 in the same run (0.83x, faster on all 5 measured programs).
 - **Versions:** game SLPM-65428 v1.04 + English patch v2.1; PS2Recomp `C:\ob\up` (no change); PCSX2 v2.9.134 microVU
   (`native/pcsx2_vu`); MSVC 2022 14.44 (no clang-cl on this machine), generated files `/O2 /arch:AVX2`; captures
   `C:\ob\vu1-captures` (120 files, `play.script` to J's Bar).
@@ -81,6 +85,50 @@ Speed steps (weighted ns/cycle, microVU in the same run):
 | (slow path inlined: 2.04, +20 s compile; reverted) | 2.04 | 0.86 | `C:\ob\logs\vu1aot-inline-slow.log` |
 | floor on the final flags | 0.84 | 0.81 | `C:\ob\logs\vu1aot-floor-avx.log` |
 | final | 2.23 | 0.97 | `C:\ob\logs\vu1aot-final.log` |
+
+## microVU-semantics mode (follow-up, `C:\ob\logs\vu1aot-mvu-final.log`, `--repeat 20`)
+
+- **What:** `emit.py --mode mvu` (`ob.sh vu1aot --mode mvu`, output `C:\ob\vu1aot\gen-mvu`, build
+  `C:\ob\vu1aot\build-mvu`) gives PCSX2 microVU's results instead of the interpreter's, taken from microVU's code
+  in the PCSX2 v2.9.134 tree we build:
+  - MXCSR as PCSX2's default VU1 control register: round toward zero, DAZ, FTZ (`Pcsx2Config.cpp:36-40`); overflow
+    clamping on, extra/sign overflow off (`Pcsx2Config.cpp:459-466`), so results are never clamped and operands only
+    where the opcode table asks (`microVU_Upper.inl:582-663`): SUB family with xyzw (Fs, Ft), MUL family (Fs; Ft
+    with xyzw), MULAx/y/z (Fs), MULAw (Fs; Ft with xyzw), MADDx/y/z/w and MADDAx/y/z/w (Fs). The clamp is
+    `mVUclamp1` (min FLT_MAX, max -FLT_MAX; NaN becomes +FLT_MAX, `microVU_Clamp.inl:25-41`) on a copy, never on the
+    register. VF0 is not clamped (`checkVFClamp`).
+  - Plain SSE add/sub/mul (no denormal flush, no range check: FTZ/DAZ do that); `x - x` is +0 (`doSafeSub`, :173);
+    MAX/MINI by integer compare of ordered bits (`MIN_MAX_PS`, `microVU_Misc.inl:380-428`); FTOI's `> 0x4effffff`
+    fix-up (:477-505); CLIP with zero-exponent lanes as +0 and the raw |w| limit (:533-576); ABS raw; OPMULA/OPMSUB
+    with a real w product; DIV/SQRT/RSQRT/ERSQRT/ERLENG as `microVU_Lower.inl` (zero tests by float compare,
+    `mVUclamp1` on DIV/RSQRT results, ERLENG through `dpps 0x71`). Only ERSQRT and ERLENG of the EFU ops occur in
+    the 27 programs; the others are refused in this mode.
+  - MAC for the FMAND readers as `mVUupdateFlags` computes it (Z and S per dest lane, no U/O: overflow hack off).
+  - Timing (which Q/P/CLIP/MAC instance a reader sees, XGKICK, cycle count) stays the interpreter's model: on these
+    captures microVU and the interpreter agree on every value that depends on it.
+- **Verification:** `vucompare --aot --golden C:\ob\vu1-captures\golden` (new: the AOT outputs against the golden
+  files, all fields): `aot vs x86 microVU golden: compared 120, bit for bit 112, differing only in STATUS/MAC 8,
+  anything else 0`. The 8: the final MAC register (all 8; one also STATUS), which microVU fills from the last flag instance
+  it happened to compute and the AOT code leaves at its input value; no instruction of the run reads it (same class
+  as the microVU-vs-interpreter flag pattern). On these captures the mode also still equals the interpreter
+  (`== interp bit for bit 78, equal except STATUS/MAC left at input 42`): the inputs never reach the edge cases where
+  the two semantics part (denormals, Inf/NaN, cancellation below FLT_MIN). The x86 microVU itself reads its golden
+  back 120/120 in the same run.
+- **Speed** (weighted by in-game cycles; runs > 1000 cycles per program):
+
+| Program | AOT mvu mode ns/cycle | microVU same runs |
+|---|---|---|
+| `D_00212BB0` skinned (57.7%) | 0.54 | 0.68 |
+| `D_00212C50` rigid + clipper (37.6%) | 0.61 | 0.73 |
+| `D_00212B40` skinned, FMAND (2.3%) | 0.49 | 0.53 |
+| `D_00212C80` rigid + clipper (1.7%) | 0.56 | 0.65 |
+| `D_00212CB0` rigid + clipper (0.6%) | 0.59 | 0.72 |
+| weighted | **0.62** | **0.75** (0.83x) |
+
+  First run: 0.62 vs 0.76 (`C:\ob\logs\vu1aot-mvu-first.log`). Build: 90 s for the 6 programs.
+- **Why it beats the floor (0.84):** the floor kept the interpreter's code shape with the helpers stubbed (operand
+  copies, the branchy slow-path call per multiply-add); this mode has no slow path at all, so MSVC keeps more values
+  in registers.
 
 ## Struggles
 
@@ -163,11 +211,12 @@ Speed steps (weighted ns/cycle, microVU in the same run):
 
 ## Still open
 
-- Speed: 2.3-2.5x slower than microVU with interpreter-exact semantics. Options, by expected gain: (1) a
-  microVU-semantics mode (DAZ/FTZ, microVU's clamp points) verified against the x86 microVU golden set
-  (`C:\ob\vu1-captures\golden`) instead of the interpreter: the floor measurement says ~parity; to beat microVU it
-  then needs (2) loop regions as functions with registers loaded once per region, and (3) a better compiler for the
-  generated files (clang-cl is not installed; installing needs the developer's "proceed").
+- Speed: the exact mode stays 2.3-2.5x slower than microVU (it is the verification reference against the
+  interpreter); the microVU mode is 0.83x microVU. Further gains: loop regions as functions with registers loaded once
+  per region, clang-cl for the generated files (not installed; installing needs the developer's "proceed").
+- microVU mode: the final STATUS/MAC registers differ from microVU in 8 captures (unread); if the EE or a later run
+  ever reads them, the mode would need microVU's flag write-back. The 6 refused EFU ops need microVU versions before
+  a program that uses them can run in this mode (none of the 27 does).
 - The 21 programs without a capture generate but are unverified; more captures (other rooms) or synthetic runs
   against the interpreter are needed.
 - Runtime backend `PS2X_VU1=aot` (PS2Recomp patch with a fail-without test, fallback to mvu/interp on an unknown
@@ -178,7 +227,8 @@ Speed steps (weighted ns/cycle, microVU in the same run):
 
 ## Useful for other developers
 
-- `bash tools/run.sh vu1aot -- bash tools/ob.sh vu1aot [--repeat N] [--verbose]`: generate, build, compare.
+- `bash tools/run.sh vu1aot -- bash tools/ob.sh vu1aot [--mode mvu] [--repeat N] [--verbose]`: generate, build,
+  compare (mvu mode: also against the golden files).
 - `python -I tools/vu1aot/emit.py --programs all --out DIR`: per program node count, normalisations skipped, MAC
   FMACs kept; a refusal names the construct and pc.
 - Measuring a "floor" by stubbing the semantic helpers in a throwaway build separates semantic cost from structural

@@ -1,11 +1,12 @@
 """emit.py: emitter of the VU1 ahead-of-time generator (reports/2026-10-24-vu1-aot-emitter.md).
 
   emit.py [--elf game_files/SLPM_654.28] [--captures C:/ob/vu1-captures] [--out C:/ob/vu1aot/gen]
-          [--programs captured|all|D_00212BB0,...]
+          [--programs captured|all|D_00212BB0,...] [--mode exact|mvu]
 
 Turns Outbreak's VU1 microprograms (extracted by vu1aot.py) into C++: one function per program, a switch on the entry
 pc, one label per (pc, pipeline state) node, goto for branches after their delay slot. The output is game-derived:
-it goes under C:/ob, never into git.
+it goes under C:/ob, never into git. --mode mvu gives PCSX2 microVU's results instead (Emitter.upper_mvu, vu1aot_rt.h
+vm_*), checked against the x86 microVU golden files; the rest of this note describes the default (exact) mode.
 
 Semantics are those of PS2Recomp's VU1 interpreter (C:/ob/up/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp, _upper.cpp,
 _lower.cpp), which the result is compared against bit for bit. The interpreter models the pipeline cycle by cycle;
@@ -555,7 +556,8 @@ class Emitter:
     """Three passes: discover the (pc, timing state) nodes and their pairs and edges; dataflow over the node graph
     (normalisation state forward, MAC liveness backward); emit C++."""
 
-    def __init__(self, name, image, pairs, track_mac):
+    def __init__(self, name, image, pairs, track_mac, mode="exact"):
+        self.mode = mode  # "exact": the interpreter's results; "mvu": PCSX2 microVU's (vu1aot_rt.h vm_*)
         self.name = name
         self.image = image
         self.npairs = pairs
@@ -835,6 +837,8 @@ class Emitter:
         if r == 0:
             return "K_VF0"
         raw, sh = ("acc", "nacc") if r == 32 else ("v%d" % r, "n%d" % r)
+        if self.mode == "mvu":
+            return raw  # microVU reads operands raw (DAZ does the denormal part; clamps are per opcode)
         if not self.dry:
             self.norm_reads += 1
         if (self.ns.norm[r] & lanes) == lanes:
@@ -905,6 +909,8 @@ class Emitter:
                 kind, src, dst = "clip", None, None
             else:
                 return out  # NOP
+        if self.mode == "mvu":
+            return self.upper_mvu(p, info, kind, src, dst, to_acc, dest, fs, ft, op, sp, out)
         if kind == "clip":
             out.append("const uint32_t cf = vu_clip(%s, %s);" % (self.vf(fs), self.vf(ft)))
             out.append("ch4 = ch3; ch3 = ch2; ch2 = ch1; ch1 = ch0; ch0 = ((ch0 << 6) | cf) & 0xFFFFFFu;")
@@ -962,6 +968,72 @@ class Emitter:
             out.append("mh4 = mh3; mh3 = mh2; mh2 = mh1; mh1 = mh0; mh0 = um;")
         # the write itself happens after the lower op has read its sources (pair semantics); FTOI writes integers
         self.pending_upper = (to_acc, dst, dest, not kind.startswith("ftoi"))
+        return out
+
+    def upper_mvu(self, p, info, kind, src, dst, to_acc, dest, fs, ft, op, sp, out):
+        """microVU's version of an upper op (microVU_Upper.inl): raw operands, MXCSR DAZ/FTZ/round toward zero, operand
+        clamps (vm_clamp) where its opcode table puts them, no result clamp."""
+        if kind == "clip":
+            out.append("const uint32_t cf = vm_clip(%s, %s);" % (self.vf(fs), self.vf(ft)))
+            out.append("ch4 = ch3; ch3 = ch2; ch2 = ch1; ch1 = ch0; ch0 = ((ch0 << 6) | cf) & 0xFFFFFFu;")
+            return out
+        bc = (op if sp is None else sp) & 3
+        ps = dest == 0xF
+        # clampType (microVU_Upper.inl:582-663; isCOP2 false for VU1): cFs / cFt
+        cfs = cft = False
+        if kind == "sub" and not to_acc and ps:
+            cfs = cft = True
+        elif kind == "mul" and not to_acc:
+            cfs, cft = True, ps
+        elif kind == "mul" and to_acc and src == "bc":
+            cfs, cft = True, (bc == 3 and ps)
+        elif kind == "madd" and src == "bc":
+            cfs = True
+
+        def cl(x, on):
+            return "vm_clamp(%s)" % x if on else x
+        a = self.vf(fs)
+        if src == "bc":
+            b = "vu_bc%d(%s)" % (bc, self.vf(ft))
+        elif src == "q":
+            b = "_mm_set1_ps(qh%d)" % info["q_k"]
+        elif src == "i":
+            b = "_mm_set1_ps(I)"
+        else:
+            b = self.vf(ft)
+        # VF0 is not clamped (checkVFClamp: isZero), and its values are finite anyway
+        ca, cb = cl(a, cfs and fs != 0), cl(b, cft and (src != "v" or ft != 0) and (src != "bc" or ft != 0))
+        if kind == "sub" and src == "v" and fs == ft:
+            r = "_mm_setzero_ps()"  # doSafeSub (microVU_Upper.inl:173): x - x is +0
+        elif kind in ("add", "sub", "mul"):
+            out.append("const __m128 ua = %s, ub = %s;" % (ca, cb))
+            r = "_mm_%s_ps(ua, ub)" % kind
+        elif kind == "madd":
+            out.append("const __m128 ua = %s, ub = %s;" % (ca, cb))
+            r = "_mm_add_ps(_mm_mul_ps(ua, ub), acc)"
+        elif kind == "msub":
+            out.append("const __m128 ua = %s, ub = %s;" % (ca, cb))
+            r = "_mm_sub_ps(acc, _mm_mul_ps(ua, ub))"
+        elif kind == "opmula":  # w lane: fs.w * ft.w (pshufd 0xC9 / 0xD2 keep w)
+            r = "_mm_mul_ps(vu_yzx(%s), vu_zxy(%s))" % (a, b)
+        elif kind == "opmsub":
+            r = "_mm_sub_ps(acc, _mm_mul_ps(vu_yzx(%s), vu_zxy(%s)))" % (a, b)
+        elif kind in ("max", "mini"):
+            r = "vm_%s(%s, %s)" % ("max" if kind == "max" else "min", a, b)
+        elif kind.startswith("itof"):
+            r = "vu_%s(%s)" % (kind, a)
+        elif kind.startswith("ftoi"):
+            r = "vm_%s(%s)" % (kind, a)
+        elif kind == "abs":
+            r = "vu_abs(%s)" % a
+        out.append("const __m128 ur = %s;" % r)
+        if self.track_mac and p.upper_flags:
+            if self.mac_wanted:
+                out.append("const uint32_t um = vm_mac<%d>(ur);" % dest)
+            else:
+                out.append("const uint32_t um = 0; // no FMAND reads these flags")
+            out.append("mh4 = mh3; mh3 = mh2; mh2 = mh1; mh1 = mh0; mh0 = um;")
+        self.pending_upper = (to_acc, dst, dest, True)
         return out
 
     def write_upper(self, p, out):
@@ -1101,12 +1173,13 @@ class Emitter:
             out.append("vu_xg_start(c, xg, (uint16_t)%s, cyc + %d);" % (vi(vis), off))
         elif n in ("DIV", "SQRT", "RSQRT"):
             fsf, ftf = (w >> 21) & 3, (w >> 23) & 3
+            pre = "vm" if self.mode == "mvu" else "vu"
             if n == "DIV":
-                e = "vu_div(%s, %s)" % (self.lane(vfs, fsf), self.lane(vft, ftf))
+                e = "%s_div(%s, %s)" % (pre, self.lane(vfs, fsf), self.lane(vft, ftf))
             elif n == "SQRT":
-                e = "vu_sqrt(%s)" % self.lane(vft, ftf)
+                e = "%s_sqrt(%s)" % (pre, self.lane(vft, ftf))
             else:
-                e = "vu_rsqrt(%s, %s)" % (self.lane(vfs, fsf), self.lane(vft, ftf))
+                e = "%s_rsqrt(%s, %s)" % (pre, self.lane(vfs, fsf), self.lane(vft, ftf))
             out.append("const float qr = %s;" % e)
             late.append("qh1 = qh0; qh0 = qr;")
         elif n in ("WAITQ", "WAITP"):
@@ -1114,6 +1187,18 @@ class Emitter:
         elif n in ("ESADD", "ERSADD", "ELENG", "ERLENG", "ESUM", "ESQRT", "ERSQRT", "ERCPR", "ESIN", "EATAN", "EEXP",
                    "EATANxy", "EATANxz"):
             comp = (w >> 21) & 3
+            if self.mode == "mvu":
+                if n not in ("ERSQRT", "ERLENG") or (n == "ERLENG" and dest in (1, 2, 4)):
+                    raise Unsupported("%s at 0x%x: no microVU-mode version (only ERSQRT, ERLENG)" % (n, p.pc))
+                e = "vm_ersqrt(%s)" % self.lane(vfs, comp) if n == "ERSQRT" else "vm_erleng(%s)" % self.vf(vfs)
+                out.append("const float pr = %s;" % e)
+                late.append("ph2 = ph1; ph1 = ph0; ph0 = pr;")
+                self.write_upper(p, out)
+                out.extend(late)
+                for r, cl, nl in late_ns:
+                    self.ns.norm[r] = (self.ns.norm[r] & ~cl) | nl
+                    self.ns.shadow[r] &= ~cl
+                return out
             if n in ("ESADD", "ERSADD", "ELENG", "ERLENG", "ESUM", "EATANxy", "EATANxz"):
                 e = "vu_%s(%s)" % (n.lower(), self.vf(vfs))
             else:
@@ -1141,12 +1226,13 @@ class Emitter:
         return "i%d" % r
 
 
-def gen_program(name, image, pairs, track_mac):
-    em = Emitter(name, image, pairs, track_mac)
+def gen_program(name, image, pairs, track_mac, mode="exact"):
+    em = Emitter(name, image, pairs, track_mac, mode)
     em.emit()
     return em
 
 
+MVU_DEFINE = "#define VU1AOT_MVU 1 // microVU semantics (emit.py --mode mvu)\n"
 HEADER = """// Generated by tools/vu1aot/emit.py from the game's VU1 microcode: game-derived, never in git.
 #include "vu1aot_rt.h"
 """
@@ -1206,6 +1292,8 @@ def main(argv):
     ap.add_argument("--captures", default="C:/ob/vu1-captures")
     ap.add_argument("--out", default="C:/ob/vu1aot/gen")
     ap.add_argument("--programs", default="captured")
+    ap.add_argument("--mode", choices=["exact", "mvu"], default="exact",
+                    help="exact: the interpreter's results bit for bit; mvu: PCSX2 microVU's (DAZ/FTZ, its clamps)")
     a = ap.parse_args(argv)
     elf = vu1aot.Elf(a.elf)
     progs = vu1aot.extract(elf)
@@ -1228,12 +1316,12 @@ def main(argv):
                         not (struct.unpack_from("<I", image, pc + 4)[0] >> 31)
                         for pc in range(0, pairs * 8, 8))
         try:
-            em = gen_program(name, image, pairs, has_fmand)
+            em = gen_program(name, image, pairs, has_fmand, a.mode)
         except Unsupported as e:
             report.append("%s: NOT GENERATED: %s" % (name, e))
             continue
         fname = "vu1aot_" + name
-        text = HEADER + "\n".join(add_backup(function_text(em, fname))) + "\n"
+        text = (MVU_DEFINE if a.mode == "mvu" else "") + HEADER + "\n".join(add_backup(function_text(em, fname))) + "\n"
         write_if_changed(os.path.join(a.out, name + ".cpp"), text)
         table.append((name, fname, pairs, image[:pairs * 8]))
         report.append("%s: %d pairs, %d nodes (%.2f per pair), entries %s, max pending k: clip %d mac %d q %d p %d, "
