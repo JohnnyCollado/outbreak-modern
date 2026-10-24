@@ -10,6 +10,7 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | PCSX2 GS library + smoke test | `bash tools/run.sh pcsx2-gs -- bash tools/ob.sh pcsx2-gs` | Clones/builds deps if missing (`gs.md`) |
 | Recompile + build the game | `bash tools/run.sh ob-recompile -- bash tools/ob.sh recompile` | Main ELF + 3 overlays, runner into `C:\ob\r`, then the ob_diag plugin into `C:\ob\diag-build` (~3 s). ~16 s when generated code is unchanged; ~30 s after a runtime-internal change (patch 0028: game code sees only `ps2_runtime_api.h`); a full rebuild (~6 min) only when the recompiler output or the game-facing headers change |
 | VU1 interpreter vs microVU | `bash tools/ob.sh vucompare [DIR\|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]` | Builds `native/pcsx2_vu` + `ob_pcsx2_vu_compare.exe` into `C:\ob\pcsx2-vu-build` (first build ~55 s incl. its own copy of `ob_pcsx2_gs`; then 5-8 s), runs it on `C:\ob\vu1-captures`. Needs `ob.sh recompile` first (links the runner's `ps2_runtime.lib`). See "VU1 capture" below |
+| VU1 ahead-of-time code vs interpreter and microVU | `bash tools/run.sh vu1aot -- bash tools/ob.sh vu1aot [DIR] [--repeat N] [--verbose]` | Generates C++ for the captured programs (`tools/vu1aot/emit.py` -> `C:\ob\vu1aot\gen`, game-derived), builds the compare tool with it in `C:\ob\vu1aot\build` (first build ~4 min incl. its own `ob_pcsx2_gs`; a generator change ~95-115 s: the 6 programs compile in parallel, the clipper ones are the long pole), runs `--aot`. See "VU1 ahead-of-time code" below |
 | Dependency check | `bash tools/ob.sh depcheck` | ~12 s. Touches `gs_frontend.h` (mtime restored after), dry-runs the runner build (`cmake --build C:/ob/r --target ps2EntryRunner -- -n -f C:/ob/r/build.ninja` via `tools/ob/vc.bat`), counts the steps. Green = `depcheck: ok: gs_frontend.h rebuilds N runtime step(s), 0 generated game units`, exit 0; else exit 1 and the game units (`Unity\`) are listed. The `-f` with the absolute manifest path is needed: CMake's CONFIGURE_DEPENDS glob check is always dirty, and a plain `-n` stops after "Re-running CMake" with no steps. Run after any runtime change (patch 0028 keeps game code off runtime headers). Log `C:\ob\logs\ob-depcheck.log` |
 | Debug build | `OB_DEBUG=1 bash tools/ob.sh recompile` | Full PDBs (`/Zi`, `/DEBUG:FULL`): much slower link; only for stepping through code |
 | Profile build | `OB_PROFILE=1 bash tools/ob.sh recompile` | Debug info for the host libraries only, game units untouched; copy in `C:\ob\r-profile`. See "Host profiling" below |
@@ -184,6 +185,29 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
 - Differences from the interpreter (by design): D bit ignored (microVU compiles it out); per-run budget 3,000,000
   cycles (PCSX2's `vu1RunCycles`) instead of 65,536, a program that does not reach its E bit is logged (first 8);
   STATUS/MAC only computed where read (flag elimination, `reports/2026-10-23-gameplay.md` entry 6).
+
+## VU1 ahead-of-time code (`ob.sh vu1aot`, not in the runner yet)
+
+- Generator `tools/vu1aot/emit.py` (front end `tools/vu1aot/vu1aot.py`): one C++ function per program, a switch on the
+  entry pc, one label per (pc, pipeline timing state) node, goto for branches after the delay slot. Output in
+  `C:\ob\vu1aot\gen` (one `.cpp` per program + `vu1aot_table.cpp`: name, size, program bytes as the dispatch key); a
+  file is rewritten only when its text changes. `--programs captured|all|D_...` (default: the programs whose bytes
+  match a capture's code image; `all` generates the 27, unverified beyond the 6 captured).
+- Semantics are PS2Recomp's VU1 interpreter's: its pipeline rules run at generation time (every run starts flushed),
+  so stalls, the Q/P/CLIP/MAC value each reader sees and the cycle count are constants per node; a second XGKICK in
+  one run waits for the previous transfer at run time (`kick_wait`). Float results match the interpreter bit for bit
+  (`native/vu1aot/vu1aot_rt.h`: operand normalisation, round toward zero via MXCSR, the double-precision result rules
+  of `normalizeFmacExactResult` as a vector range check with a scalar slow path). STATUS is not computed and MAC only
+  where an FMAND reads it; both are left at their input values otherwise (microVU's pattern).
+- `compare/main.cpp --aot` (built only with `-DOB_VU1AOT_GEN=DIR`): per capture `aot <program>: match|...`, cycles vs
+  the interpreter, ns per interpreter cycle; summary `aot: ran N ... == interp ... cycle count == interp ...;
+  denormal multiply-add results kept K` (K must be 0: the one case where skipping normalisation could deviate).
+- Result (2026-10-24, `C:\ob\logs\vu1aot-final.log`): 120/120 captures equal the interpreter (78 bit for bit, 42 with
+  STATUS/MAC left at input), cycle count equal 120/120; 2.0-2.1 ns per VU1 cycle weighted vs microVU 0.8 (2.4-2.5x
+  slower); with the exactness helpers stubbed out 0.84 vs 0.81 (`C:\ob\logs\vu1aot-floor-avx.log`, 8 captures then
+  differ). Report `reports/2026-10-24-vu1-aot-emitter.md`.
+- Toolchain: MSVC with `/arch:AVX2` on the generated files (no clang-cl on this machine); SSE4.1/AVX intrinsics, x86
+  only so far.
 
 ## Paths
 

@@ -14,8 +14,16 @@
 // bit for bit on the same fields (arm64 vs x86 microVU). Both share microVU's flag-elimination design, so the
 // STATUS/MAC patterns that separate microVU from the interpreter should not separate the two microVUs.
 //
-// usage: ob_pcsx2_vu_compare <capture dir> [--repeat N] [--verbose] [--no-flag-hack] [--write-golden DIR] [--golden DIR]
+// --aot (builds configured with -DOB_VU1AOT_GEN=<generated dir>, tools/vu1aot/emit.py): a third backend, the VU1
+// ahead-of-time code, run on the same inputs and compared against the interpreter on every field and on the cycle
+// count; STATUS/MAC may differ only by being left at their input value (not computed, as microVU). Timed the same
+// way (median of warm runs, per interpreter cycle).
+//
+// usage: ob_pcsx2_vu_compare <capture dir> [--repeat N] [--verbose] [--no-flag-hack] [--write-golden DIR] [--golden DIR] [--aot]
 #include "ob_pcsx2_vu.h"
+#if defined(OB_VU1AOT)
+#include "vu1aot_rt.h"
+#endif
 
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
@@ -371,6 +379,94 @@ namespace
         }
     };
 
+#if defined(OB_VU1AOT)
+    // ---- VU1 ahead-of-time backend (--aot) ----
+    struct Aot
+    {
+        std::unique_ptr<Vu1AotCtx> ctx = std::make_unique<Vu1AotCtx>();
+        alignas(16) uint8_t data[0x4000];
+        Packets *sink = nullptr;
+        std::vector<uint8_t> lastCode;
+        const Vu1AotProgram *prog = nullptr;
+        double lastNs = 0;
+        int lastRc = 0;
+
+        static void tap(void *user, const uint8_t *d, uint32_t n)
+        {
+            if (auto *p = static_cast<Aot *>(user)->sink)
+                p->emplace_back(d, d + n);
+        }
+
+        // The generated program whose bytes equal the capture's micro memory over the program's range.
+        const Vu1AotProgram *find(const std::vector<uint8_t> &code)
+        {
+            if (code != lastCode)
+            {
+                lastCode = code;
+                prog = nullptr;
+                for (int k = 0; k < kVu1AotProgramCount; ++k)
+                    if (std::memcmp(code.data(), kVu1AotPrograms[k].code, kVu1AotPrograms[k].pairs * 8u) == 0)
+                        prog = &kVu1AotPrograms[k];
+            }
+            return prog;
+        }
+
+        // false: no generated program for this code image
+        bool run(const Capture &c, Packets *packets)
+        {
+            const Vu1AotProgram *p = find(c.code);
+            if (!p)
+                return false;
+            std::memcpy(data, c.dataBefore.data(), sizeof(data));
+            Vu1AotCtx &x = *ctx;
+            const cap::StateRecord &s = c.before;
+            std::memcpy(x.vf, s.vf, sizeof(x.vf));
+            std::memcpy(x.vi, s.vi, sizeof(x.vi));
+            std::memcpy(x.acc, s.acc, sizeof(x.acc));
+            x.q = cap::bitsFloat(s.q);
+            x.p = cap::bitsFloat(s.p);
+            x.i = cap::bitsFloat(s.i);
+            x.r = s.r;
+            x.clip = s.clip;
+            x.mac = s.mac;
+            x.status = s.status;
+            x.top = c.h.top;
+            x.itop = c.h.itop;
+            x.pc = c.h.startPC;
+            x.data = data;
+            x.path1 = &Aot::tap;
+            x.path1User = this;
+            sink = packets;
+            const auto t0 = Clock::now();
+            lastRc = p->fn(x);
+            lastNs = nsSince(t0);
+            sink = nullptr;
+            return true;
+        }
+
+        void outputs(Outputs &o, const Packets &packets)
+        {
+            const Vu1AotCtx &x = *ctx;
+            o.data.assign(data, data + 0x4000);
+            std::memcpy(o.vf, x.vf, sizeof(o.vf));
+            // VF0/VI0 are hard-wired: the interpreter rewrites them after every pair (ps2_vu1_core.cpp:1798-1802)
+            o.vf[0][0] = o.vf[0][1] = o.vf[0][2] = 0u;
+            o.vf[0][3] = 0x3F800000u;
+            for (int k = 0; k < 16; ++k)
+                o.vi[k] = k == 0 ? 0u : static_cast<uint32_t>(x.vi[k]) & 0xFFFFu;
+            std::memcpy(o.acc, x.acc, sizeof(o.acc));
+            o.q = cap::floatBits(x.q);
+            o.p = cap::floatBits(x.p);
+            o.i = cap::floatBits(x.i);
+            o.r = x.r;
+            o.status = x.status;
+            o.mac = x.mac;
+            o.clip = x.clip;
+            o.packets = packets;
+        }
+    };
+#endif
+
     // ---- golden files (--write-golden / --golden): one build's microVU outputs per capture ----
     // <capture stem>.gold, little-endian: magic "OBVUGLD1", u32 version 1, u32 ended, u32 mvu cycles,
     // u32 packet count, u64 code hash, u64 input hash (of the capture, to catch a mismatched set), then data
@@ -574,13 +670,13 @@ int main(int argc, char **argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s <capture dir> [--repeat N] [--verbose] [--no-flag-hack] [--write-golden DIR] [--golden DIR]\n",
+        std::fprintf(stderr, "usage: %s <capture dir> [--repeat N] [--verbose] [--no-flag-hack] [--write-golden DIR] [--golden DIR] [--aot]\n",
                      argv[0]);
         return 2;
     }
     const fs::path dir = argv[1];
     int repeat = 20;
-    bool verbose = false;
+    bool verbose = false, aotMode = false;
     fs::path writeGoldenDir, goldenDir;
     for (int k = 2; k < argc; ++k)
     {
@@ -594,6 +690,15 @@ int main(int argc, char **argv)
             writeGoldenDir = argv[++k];
         else if (!std::strcmp(argv[k], "--golden") && k + 1 < argc)
             goldenDir = argv[++k];
+        else if (!std::strcmp(argv[k], "--aot"))
+        {
+#if defined(OB_VU1AOT)
+            aotMode = true;
+#else
+            std::fprintf(stderr, "--aot: this build has no VU1 AOT code (configure with -DOB_VU1AOT_GEN=DIR)\n");
+            return 2;
+#endif
+        }
         else
         {
             std::fprintf(stderr, "unknown argument: %s\n", argv[k]);
@@ -662,6 +767,13 @@ int main(int argc, char **argv)
     uint64_t sumMvuCycles = 0;
     int goldWritten = 0, goldMatch = 0, goldMissing = 0, goldCycleDiff = 0;
     std::map<std::string, int> goldFieldKinds;
+#if defined(OB_VU1AOT)
+    auto aot = std::make_unique<Aot>();
+    int aotRun = 0, aotMatch = 0, aotMatchKnown = 0, aotNoProgram = 0, aotCycleOk = 0, aotError = 0;
+    double sumAotNs = 0, sumAotCycles = 0, sumAotMvuNs = 0, sumAotInterpNs = 0;
+    std::map<std::string, int> aotFieldKinds;
+    std::map<std::string, std::pair<double, int>> aotPerKey; // key -> (sum of ns per interpreter cycle, n)
+#endif
 
     for (const auto &f : files)
     {
@@ -795,6 +907,70 @@ int main(int argc, char **argv)
             tm.push_back(mvu->lastNs);
         }
         const double mi = median(ti), mm = median(tm);
+#if defined(OB_VU1AOT)
+        if (aotMode)
+        {
+            Packets ap;
+            if (!aot->run(c, &ap))
+            {
+                ++aotNoProgram;
+                std::printf("    aot: no generated program for this code image\n");
+            }
+            else
+            {
+                ++aotRun;
+                const int rc = aot->lastRc;
+                const uint64_t acyc = aot->ctx->cycles;
+                Outputs aOut;
+                aot->outputs(aOut, ap);
+                int nA = 0;
+                std::vector<std::string> aDiffs;
+                const std::string ad = diff(iOut, aOut, "interp", "aot", nA, &aDiffs);
+                std::map<std::string, int> kinds;
+                for (const auto &x : aDiffs)
+                    kinds[x.substr(0, x.find_first_of(" :."))] = 1;
+                bool onlyKnown = true;
+                for (const auto &[k, one] : kinds)
+                {
+                    aotFieldKinds[k] += one;
+                    if (!((k == "STATUS" && aOut.status == c.before.status) || (k == "MAC" && aOut.mac == c.before.mac)))
+                        onlyKnown = false;
+                }
+                if (rc != 0)
+                    ++aotError;
+                if (rc == 0 && ad.empty())
+                    ++aotMatch;
+                else if (rc == 0 && onlyKnown)
+                    ++aotMatchKnown;
+                if (acyc == icycles)
+                    ++aotCycleOk;
+                std::vector<double> ta;
+                for (int k = 0; k < repeat; ++k)
+                {
+                    aot->run(c, nullptr);
+                    ta.push_back(aot->lastNs);
+                }
+                const double ma = median(ta);
+                const double icyc = static_cast<double>(std::max<uint64_t>(1, icycles));
+                sumAotNs += ma;
+                sumAotCycles += icyc;
+                sumAotMvuNs += mm;
+                sumAotInterpNs += mi;
+                auto &pk = aotPerKey[keyOf(c)];
+                pk.first += ma / icyc;
+                ++pk.second;
+                const std::string verdict = ad.empty() ? std::string("match")
+                                            : onlyKnown ? std::string("match except STATUS/MAC = input")
+                                                        : "MISMATCH " + ad;
+                std::printf("    aot %s: %s%s, cycles %llu %s, %.2f ns/c (mvu %.2f)%s\n", aot->prog->name, rc ? "ERROR " : "",
+                            verdict.c_str(), static_cast<unsigned long long>(acyc), acyc == icycles ? "= interp" : "!= interp",
+                            ma / icyc, mm / icyc, rc ? (" rc " + std::to_string(rc)).c_str() : "");
+                if (verbose || !onlyKnown)
+                    for (size_t k = 0; k < aDiffs.size() && k < 12; ++k)
+                        std::printf("      %s\n", aDiffs[k].c_str());
+            }
+        }
+#endif
         const double cyc = static_cast<double>(std::max<uint64_t>(1, icycles));
         KeyTime &kt = perKey[keyOf(c)];
         kt.interpNsPerCycle += mi / cyc;
@@ -847,6 +1023,21 @@ int main(int argc, char **argv)
             std::printf("  vs x86: field %-10s differs in %d captures\n", k.c_str(), n);
     }
 
+#if defined(OB_VU1AOT)
+    if (aotMode)
+    {
+        std::printf("aot: ran %d (no program %d), == interp bit for bit %d, equal except STATUS/MAC left at input %d, "
+                    "anything else %d, errors %d; cycle count == interp %d/%d; denormal multiply-add results kept %llu\n",
+                    aotRun, aotNoProgram, aotMatch, aotMatchKnown, aotRun - aotMatch - aotMatchKnown, aotError, aotCycleOk, aotRun,
+                    static_cast<unsigned long long>(vu1aot_denormal_kept));
+        for (const auto &[k, n] : aotFieldKinds)
+            std::printf("  aot field %-10s differs in %d captures\n", k.c_str(), n);
+        std::printf("aot timing (median of %d warm runs, per interpreter cycle, captures with a program): aot %.2f ns, "
+                    "mvu %.2f ns, interp %.2f ns\n",
+                    repeat, sumAotNs / std::max(1.0, sumAotCycles), sumAotMvuNs / std::max(1.0, sumAotCycles),
+                    sumAotInterpNs / std::max(1.0, sumAotCycles));
+    }
+#endif
     // Weighted by the boot's own cycle counts per program (summary.txt), the share of VU1 time each backend needs.
     uint64_t total = 0;
     const auto weights = loadWeights(dir, total);
@@ -866,6 +1057,25 @@ int main(int argc, char **argv)
         std::printf("weighted by in-game cycles (summary.txt, %.1f%% of %llu cycles covered): interp %.2f ns/cycle, mvu %.2f ns/cycle, %.1fx\n",
                     100.0 * covered / total, static_cast<unsigned long long>(total), wi / std::max(1.0, covered),
                     wm / std::max(1.0, covered), wi / std::max(1.0, wm));
+#if defined(OB_VU1AOT)
+        if (aotMode)
+        {
+            double wa = 0, wam = 0, cov = 0;
+            for (const auto &[k, pk] : aotPerKey)
+            {
+                auto it = weights.find(k);
+                auto mt = perKey.find(k);
+                if (it == weights.end() || mt == perKey.end())
+                    continue;
+                const double cyc = static_cast<double>(it->second.cycles);
+                wa += cyc * pk.first / pk.second;
+                wam += cyc * mt->second.mvuNsPerCycle / mt->second.n;
+                cov += cyc;
+            }
+            std::printf("aot weighted by in-game cycles (%.1f%% covered): aot %.2f ns/cycle, mvu %.2f ns/cycle, aot/mvu %.2fx\n",
+                        100.0 * cov / total, wa / std::max(1.0, cov), wam / std::max(1.0, cov), wa / std::max(1e-9, wam));
+        }
+#endif
     }
     ObPcsx2Vu::Shutdown();
     return match == loaded - skipped ? 0 : 1;

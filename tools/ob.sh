@@ -20,6 +20,8 @@
 #   tools/ob.sh vucompare [DIR|--synthetic] [--repeat N] [--verbose] [--no-flag-hack]
 #                                            build native/pcsx2_vu + compare tool, diff interpreter vs microVU on
 #                                            PS2X_VU1_CAPTURE files (default $OB_ROOT/vu1-captures)
+#   tools/ob.sh vu1aot [DIR] [--repeat N] [--verbose]  VU1 ahead-of-time code: tools/vu1aot/emit.py -> $OB_ROOT/vu1aot/gen
+#                                            (game-derived), compare tool with it in $OB_ROOT/vu1aot/build, compare --aot
 #   tools/ob.sh depcheck                     dry run after touching gs_frontend.h: 0 generated game units must rebuild
 #   tools/ob.sh hostprof-build               external sampling profiler tools/hostprof into $OB_HOSTPROF_BUILD
 #                                            (C:/ob/hostprof-build/hostprof.exe); pair with OB_PROFILE=1 recompile
@@ -408,7 +410,7 @@ pcsx2_vu_build() {
     start=$(date +%s)
     mkdir -p "$b"
     { { [ -f "$b/build.ninja" ] ||
-          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src"               -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T"; } &&
+          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src"               -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T" ${OB_PCSX2_VU_CMAKE_EXTRA:-}; } &&
       vc cmake --build "$b" -j $JOBS; } > "$log" 2>&1
     rc=$?
     echo "pcsx2_vu: build exit $rc in $(( $(date +%s) - start )) s ($log)"
@@ -426,6 +428,20 @@ cmd_vucompare() {
     [ $rc = 0 ] || return $rc
     [ "$dir" = --synthetic ] || dir=$(cygpath -w "$dir")
     "$OB_PCSX2_VU_BUILD/ob_pcsx2_vu_compare.exe" "$dir" "$@"
+}
+
+# vu1aot: generate the VU1 ahead-of-time code for the captured programs (emit.py writes only changed files, so an
+# unchanged program does not recompile), build the compare tool with it in its own directory (first build ~3-4 min:
+# its own copy of ob_pcsx2_gs), run it with --aot. Exit: emit.py's (1 = a program could not be generated) or the tool's.
+cmd_vu1aot() {
+    local dir="$OB_ROOT/vu1-captures" gen="$OB_ROOT/vu1aot/gen" rc
+    if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then dir=$1; shift; fi
+    "$PY" -I "$REPO/tools/vu1aot/emit.py" --elf "$(cygpath -w "$OB_RUN/SLPM_654.28")" --captures "$(cygpath -w "$dir")" \
+        --out "$(cygpath -w "$gen")"; rc=$?
+    [ $rc = 0 ] || { echo "vu1aot: emit exit $rc"; return $rc; }
+    OB_PCSX2_VU_BUILD="$OB_ROOT/vu1aot/build" OB_PCSX2_VU_CMAKE_EXTRA="-DOB_VU1AOT_GEN=$(cygpath -m "$gen")" pcsx2_vu_build; rc=$?
+    [ $rc = 0 ] || return $rc
+    "$OB_ROOT/vu1aot/build/ob_pcsx2_vu_compare.exe" "$(cygpath -w "$dir")" --aot "$@"
 }
 
 # depcheck: proves a runtime-internal header change does not rebuild generated game code (patch 0028). Touches
@@ -476,6 +492,7 @@ case ${1:-} in
     check) shift; cmd_check "$@" ;;
     pcsx2-gs) cmd_pcsx2_gs ;;
     vucompare) shift; cmd_vucompare "$@" ;;
+    vu1aot) shift; cmd_vu1aot "$@" ;;
     depcheck) cmd_depcheck ;;
     hostprof-build) cmd_hostprof_build ;;
     android) shift; bash "$REPO/tools/ob/android.sh" "$@" ;;
