@@ -1,0 +1,79 @@
+# gate/jsbar.script - hidden scripted boot into Kevin's J's Bar opening scene (M4 step 1, 2026-10-24).
+# Run: PS2X_GS=pcsx2-sw PS2X_VU1=mvu bash tools/ob.sh boot --script gate/jsbar.script --tag <T>
+# Steps up to Difficulty NORMAL are gate/play.script's (captures dropped). Loading runs in host time
+# (reports/2026-10-23-gameplay.md entry 11), so the scene is anchored on guest state, not on a tick:
+#   0x0048BF60 s8 = GAME main mode (func_005CD660 switch, jtbl_0070A700, en/game/text.s:163633-163650;
+#     0x48BF61 = its sub-step, func_005CE2F0 en/game/text.s:164560-164567). Seen (boots jsprobe2, jsbar1/2):
+#     0x0E room load (from 2841) -> 1 (NOW LOADING, ~4474) -> 2 at the first frame of the J's Bar scene
+#     (~4931) -> 4 at the event demo 0x20 (~9132, 0x00360000 = 0x20, demo flag 0x0048BF88 = 1).
+#   0x003065AA u16 = room number (the r%03d of the voice/lip/demo file names, sprintf at en/game/text.s:145783,
+#     :306694, :144201); 1 from tick ~2845, the whole time in J's Bar.
+# The first mode 2 after GAME.BIN is in is the scene start; jsbar-<k> covers ~20 s of it from there
+#   (600 frames ~ 1280 ticks: with every frame dumped a frame lands every ~2.1 ticks; ~215 MB per run).
+# Status (boots jsbar1, jsbar2, jsbar4, 2026-10-24): the anchor holds (mode 2 at tick 4911/4912, the fade-in
+#   lines up), the camera is fixed for the whole capture, but the scene is NOT deterministic run to run:
+#   the window zombies and the wounded man (right edge) differ from the first lit frame (by tick: share>8
+#   ~0.007, max 56; best frame over a whole run 0.0054 against the frozen p 0.0001), and the dialogue starts
+#   at different ticks (first line at +1102 in jsbar1, none by +2136 in jsbar2). Kevin and the room match.
+#   Not gate-ready until that is explained (reports/2026-10-23-gameplay.md entry 28).
+timeout 900
+watch 0x0048BF60 2
+watch 0x003065AA 2
+
+log save-data screen (memory-card prompt): boot task step 1 sub 4
+wait mem 0x002F85D8 2 == 0x0401
+wait vsync 120
+press left 8
+wait vsync 30
+press circle 8
+
+log ACCESS logo: boot task step 1 sub 9 (128 vsyncs)
+wait mem 0x002F85D8 2 == 0x0901
+wait vsync 100
+
+log CAPCOM logo: title state 0 sub 0 step 1
+wait mem *0x0023BE34+0 4 == 0x00010000
+wait vsync 120
+
+log title PRESS START: title state 0 sub 2 step 3
+wait mem *0x0023BE34+0 4 == 0x00030200
+wait vsync 120
+press start 8
+
+log main menu input wait: title state 1 sub 5 step 5
+wait mem *0x0023BE34+0 4 == 0x00050501
+wait vsync 60
+press circle 8
+
+log single-play entry screen: title state 2 sub 2 step 2
+wait mem *0x0023BE34+0 4 == 0x00020202
+wait vsync 60
+press circle 8
+
+log Scenario Select: select state 8 (t4dbg boot)
+wait mem *0x003065FC+4 1 == 8
+wait vsync 120
+press circle 8
+
+log character select: select state 9 (10/11 = Difficulty)
+wait mem *0x003065FC+4 1 == 9
+wait vsync 90
+press circle 8
+wait vsync 60
+
+log select state 11 = Difficulty (EASY/NORMAL); state 10 passes in 2 ticks (play1 watch)
+wait mem *0x003065FC+4 1 == 11
+wait vsync 90
+press circle 8
+wait vsync 60
+
+log game task installed in slot 4 (func_005CD580, GAME.BIN)
+wait mem 0x002F8654 4 == 0x005CD580
+log GAME.BIN in 0x540000
+wait mem 0x00239F30 1 == 2
+log J's Bar room (room number 1)
+wait mem 0x003065AA 2 == 1
+log J's Bar opening scene: GAME main mode 2 (first frame of the scene)
+wait mem 0x0048BF60 1 == 2
+capture jsbar 600
+quit
