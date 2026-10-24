@@ -54,9 +54,19 @@ folder the stubs left empty. The developer's pack (4,074 PNGs, 3.2 GB, PCSX2 lay
   min 37, 46 of 186 seconds below 55 (`boot-ws1.log`, `boot-all3.log`). Without either: flat 60 (`boot-iopl-after2.log`).
 - **Found by:** `[fps]` lines; the GS thread's queue-ahead stalls barely change (0.63 s vs 0.91 s over the run), so
   the GS ring is not the cause.
-- **Cause:** **Unknown.** Guess: PNG decoding of 4K textures on PCSX2's worker thread competing for CPU when a room
-  first shows them; not measured.
-- **Next:** a hostprof run with the pack (which threads take the time), then PCSX2's options (precache vs memory).
+- **Profiled (OB_PROFILE build, hostprof 45 s from load120s + 30 s, the long dip at ticks 12000-14300):** with the
+  pack (`hostprof-pack-prof.txt`) and without (`hostprof-nopack-prof.txt`) the game thread is saturated the same way:
+  43.9 CPU-s in 45 s (0.98 cores) both, vs 0.55 at load90s; its top rows are identical within noise (microVU JIT
+  12.6%, IOP `executeInstruction` 7.0-7.6%, `memmove` 5.4-6.0%, `memchr` 4.8%, IOP `step` 4.5-4.8%,
+  `advanceEeTimers` 2.9%, the built-in CPU GS's `vertexKick`/`buildDrawBatch`/`writeRegisterPacked` ~3.8%,
+  heap alloc/free ~3%). The GS thread used less with the pack (14.4 vs 17.2 CPU-s).
+- **The dip did not repeat:** in ticks 12000-14300 the profiled pack run averaged 60.8 vsync/s (0 seconds below 55),
+  the no-pack run 57.6 (5 below 55), `all3` 50.5 (32 below 55), `ws1` (no pack) 58.2 (4 below 55).
+- **Cause:** that stretch is game-thread bound in every run (one core, full); anything extra competing for the CPU
+  shows as a dip. The pack is not a steady cost. `all3` was the first run ever to read the 3.2 GB pack, so cold
+  disk reads are the likely extra there (**unverified**: flushing the file cache needs admin rights).
+- **Real headroom is on the game thread:** the CPU GS still runs beside PCSX2's (~4%, looks like pure waste,
+  unverified), `memmove`/`memchr` ~10% from unknown callers (hostprof has no call stacks), the IOP ~17%.
 
 ## Measurements (hidden `gate/play.script`, pcsx2-vk, mvu)
 
@@ -88,7 +98,8 @@ depcheck ok (0 game units); gate `pcsx2-sw` 3/3 gated green, 3 advisory. Builds:
 - Visible check: done by the developer (`play.bat` with `C:\ob\r\ps2xRuntime\outbreak.ini` = `settings-all.ini`,
   `boot-play.err`: `upscale=3 aspect=16:9 ... replacements=found`, mailbox present): "looks good". Not yet a
   side-by-side of which textures were replaced, or a longer play than J's Bar.
-- The pack's frame cost (entry 4).
+- Game-thread headroom in the busy J's Bar stretch (entry 4): the CPU GS work beside PCSX2's, the `memmove`/`memchr`
+  callers, the IOP. A cold-cache run to confirm the pack's first-read dips.
 - The HUD is stretched in 16:9 (the pnach only changes the 3D camera); movies' widescreen fix needs a recompile.
 - Android: texture replacement still stubbed (no arm64 libpng/zlib/libzip build); upscale and pnach are shared code
   but untested there.
