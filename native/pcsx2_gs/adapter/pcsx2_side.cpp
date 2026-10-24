@@ -15,6 +15,7 @@
 #include "Config.h"
 #include "GS/GS.h"
 #include "GS/Renderers/Common/GSRenderer.h"
+#include "GS/Renderers/HW/GSTextureReplacements.h"
 
 #include "ob_pcsx2_gs.h"
 #include "ob_gs_bridge.h"
@@ -48,6 +49,8 @@ using DWORD = uint32_t;
 static DWORD GetCurrentThreadId() { return static_cast<DWORD>(gettid()); }
 #endif
 
+extern std::string ob_disc_serial; // stubs/host_stubs.cpp: what VMManager::GetDiscSerial returns
+
 namespace
 {
 	std::mutex s_mu;
@@ -60,6 +63,9 @@ namespace
 	bool s_visible = false;   // parent window visible at attach: Mailbox present, else Disabled
 	std::atomic<u64> s_pending_size{0}; // (w << 32) | h from ob_gs_window_resized; 0 = none; applied in ob_gs_vsync
 	std::string s_gpu_driver;           // outbreak.ini gpu_driver (ob_gs_set_gpu_driver); used on Android only
+	float s_upscale = 1.0f;             // outbreak.ini upscale (ob_gs_set_display)
+	AspectRatioType s_aspect = AspectRatioType::RAuto4_3_3_2; // pnach gsaspectratio (ob_gs_set_display)
+	std::string s_textures;             // outbreak.ini textures root (ob_gs_set_textures); empty = off
 
 	void StopGsThread(const char* why); // below
 
@@ -200,7 +206,12 @@ namespace
 	{
 		Pcsx2Config::GSOptions o;
 		o.Renderer = r;
-		o.UpscaleMultiplier = 1.0f;
+		o.UpscaleMultiplier = s_upscale; // 1 unless outbreak.ini upscale; the SW renderer ignores it
+		o.AspectRatio = s_aspect;
+#if defined(OB_TEXTURE_REPLACEMENTS)
+		// Texture packs (outbreak.ini textures): loaded on demand on a worker thread, as PCSX2's defaults.
+		o.LoadTextureReplacements = !s_textures.empty() && r == GSRendererType::VK;
+#endif
 		o.InterlaceMode = visible ? GSInterlaceMode::Automatic : GSInterlaceMode::Off; // was Off for every window
 		o.LinearPresent = GSPostBilinearMode::Off;
 		o.Dithering = 2;
@@ -236,6 +247,10 @@ namespace
 		if (!FileSystem::EnsureDirectoryExists(EmuFolders::Cache.c_str(), false))
 			std::fprintf(stderr, "[pcsx2-gs] shader cache dir %s not created; shaders compile every launch\n", EmuFolders::Cache.c_str());
 		const GSRendererType t = ToType(s_renderer);
+		// The present reads EmuConfig.CurrentAspectRatio (GSRenderer.cpp:319-337); PCSX2's VMManager copies it from
+		// GS.AspectRatio at boot, which is not built here.
+		EmuConfig.CurrentAspectRatio = s_aspect;
+		EmuFolders::Textures = s_textures; // GSTextureReplacements reads <Textures>/<serial>/ at GSopen
 		// PCSX2's own log (swap chain present mode, fallbacks, resize errors) -> pcsx2-gs.log in the working dir.
 		Log::SetFileOutputLevel(LOGLEVEL_DEV, "pcsx2-gs.log");
 		const GSVSyncMode vsync = (s_child && s_visible) ? GSVSyncMode::Mailbox : GSVSyncMode::Disabled;
@@ -252,10 +267,17 @@ namespace
 #else
 		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t, s_child && s_visible), t, s_basemem, vsync, false);
 #endif
-		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d\n",
+		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d upscale=%g aspect=%s textures=%s serial=%s replacements=%s\n",
 			static_cast<int>(t), s_open ? "ok" : "FAILED", s_child ? "child" : "hidden", static_cast<int>(vsync),
 			s_open && g_gs_device ? static_cast<int>(g_gs_device->GetVSyncMode()) : -1,
-			s_open && g_gs_device ? g_gs_device->GetWindowWidth() : 0, s_open && g_gs_device ? g_gs_device->GetWindowHeight() : 0);
+			s_open && g_gs_device ? g_gs_device->GetWindowWidth() : 0, s_open && g_gs_device ? g_gs_device->GetWindowHeight() : 0,
+			static_cast<double>(s_upscale), Pcsx2Config::GSOptions::AspectRatioNames[static_cast<int>(s_aspect)],
+			s_textures.empty() ? "-" : s_textures.c_str(), ob_disc_serial.empty() ? "-" : ob_disc_serial.c_str(),
+#if defined(OB_TEXTURE_REPLACEMENTS)
+			s_open && GSTextureReplacements::HasAnyReplacementTextures() ? "found" : "none");
+#else
+			"not built");
+#endif
 		std::fflush(stderr);
 		return s_open;
 	}
@@ -307,6 +329,22 @@ void ob_gs_set_gpu_driver(const char* name)
 {
 	std::lock_guard<std::mutex> lk(s_mu);
 	s_gpu_driver = name ? name : "";
+}
+
+void ob_gs_set_display(uint32_t upscale, ObGsAspect aspect)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	s_upscale = (upscale >= 1u && upscale <= 8u) ? static_cast<float>(upscale) : 1.0f;
+	s_aspect = aspect == ObGsAspect::R16_9 ? AspectRatioType::R16_9
+	         : aspect == ObGsAspect::R4_3  ? AspectRatioType::R4_3
+	                                       : AspectRatioType::RAuto4_3_3_2;
+}
+
+void ob_gs_set_textures(const char* root, const char* serial)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	s_textures = root ? root : "";
+	ob_disc_serial = serial ? serial : "";
 }
 
 // Qwords of the GIFtag units that fit whole in [p, p + qwc*16): GSState::Transfer (GSState.cpp:3392, :3455)

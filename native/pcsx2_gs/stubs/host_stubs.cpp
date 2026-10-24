@@ -60,7 +60,10 @@ std::string Host::GetStringSettingValue(const char*, const char*, const char* de
 
 // ---- VMManager:: (pcsx2/VMManager.h) ----
 bool VMManager::HasValidVM() { return false; }
-std::string VMManager::GetDiscSerial() { return {}; }
+// The game's serial (e.g. SLPM-65428), set by the adapter before GSopen: texture replacement looks up
+// <EmuFolders::Textures>/<serial>/ with it (GSTextureReplacements::Initialize).
+std::string ob_disc_serial;
+std::string VMManager::GetDiscSerial() { return ob_disc_serial; }
 std::string VMManager::GetTitle(bool) { return {}; }
 u32 VMManager::GetDiscCRC() { return 0; }
 const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()

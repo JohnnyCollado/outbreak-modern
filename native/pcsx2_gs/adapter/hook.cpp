@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_external.h"
 #include "runtime/ps2_game_source.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_pnach.h"
 
 #include "ob_gs_bridge.h"
 
@@ -56,5 +57,11 @@ PS2ExternalGS* ps2CreateExternalGS(const char* mode)
 	else
 		return nullptr;
 	ob_gs_set_gpu_driver(ps2game::activeSettings().gpuDriver.c_str()); // outbreak.ini, PS2Recomp patch 0046
+	// outbreak.ini upscale (PS2Recomp 0050); pnach gsaspectratio (0051), read before the runtime opens the GS.
+	const std::string& aspect = ps2game::activePnach().aspect;
+	ob_gs_set_display(ps2game::activeSettings().upscale,
+		aspect == "16:9" ? ObGsAspect::R16_9 : aspect == "4:3" ? ObGsAspect::R4_3 : ObGsAspect::Auto);
+	// outbreak.ini textures + the game's serial (0052): PCSX2 texture replacement, <textures>/<serial>/replacements.
+	ob_gs_set_textures(ps2game::activeSettings().textures.string().c_str(), ps2game::activeGameSerial().c_str());
 	return new Pcsx2ExternalGS();
 }

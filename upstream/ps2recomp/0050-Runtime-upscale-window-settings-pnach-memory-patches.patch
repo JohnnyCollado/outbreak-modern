@@ -1,0 +1,884 @@
+From af6e20de4903ea5300a9b6f696476d4006ff5358 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 11:16:57 -0400
+Subject: [PATCH] Runtime: upscale/window settings, pnach memory patches, game
+ serial
+
+Three start-up features for an external GPU GS (high resolution,
+widescreen, texture packs):
+
+1. Settings (ps2_game_source): upscale = 1..8 (an external GPU GS's
+   render resolution multiplier; unset = 1) and window = <W>x<H> (the
+   host window at start-up, at least 320x224; unset = the built-in size).
+   Other values are bad lines that leave them unset. InitWindow uses it.
+
+2. pnach (new ps2_pnach.h/.cpp): every *.pnach in <mods>/<serial>/
+   (folder in any case, files in name order) is read before the window
+   opens. patch=<place>,EE,<addr>,<type>,<value> with byte/short/word or
+   extended 0/1/2 writes; place 0 = once at boot, 1 = every vsync,
+   2 = both (PCSX2's semantics); gsaspectratio=4:3|16:9. Comments,
+   [sections], gametitle/description/author/comment are ignored; other
+   CPUs, types, conditional extended codes, unaligned and malformed
+   lines are skipped with "[pnach] <file> line N: <reason>".
+   After the ELF load, writes inside recompiled code (the boot ELF's
+   function table range and every registered guest module) are dropped
+   with one line each: code is compiled ahead of time, so they need a
+   recompile. The rest are applied at boot (PS2Runtime::applyPnachAtBoot)
+   and continuous ones at every VBlankStart (EeScheduler).
+   gsaspectratio=16:9 widens the built-in window to 16:9 at the same
+   height; activePnach().aspect is there for the external GS.
+
+3. activeGameSerial(): the resolved game's serial, set by main once the
+   game source is known, for an external GS's texture replacement
+   (<textures>/<serial>/replacements). The textures log line now says
+   the textures are loaded by an external GS that supports them.
+
+Tests (ps2x): settings upscale/window (valid, X in any case, quoted,
+five bad lines, empty clears); pnach parse (all write forms, places,
+aspect; nine rejected lines with reasons), code-range drop and boot /
+vsync apply (a value written back by the game is re-applied; writes past
+RAM ignored), folder lookup (case, order, non-.pnach ignored, other
+serial, no mods root); active serial set/clear. Without this patch they
+do not compile (no upscale/window fields, no ps2_pnach.h, no
+activeGameSerial).
+---
+ ps2xRuntime/CMakeLists.txt                    |   1 +
+ ps2xRuntime/include/ps2_runtime.h             |   3 +
+ ps2xRuntime/include/runtime/ps2_game_source.h |  13 +-
+ ps2xRuntime/include/runtime/ps2_pnach.h       |  58 +++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp    |   4 +
+ ps2xRuntime/src/lib/ps2_game_source.cpp       |  64 ++++-
+ ps2xRuntime/src/lib/ps2_pnach.cpp             | 245 ++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  28 +-
+ ps2xRuntime/src/main.cpp                      |   7 +-
+ ps2xTest/CMakeLists.txt                       |   1 +
+ ps2xTest/src/main.cpp                         |   2 +
+ ps2xTest/src/ps2_game_source_tests.cpp        |  32 +++
+ ps2xTest/src/ps2_pnach_tests.cpp              | 139 ++++++++++
+ 13 files changed, 592 insertions(+), 5 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_pnach.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_pnach.cpp
+ create mode 100644 ps2xTest/src/ps2_pnach_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 354af39..f090d67 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -397,6 +397,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_iop_host.cpp
+     src/lib/ps2_memory.cpp
+     src/lib/ps2_game_source.cpp
++    src/lib/ps2_pnach.cpp
+     src/lib/ps2_input_bindings.cpp
+     src/lib/ps2_pad.cpp
+     src/lib/ps2_rom_device.cpp
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 3f95c84..28e91a7 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -68,6 +68,9 @@ public:
+     bool loadELF(const std::string &elfPath);
+     // The boot ELF as bytes (read from a disc image); unlike loadELF it keeps the I/O paths already set.
+     bool loadELFImage(const std::vector<uint8_t> &bytes, const std::string &elfName);
++    // The active pnach set (ps2_pnach.h, patch 0051) after the ELF load: drops writes into recompiled code (the
++    // boot ELF's function table and every registered guest module), logs them, and applies the boot writes.
++    void applyPnachAtBoot();
+     void run();
+ 
+     [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index 4c08aef..5edb54a 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -15,7 +15,8 @@
+ // a line whose first non-blank character is ';' or '#' is a comment (so paths may contain both); keys are
+ // case-insensitive; a value may be in double quotes; a relative path is relative to the settings file's folder.
+ //   game = <ISO image, extracted folder or boot ELF>   the command-line argument wins over it
+-//   textures = <root>   PCSX2 layout: <root>/<serial>/replacements (recorded and exposed; not used yet)
++//   textures = <root>   PCSX2 layout: <root>/<serial>/replacements; read by an external GS that supports texture
++//                       replacement, with activeGameSerial() (outbreak-modern: PCSX2's, Vulkan renderer)
+ //   mods = <root>       reserved for mod support (recorded only)
+ //   gpu_driver = system | <name>   Android: the Vulkan driver of the external GS, the phone's own (system, the
+ //                       default) or a driver package in <files dir>/drivers/<name>/ (outbreak-modern
+@@ -23,6 +24,9 @@
+ //                       with one "[settings] gpu_driver=... ignored" line
+ //   vu1 = mvu | interp  the VU1 backend when PS2X_VU1 is unset (PS2X_VU1 wins); unset = the platform default
+ //                       (Android with the external VU1: mvu, else interp; ps2_platform_defaults.h).
++//   upscale = 1..8      render resolution multiplier of an external GPU GS (outbreak-modern: PCSX2's
++//                       UpscaleMultiplier, Vulkan renderer only); unset = 1 (native)
++//   window = <W>x<H>    the host window's size at start-up (e.g. 1280x960); unset = the built-in size
+ // A bad line is reported once ("[settings] line N: ...") and ignored.
+ 
+ #include <cstdint>
+@@ -41,6 +45,9 @@ namespace ps2game
+         std::filesystem::path mods;     // empty = not set
+         std::string gpuDriver;          // gpu_driver as written; empty = not set (system)
+         std::string vu1;                // vu1: "mvu" or "interp" (lower case); empty = not set (platform default)
++        uint32_t upscale = 0u;          // upscale 1..8; 0 = not set (1)
++        uint32_t windowWidth = 0u;      // window W x H; 0 = not set (built-in size)
++        uint32_t windowHeight = 0u;
+     };
+ 
+     // The note logged at start-up for gpu_driver on this platform: empty on Android, or when gpu_driver is unset
+@@ -54,6 +61,10 @@ namespace ps2game
+     bool loadSettingsAtStartup();
+     const Settings &activeSettings();
+     void setActiveSettings(const Settings &settings);
++    // The running game's serial ("SLPM-65428"; patch 0052), set by the runner once the game source is resolved, for
++    // an external GS's texture replacement (<textures>/<serial>/). Empty before that or when unknown.
++    const std::string &activeGameSerial();
++    void setActiveGameSerial(const std::string &serial);
+ 
+     // The exe's folder; on Android the app's external files dir. Empty when unknown.
+     std::filesystem::path settingsDirectory();
+diff --git a/ps2xRuntime/include/runtime/ps2_pnach.h b/ps2xRuntime/include/runtime/ps2_pnach.h
+new file mode 100644
+index 0000000..451e181
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_pnach.h
+@@ -0,0 +1,58 @@
++#ifndef PS2_PNACH_H
++#define PS2_PNACH_H
++
++// PCSX2 .pnach patch files, memory writes only (patch 0051).
++//
++// The runner reads every *.pnach in <mods>/<serial>/ (outbreak.ini mods, any case; e.g. mods/SLPM-65428/) at
++// start-up. Lines: patch=<place>,EE,<address>,<type>,<value> with hex address and value; place 0 = once at boot,
++// 1 = continuously (every vsync), 2 = both (PCSX2's PPT_ONCE_ON_LOAD / PPT_CONTINUOUSLY / PPT_COMBINED_0_1); type
++// byte | short | word, or extended with a 0/1/2 (8/16/32-bit write) code type in the address's top nibble.
++// gsaspectratio=4:3|16:9 sets the display aspect. [section] headers, //-comments, gametitle, description, author
++// and comment lines are accepted and ignored: every patch in the folder is applied.
++//
++// A recompiled game's code is compiled ahead of time, so a patch that rewrites instructions has no effect at run
++// time: writes into the boot ELF's executable segments are dropped with one "[pnach] ... code" line each (they
++// need a recompile). Other CPUs (IOP), other types (double, be*, conditional extended codes) are skipped with a line.
++
++#include <cstddef>
++#include <cstdint>
++#include <filesystem>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++namespace ps2game
++{
++    struct PnachWrite
++    {
++        uint32_t address = 0u; // EE physical address
++        uint32_t value = 0u;
++        uint8_t size = 4u;     // bytes: 1, 2 or 4
++        bool once = true;      // applied at boot
++        bool continuous = false; // applied every vsync
++    };
++
++    struct PnachSet
++    {
++        std::vector<PnachWrite> writes;
++        std::string aspect; // "4:3", "16:9"; empty = not set
++        std::vector<std::filesystem::path> files;
++    };
++
++    // Adds text's patches to out; problems go to messages ("[pnach] <name> line N: ...").
++    void parsePnach(const std::string &text, std::string_view name, PnachSet &out, std::vector<std::string> &messages);
++    // Drops writes that fall inside any [begin, end) code range, one message each.
++    void dropCodeWrites(PnachSet &set, const std::vector<std::pair<uint32_t, uint32_t>> &codeRanges,
++                        std::vector<std::string> &messages);
++    // Writes the patches with once (boot) or continuous (vsync) set into rdram (little-endian), within ramSize.
++    void applyPnach(const PnachSet &set, uint8_t *rdram, size_t ramSize, bool boot);
++
++    // Reads <mods>/<serial>/*.pnach (folder name in any case, files sorted by name) into the active set and logs
++    // what it found. False when mods or serial is empty or the folder does not exist.
++    bool loadPnachAtStartup(const std::filesystem::path &mods, std::string_view serial);
++    const PnachSet &activePnach();
++    void setActivePnach(const PnachSet &set);
++}
++
++#endif
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 9f8ace9..0e7d95d 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -4,6 +4,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_diag_hooks.h"
++#include "runtime/ps2_pnach.h"
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -1896,6 +1897,9 @@ void EeScheduler::processEvent(const EeEvent &event)
+     {
+         ++m_vsyncTick;
+         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
++        // Continuous pnach writes (place 1/2, patch 0051), as PCSX2 applies them each vsync. Set once before run().
++        if (const ps2game::PnachSet &pnach = ps2game::activePnach(); !pnach.writes.empty())
++            ps2game::applyPnach(pnach, m_rdram, PS2_RAM_SIZE, false);
+         if ((m_vsyncTick & 1u) != 0u)
+         {
+             m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index c1cebe5..f356d78 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -45,6 +45,22 @@ namespace ps2game
+             return s;
+         }
+ 
++        // Decimal digits only (no sign, no spaces), at most 9 of them.
++        bool parseUnsigned(const std::string &s, uint32_t &out)
++        {
++            if (s.empty() || s.size() > 9u)
++                return false;
++            uint32_t n = 0u;
++            for (const char c : s)
++            {
++                if (c < '0' || c > '9')
++                    return false;
++                n = n * 10u + static_cast<uint32_t>(c - '0');
++            }
++            out = n;
++            return true;
++        }
++
+         Settings &activeStorage()
+         {
+             static Settings s_active;
+@@ -141,6 +157,34 @@ namespace ps2game
+                     bad("vu1 must be mvu or interp, not '" + value + "'");
+                 continue;
+             }
++            if (key == "upscale")
++            {
++                uint32_t n = 0u;
++                if (value.empty())
++                    settings.upscale = 0u;
++                else if (parseUnsigned(value, n) && n >= 1u && n <= 8u)
++                    settings.upscale = n;
++                else
++                    bad("upscale must be 1..8, not '" + value + "'");
++                continue;
++            }
++            if (key == "window")
++            {
++                const size_t x = lower(value).find('x');
++                uint32_t w = 0u, h = 0u;
++                if (value.empty())
++                    settings.windowWidth = settings.windowHeight = 0u;
++                else if (x != std::string::npos && parseUnsigned(trim(std::string_view(value).substr(0u, x)), w) &&
++                         parseUnsigned(trim(std::string_view(value).substr(x + 1u)), h) && w >= 320u && h >= 224u &&
++                         w <= 16384u && h <= 16384u)
++                {
++                    settings.windowWidth = w;
++                    settings.windowHeight = h;
++                }
++                else
++                    bad("window must be <width>x<height> (at least 320x224), not '" + value + "'");
++                continue;
++            }
+             std::filesystem::path *target = nullptr;
+             if (key == "game")
+                 target = &settings.game;
+@@ -150,7 +194,7 @@ namespace ps2game
+                 target = &settings.mods;
+             else
+             {
+-                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, vu1)");
++                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, vu1, upscale, window)");
+                 continue;
+             }
+             if (value.empty())
+@@ -168,6 +212,17 @@ namespace ps2game
+     const Settings &activeSettings() { return activeStorage(); }
+     void setActiveSettings(const Settings &settings) { activeStorage() = settings; }
+ 
++    namespace
++    {
++        std::string &serialStorage()
++        {
++            static std::string s_serial;
++            return s_serial;
++        }
++    }
++    const std::string &activeGameSerial() { return serialStorage(); }
++    void setActiveGameSerial(const std::string &serial) { serialStorage() = serial; }
++
+     std::filesystem::path settingsDirectory()
+     {
+ #if defined(__ANDROID__)
+@@ -223,7 +278,12 @@ namespace ps2game
+                   << " textures=" << (settings.textures.empty() ? "-" : settings.textures.string())
+                   << " mods=" << (settings.mods.empty() ? "-" : settings.mods.string())
+                   << " gpu_driver=" << (settings.gpuDriver.empty() ? "system" : settings.gpuDriver)
+-                  << " vu1=" << (settings.vu1.empty() ? "-" : settings.vu1) << std::endl;
++                  << " vu1=" << (settings.vu1.empty() ? "-" : settings.vu1)
++                  << " upscale=" << (settings.upscale ? std::to_string(settings.upscale) : std::string("-"))
++                  << " window="
++                  << (settings.windowWidth ? std::to_string(settings.windowWidth) + "x" + std::to_string(settings.windowHeight)
++                                           : std::string("-"))
++                  << std::endl;
+ #if defined(__ANDROID__)
+         const bool android = true;
+ #else
+diff --git a/ps2xRuntime/src/lib/ps2_pnach.cpp b/ps2xRuntime/src/lib/ps2_pnach.cpp
+new file mode 100644
+index 0000000..f8183b0
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_pnach.cpp
+@@ -0,0 +1,245 @@
++#include "runtime/ps2_pnach.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cstring>
++#include <fstream>
++#include <iostream>
++#include <sstream>
++
++namespace ps2game
++{
++    namespace
++    {
++        std::string trim(std::string_view s)
++        {
++            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
++                s.remove_prefix(1u);
++            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
++                s.remove_suffix(1u);
++            return std::string(s);
++        }
++
++        std::string lower(std::string s)
++        {
++            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c)
++                           { return static_cast<char>(std::tolower(c)); });
++            return s;
++        }
++
++        // Hex digits only (an optional 0x prefix), at most 8 of them.
++        bool parseHex(std::string s, uint32_t &out)
++        {
++            s = lower(trim(s));
++            if (s.rfind("0x", 0u) == 0u)
++                s = s.substr(2u);
++            if (s.empty() || s.size() > 8u)
++                return false;
++            uint32_t n = 0u;
++            for (const char c : s)
++            {
++                uint32_t digit;
++                if (c >= '0' && c <= '9')
++                    digit = static_cast<uint32_t>(c - '0');
++                else if (c >= 'a' && c <= 'f')
++                    digit = static_cast<uint32_t>(c - 'a' + 10);
++                else
++                    return false;
++                n = (n << 4u) | digit;
++            }
++            out = n;
++            return true;
++        }
++
++        std::vector<std::string> splitCommas(const std::string &s)
++        {
++            std::vector<std::string> parts;
++            size_t begin = 0u;
++            while (true)
++            {
++                const size_t comma = s.find(',', begin);
++                parts.push_back(trim(std::string_view(s).substr(begin, comma == std::string::npos ? std::string::npos
++                                                                                                   : comma - begin)));
++                if (comma == std::string::npos)
++                    return parts;
++                begin = comma + 1u;
++            }
++        }
++
++        std::string hex(uint32_t v)
++        {
++            std::ostringstream out;
++            out << "0x" << std::hex << std::uppercase << v;
++            return out.str();
++        }
++
++        PnachSet &activeStorage()
++        {
++            static PnachSet s_active;
++            return s_active;
++        }
++    }
++
++    void parsePnach(const std::string &text, std::string_view name, PnachSet &out, std::vector<std::string> &messages)
++    {
++        std::stringstream in(text);
++        std::string raw;
++        int lineNo = 0;
++        while (std::getline(in, raw))
++        {
++            ++lineNo;
++            std::string line = raw;
++            if (const size_t comment = line.find("//"); comment != std::string::npos)
++                line = line.substr(0u, comment);
++            line = trim(line);
++            if (line.empty() || line.front() == '[')
++                continue;
++            auto note = [&](const std::string &why)
++            { messages.push_back("[pnach] " + std::string(name) + " line " + std::to_string(lineNo) + ": " + why); };
++            const size_t equals = line.find('=');
++            if (equals == std::string::npos)
++            {
++                note("expected key=value");
++                continue;
++            }
++            const std::string key = lower(trim(std::string_view(line).substr(0u, equals)));
++            const std::string value = trim(std::string_view(line).substr(equals + 1u));
++            if (key == "gametitle" || key == "description" || key == "author" || key == "comment")
++                continue;
++            if (key == "gsaspectratio")
++            {
++                if (value == "4:3" || value == "16:9")
++                    out.aspect = value;
++                else
++                    note("gsaspectratio " + value + " not supported (4:3, 16:9)");
++                continue;
++            }
++            if (key != "patch")
++            {
++                note("'" + key + "' not supported, ignored");
++                continue;
++            }
++            const std::vector<std::string> f = splitCommas(value);
++            if (f.size() != 5u)
++            {
++                note("patch needs place,cpu,address,type,value");
++                continue;
++            }
++            uint32_t address = 0u, data = 0u;
++            if ((f[0] != "0" && f[0] != "1" && f[0] != "2") || !parseHex(f[2], address) || !parseHex(f[4], data))
++            {
++                note("bad place, address or value");
++                continue;
++            }
++            if (lower(f[1]) != "ee")
++            {
++                note("cpu " + f[1] + " not supported (EE only), skipped");
++                continue;
++            }
++            PnachWrite w;
++            w.once = f[0] != "1";
++            w.continuous = f[0] != "0";
++            const std::string type = lower(f[3]);
++            if (type == "byte" || type == "short" || type == "word")
++            {
++                w.size = type == "byte" ? 1u : (type == "short" ? 2u : 4u);
++                w.address = address;
++            }
++            else if (type == "extended")
++            {
++                // Code type in the top nibble: 0 = 8-bit, 1 = 16-bit, 2 = 32-bit constant write.
++                const uint32_t code = address >> 28u;
++                if (code > 2u)
++                {
++                    note("extended code type " + std::to_string(code) + " not supported (0, 1, 2 writes), skipped");
++                    continue;
++                }
++                w.size = code == 0u ? 1u : (code == 1u ? 2u : 4u);
++                w.address = address & 0x0FFFFFFFu;
++            }
++            else
++            {
++                note("type " + f[3] + " not supported (byte, short, word, extended), skipped");
++                continue;
++            }
++            w.address &= 0x1FFFFFFFu;
++            w.value = w.size == 4u ? data : (data & ((1u << (8u * w.size)) - 1u));
++            if ((w.address & (w.size - 1u)) != 0u)
++            {
++                note("address " + hex(w.address) + " not aligned to the write size, skipped");
++                continue;
++            }
++            out.writes.push_back(w);
++        }
++    }
++
++    void dropCodeWrites(PnachSet &set, const std::vector<std::pair<uint32_t, uint32_t>> &codeRanges,
++                        std::vector<std::string> &messages)
++    {
++        auto inCode = [&](const PnachWrite &w)
++        {
++            return std::any_of(codeRanges.begin(), codeRanges.end(), [&](const auto &r)
++                               { return w.address < r.second && w.address + w.size > r.first; });
++        };
++        for (const PnachWrite &w : set.writes)
++        {
++            if (inCode(w))
++                messages.push_back("[pnach] write at " + hex(w.address) +
++                                   " is in recompiled code: needs a recompile, skipped");
++        }
++        set.writes.erase(std::remove_if(set.writes.begin(), set.writes.end(), inCode), set.writes.end());
++    }
++
++    void applyPnach(const PnachSet &set, uint8_t *rdram, size_t ramSize, bool boot)
++    {
++        if (!rdram)
++            return;
++        for (const PnachWrite &w : set.writes)
++        {
++            if (!(boot ? w.once : w.continuous) || w.address >= ramSize || ramSize - w.address < w.size)
++                continue;
++            std::memcpy(rdram + w.address, &w.value, w.size); // little-endian host, as the EE
++        }
++    }
++
++    bool loadPnachAtStartup(const std::filesystem::path &mods, std::string_view serial)
++    {
++        if (mods.empty() || serial.empty())
++            return false;
++        std::error_code ec;
++        std::filesystem::path folder;
++        for (const auto &entry : std::filesystem::directory_iterator(mods, ec))
++        {
++            if (entry.is_directory(ec) && lower(entry.path().filename().string()) == lower(std::string(serial)))
++                folder = entry.path();
++        }
++        if (folder.empty())
++            return false;
++        std::vector<std::filesystem::path> files;
++        for (const auto &entry : std::filesystem::directory_iterator(folder, ec))
++        {
++            if (entry.is_regular_file(ec) && lower(entry.path().extension().string()) == ".pnach")
++                files.push_back(entry.path());
++        }
++        std::sort(files.begin(), files.end());
++        PnachSet set;
++        std::vector<std::string> messages;
++        for (const auto &file : files)
++        {
++            std::ifstream in(file, std::ios::binary);
++            std::stringstream text;
++            text << in.rdbuf();
++            parsePnach(text.str(), file.filename().string(), set, messages);
++            set.files.push_back(file);
++        }
++        for (const std::string &m : messages)
++            std::cout << m << std::endl;
++        std::cout << "[pnach] " << folder.string() << ": " << files.size() << " file(s), " << set.writes.size()
++                  << " write(s), aspect=" << (set.aspect.empty() ? "-" : set.aspect) << std::endl;
++        setActivePnach(set);
++        return true;
++    }
++
++    const PnachSet &activePnach() { return activeStorage(); }
++    void setActivePnach(const PnachSet &set) { activeStorage() = set; }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 32de966..74a99be 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -10,6 +10,7 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_fps_counter.h"
+ #include "runtime/ps2_game_source.h"
++#include "runtime/ps2_pnach.h"
+ #include "runtime/ps2_platform_defaults.h"
+ #include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_input_bindings.h"
+@@ -1002,7 +1003,14 @@ bool PS2Runtime::initialize(const char *title)
+         const bool hidden = hiddenEnv != nullptr && std::strcmp(hiddenEnv, "1") == 0;
+         const unsigned int windowFlags = hidden ? (FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN) : FLAG_WINDOW_RESIZABLE;
+         SetConfigFlags(windowFlags);
+-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
++        // outbreak.ini window = WxH (patch 0050), else the built-in size; a pnach gsaspectratio=16:9 (patch 0051)
++        // widens the built-in size to 16:9 at the same height.
++        const ps2game::Settings &settings = ps2game::activeSettings();
++        const int builtInWidth = ps2game::activePnach().aspect == "16:9" ? (HOST_WINDOW_HEIGHT * 16 + 8) / 9
++                                                                         : HOST_WINDOW_WIDTH;
++        const int windowWidth = settings.windowWidth ? static_cast<int>(settings.windowWidth) : builtInWidth;
++        const int windowHeight = settings.windowHeight ? static_cast<int>(settings.windowHeight) : HOST_WINDOW_HEIGHT;
++        InitWindow(windowWidth, windowHeight, title);
+         s_windowTitle = title ? title : "";
+         s_windowHidden = hidden;
+         if (hidden)
+@@ -1424,6 +1432,24 @@ void ps2UnregisterGuestModule(const char *name)
+                   modules.end());
+ }
+ 
++void PS2Runtime::applyPnachAtBoot()
++{
++    ps2game::PnachSet set = ps2game::activePnach();
++    if (set.writes.empty())
++        return;
++    std::vector<std::pair<uint32_t, uint32_t>> code;
++    code.emplace_back(g_ps2RecompiledFunctionTableBase, g_ps2RecompiledFunctionTableEnd);
++    for (const PS2GuestModule &module : guestModuleRegistry())
++        code.emplace_back(module.base, module.end);
++    std::vector<std::string> messages;
++    ps2game::dropCodeWrites(set, code, messages);
++    for (const std::string &m : messages)
++        std::cout << m << std::endl;
++    ps2game::setActivePnach(set);
++    ps2game::applyPnach(set, m_memory.getRDRAM(), PS2_RAM_SIZE, true);
++    std::cout << "[pnach] applied " << set.writes.size() << " write(s) at boot" << std::endl;
++}
++
+ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
+ {
+     uint32_t slot = 0u;
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index 7806df3..41fd2a3 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -1,6 +1,7 @@
+ #include "ps2_runtime.h"
+ #include "games_database.h"
+ #include "runtime/ps2_game_source.h"
++#include "runtime/ps2_pnach.h"
+ #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+ #include "ps2_debug_panel.h"
+ #endif
+@@ -200,11 +201,14 @@ int main(int argc, char *argv[])
+                   << (source.kind == ps2game::GameSource::Kind::Image ? source.image : source.elfPath).string()
+                   << " boot=" << (source.bootPath.empty() ? "-" : source.bootPath)
+                   << " serial=" << (source.serial.empty() ? "-" : source.serial) << std::endl;
++        ps2game::setActiveGameSerial(source.serial);
+         if (const std::filesystem::path textures = ps2game::textureReplacementDirectory(source.serial); !textures.empty())
+         {
+             std::cout << "[settings] texture replacements for " << source.serial << ": " << textures.string()
+-                      << " (recorded; not loaded yet)" << std::endl;
++                      << " (loaded by an external GS that supports them)" << std::endl;
+         }
++        // <mods>/<serial>/*.pnach (patch 0051): read before the window opens (gsaspectratio sizes it).
++        ps2game::loadPnachAtStartup(ps2game::activeSettings().mods, source.serial);
+ 
+         std::string filePathStr = source.elfPath.string();
+         std::string elfName = source.elfName;
+@@ -273,6 +277,7 @@ int main(int argc, char *argv[])
+             std::cerr << "Failed to load ELF file: " << filePathStr << std::endl;
+             return 1;
+         }
++        runtime.applyPnachAtBoot();
+ 
+         runtime.run();
+ 
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index ccdda04..8e995df 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -44,6 +44,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_diag_hooks_tests.cpp
+     src/ps2_input_bindings_tests.cpp
+     src/ps2_game_source_tests.cpp
++    src/ps2_pnach_tests.cpp
+     src/ps2_runtime_api_support.cpp
+ )
+ 
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 2b2be8b..614d6c7 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -25,6 +25,7 @@ void register_ps2_fps_counter_tests();
+ void register_ps2_diag_hooks_tests();
+ void register_ps2_input_bindings_tests();
+ void register_ps2_game_source_tests();
++void register_ps2_pnach_tests();
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -54,6 +55,7 @@ int main()
+     register_ps2_diag_hooks_tests();
+     register_ps2_input_bindings_tests();
+     register_ps2_game_source_tests();
++    register_ps2_pnach_tests();
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 93c2636..901ed05 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -371,5 +371,37 @@ void register_ps2_game_source_tests()
+             t.IsTrue(!messages.empty() && messages[0].find("vu1 must be mvu or interp") != std::string::npos,
+                      "reason given: " + (messages.empty() ? std::string() : messages[0]));
+         });
++
++        tc.Run("settings: upscale = 1..8 and window = WxH; out-of-range values are bad lines that leave them unset",
++               [](TestCase &t)
++        {
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("upscale = 4\nWINDOW = 1280X960\n", {}, s, messages);
++            t.Equals(messages.size(), size_t{0}, "upscale and window are known keys");
++            t.Equals(s.upscale, 4u, "upscale");
++            t.Equals(s.windowWidth, 1280u, "window width (X in any case)");
++            t.Equals(s.windowHeight, 960u, "window height");
++            ps2game::parseSettingsIni("window = \" 1920 x 1080 \"\n", {}, s, messages);
++            t.IsTrue(s.windowWidth == 1920u && s.windowHeight == 1080u, "quoted, spaces around the numbers");
++            ps2game::Settings bad;
++            ps2game::parseSettingsIni("upscale = 9\nupscale = 0\nupscale = 2.5\nwindow = 1280\nwindow = 100x100\n",
++                                      {}, bad, messages);
++            t.Equals(messages.size(), size_t{5}, "five bad lines");
++            t.IsTrue(bad.upscale == 0u && bad.windowWidth == 0u && bad.windowHeight == 0u, "bad values leave both unset");
++            t.IsTrue(messages[0].find("upscale must be 1..8") != std::string::npos, "reason: " + messages[0]);
++            t.IsTrue(messages[3].find("window must be <width>x<height>") != std::string::npos, "reason: " + messages[3]);
++            ps2game::parseSettingsIni("upscale =\nwindow =\n", {}, s, messages);
++            t.IsTrue(s.upscale == 0u && s.windowWidth == 0u, "an empty value clears");
++        });
++
++        tc.Run("active game serial: empty until the runner sets it, then the resolved serial", [](TestCase &t)
++        {
++            ps2game::setActiveGameSerial({});
++            t.IsTrue(ps2game::activeGameSerial().empty(), "empty by default");
++            ps2game::setActiveGameSerial("SLPM-65428");
++            t.IsTrue(ps2game::activeGameSerial() == "SLPM-65428", "set: " + ps2game::activeGameSerial());
++            ps2game::setActiveGameSerial({});
++        });
+     });
+ }
+diff --git a/ps2xTest/src/ps2_pnach_tests.cpp b/ps2xTest/src/ps2_pnach_tests.cpp
+new file mode 100644
+index 0000000..492743d
+--- /dev/null
++++ b/ps2xTest/src/ps2_pnach_tests.cpp
+@@ -0,0 +1,139 @@
++// Patch 0051: PCSX2 .pnach memory writes (parse, drop writes into recompiled code, apply at boot / per vsync) and
++// the <mods>/<serial>/ folder lookup. Synthetic patches only; no game data.
++#include "MiniTest.h"
++#include "runtime/ps2_pnach.h"
++
++#include <chrono>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <string>
++#include <vector>
++
++namespace
++{
++    uint32_t word(const std::vector<uint8_t> &ram, uint32_t address)
++    {
++        uint32_t v = 0u;
++        std::memcpy(&v, ram.data() + address, sizeof(v));
++        return v;
++    }
++}
++
++void register_ps2_pnach_tests()
++{
++    MiniTest::Case("Pnach", [](TestCase &tc)
++    {
++        tc.Run("parse: word/short/byte and extended writes, places, gsaspectratio; comments and sections ignored",
++               [](TestCase &t)
++        {
++            const std::string text =
++                "gametitle=Test (SLUS-12345)\n"
++                "[Widescreen 16:9]\n"
++                "gsaspectratio=16:9\n"
++                "description=a test\n"
++                "//gameplay\n"
++                "patch=1,EE,20239d48,extended,3fe38e38\n"
++                "patch=0,EE,00100010,word,0x12345678 // trailing comment\n"
++                "patch=2,EE,00200002,short,0000BEEF\n"
++                "patch=0,EE,00300003,byte,000000AB\n"
++                "patch=1,EE,10200006,extended,0000CAFE\n";
++            ps2game::PnachSet set;
++            std::vector<std::string> messages;
++            ps2game::parsePnach(text, "t.pnach", set, messages);
++            t.Equals(messages.size(), size_t{0}, "no problems: " + (messages.empty() ? std::string() : messages[0]));
++            t.IsTrue(set.aspect == "16:9", "aspect: " + set.aspect);
++            t.Equals(set.writes.size(), size_t{5}, "five writes");
++            if (set.writes.size() != 5u)
++                return;
++            t.IsTrue(set.writes[0].address == 0x239D48u && set.writes[0].size == 4u && set.writes[0].value == 0x3FE38E38u,
++                     "extended 2xxxxxxx = 32-bit write");
++            t.IsTrue(!set.writes[0].once && set.writes[0].continuous, "place 1 = every vsync only");
++            t.IsTrue(set.writes[1].once && !set.writes[1].continuous && set.writes[1].value == 0x12345678u,
++                     "place 0 = boot only, 0x prefix accepted");
++            t.IsTrue(set.writes[2].once && set.writes[2].continuous && set.writes[2].size == 2u &&
++                         set.writes[2].value == 0xBEEFu,
++                     "place 2 = both; short");
++            t.IsTrue(set.writes[3].size == 1u && set.writes[3].value == 0xABu, "byte");
++            t.IsTrue(set.writes[4].address == 0x200006u && set.writes[4].size == 2u, "extended 1xxxxxxx = 16-bit");
++        });
++
++        tc.Run("parse: other CPUs, types, extended codes and malformed lines are skipped with a reason", [](TestCase &t)
++        {
++            const std::string text =
++                "patch=1,IOP,00001000,word,1\n"
++                "patch=1,EE,00001000,double,1\n"
++                "patch=1,EE,E0020000,extended,1\n"
++                "patch=1,EE,00001001,word,1\n"
++                "patch=3,EE,00001000,word,1\n"
++                "patch=1,EE,00001000,word\n"
++                "gsaspectratio=21:9\n"
++                "gsinterlacemode=1\n"
++                "nonsense\n";
++            ps2game::PnachSet set;
++            std::vector<std::string> messages;
++            ps2game::parsePnach(text, "bad.pnach", set, messages);
++            t.Equals(set.writes.size(), size_t{0}, "nothing applied");
++            t.Equals(messages.size(), size_t{9}, "one reason per line");
++            t.IsTrue(set.aspect.empty(), "an unsupported aspect is not taken");
++            t.IsTrue(messages.size() == 9u && messages[0].find("EE only") != std::string::npos &&
++                         messages[2].find("extended code type 14") != std::string::npos &&
++                         messages[3].find("not aligned") != std::string::npos &&
++                         messages[0].rfind("[pnach] bad.pnach line 1:", 0u) == 0u,
++                     "reasons name the file, line and cause");
++        });
++
++        tc.Run("code writes are dropped; boot and vsync apply their own places", [](TestCase &t)
++        {
++            ps2game::PnachSet set;
++            std::vector<std::string> messages;
++            ps2game::parsePnach("patch=1,EE,001BA0E4,word,00000000\n"   // inside the code range: dropped
++                                "patch=1,EE,00239D48,word,3FE38E38\n"   // data, every vsync
++                                "patch=0,EE,00240000,word,11111111\n"   // data, boot only
++                                "patch=1,EE,00540010,word,22222222\n",  // inside a module range: dropped
++                                "w.pnach", set, messages);
++            ps2game::dropCodeWrites(set, {{0x100000u, 0x1D9ABCu}, {0x540000u, 0x5A0000u}}, messages);
++            t.Equals(set.writes.size(), size_t{2}, "two data writes left");
++            t.Equals(messages.size(), size_t{2}, "one line per dropped write");
++            t.IsTrue(messages.size() == 2u && messages[0].find("0x1BA0E4 is in recompiled code") != std::string::npos,
++                     "reason: " + (messages.empty() ? std::string() : messages[0]));
++            std::vector<uint8_t> ram(0x300000u, 0u);
++            const uint32_t fourThirds = 0x3FAAAAABu;
++            std::memcpy(ram.data() + 0x239D48u, &fourThirds, 4u);
++            ps2game::applyPnach(set, ram.data(), ram.size(), true);
++            t.IsTrue(word(ram, 0x240000u) == 0x11111111u, "boot applies place 0");
++            t.IsTrue(word(ram, 0x239D48u) == fourThirds, "boot does not apply place 1");
++            ps2game::applyPnach(set, ram.data(), ram.size(), false);
++            t.IsTrue(word(ram, 0x239D48u) == 0x3FE38E38u, "vsync applies place 1");
++            std::memcpy(ram.data() + 0x239D48u, &fourThirds, 4u); // the game writes it back
++            ps2game::applyPnach(set, ram.data(), ram.size(), false);
++            t.IsTrue(word(ram, 0x239D48u) == 0x3FE38E38u, "re-applied at the next vsync");
++            ps2game::PnachSet past;
++            ps2game::parsePnach("patch=0,EE,01FFFFFE,short,1\npatch=0,EE,01FFFFFC,word,1\n", "e.pnach", past, messages);
++            std::vector<uint8_t> small(0x100u, 0u);
++            ps2game::applyPnach(past, small.data(), small.size(), true); // out of range: nothing written, no crash
++            t.IsTrue(word(small, 0u) == 0u, "writes past the end of RAM are ignored");
++        });
++
++        tc.Run("load: <mods>/<serial>/*.pnach, folder in any case, files in name order", [](TestCase &t)
++        {
++            const std::filesystem::path root = std::filesystem::temp_directory_path() /
++                ("ps2x_pnach_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
++            std::filesystem::create_directories(root / "slpm-65428");
++            std::ofstream(root / "slpm-65428" / "b.pnach") << "patch=0,EE,00100004,word,2\n";
++            std::ofstream(root / "slpm-65428" / "a.PNACH") << "gsaspectratio=16:9\npatch=0,EE,00100000,word,1\n";
++            std::ofstream(root / "slpm-65428" / "notes.txt") << "patch=0,EE,00100008,word,3\n";
++            t.IsTrue(ps2game::loadPnachAtStartup(root, "SLPM-65428"), "folder found");
++            const ps2game::PnachSet &set = ps2game::activePnach();
++            t.Equals(set.files.size(), size_t{2}, "two .pnach files (any case), not the .txt");
++            t.IsTrue(set.writes.size() == 2u && set.writes[0].value == 1u && set.writes[1].value == 2u,
++                     "a.pnach before b.pnach");
++            t.IsTrue(set.aspect == "16:9", "aspect from a.pnach");
++            t.IsTrue(!ps2game::loadPnachAtStartup(root, "SLUS-20765"), "no folder for another serial");
++            t.IsTrue(!ps2game::loadPnachAtStartup({}, "SLPM-65428"), "no mods root");
++            ps2game::setActivePnach({});
++            std::error_code ec;
++            std::filesystem::remove_all(root, ec);
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+

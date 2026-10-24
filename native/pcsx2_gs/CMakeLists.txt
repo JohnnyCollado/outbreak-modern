@@ -56,9 +56,13 @@ list(REMOVE_ITEM gs_all
     GS/GSDump.cpp                                 # GS dump writer (zstd/xz); stubbed
     GS/GSLzma.cpp                                 # GS dump reader (zstd + 3rdparty/lzma); only GSDumpReplayer uses it
     GS/GSPng.cpp                                  # libpng/zlib writer for dumps/snapshots; GSPng::Save stubbed
-    GS/Renderers/HW/GSTextureReplacementLoaders.cpp # png/dds texture-pack loaders; replacements stubbed
-    GS/Renderers/HW/GSTextureReplacements.cpp     # texture-pack dumping/replacement; stubbed
 )
+if(ANDROID)
+    # Texture replacement needs libpng/zlib/libzip, not built for Android yet: stubbed (stubs/gs_stubs.cpp).
+    list(REMOVE_ITEM gs_all
+        GS/Renderers/HW/GSTextureReplacementLoaders.cpp
+        GS/Renderers/HW/GSTextureReplacements.cpp)
+endif()
 list(TRANSFORM gs_all PREPEND "${P}/pcsx2/")
 
 # ---- common (common/CMakeLists.txt) ----
@@ -157,6 +161,22 @@ else()
         "$<$<COMPILE_LANGUAGE:C,CXX>:/fp:contract;/GS-;/W0>")
     # OneCore: VirtualAlloc2/MapViewOfFile3 (GS.cpp GSAllocateWrappedMemory), as pcsx2/CMakeLists.txt links it.
     target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo winmm pathcch dwmapi OneCore)
+    # Texture replacement (GSTextureReplacements*.cpp): PNG loader on libpng, <serial>.zip packs on PCSX2's
+    # 3rdparty libzip (zlib + zstd), deps from tools/ob/pcsx2-deps-png.bat and pcsx2-deps.bat.
+    list(APPEND CMAKE_PREFIX_PATH "${OB_PCSX2_DEPS}")
+    find_package(ZLIB REQUIRED)
+    find_package(PNG REQUIRED)
+    if(NOT TARGET Zstd::Zstd)
+        add_library(Zstd::Zstd SHARED IMPORTED)
+        set_target_properties(Zstd::Zstd PROPERTIES
+            IMPORTED_IMPLIB "${OB_PCSX2_DEPS}/lib/zstd.lib"
+            IMPORTED_LOCATION "${OB_PCSX2_DEPS}/bin/zstd.dll"
+            INTERFACE_INCLUDE_DIRECTORIES "${OB_PCSX2_DEPS}/include")
+    endif()
+    add_subdirectory("${P}/3rdparty/libzip" "${CMAKE_BINARY_DIR}/libzip" EXCLUDE_FROM_ALL)
+    target_compile_options(zip PRIVATE /W0)
+    target_compile_definitions(ob_pcsx2_gs PUBLIC OB_TEXTURE_REPLACEMENTS)
+    target_link_libraries(ob_pcsx2_gs PUBLIC zip PNG::PNG)
 
     add_executable(ob_pcsx2_gs_smoke smoke/main.cpp)
     target_link_libraries(ob_pcsx2_gs_smoke PRIVATE ob_pcsx2_gs)

@@ -16,6 +16,18 @@ void ob_gs_init(ObGsRenderer renderer);
 // outbreak.ini gpu_driver ("system", empty, or a driver folder name), before the first GS call. Android picks the
 // Vulkan driver from it at GSopen (gpu_driver_android.h); other platforms ignore it.
 void ob_gs_set_gpu_driver(const char* name);
+// Before the first GS call: render resolution multiplier (outbreak.ini upscale, 1..8; others = 1; the Vulkan
+// renderer only) and display aspect (ObGsAspect; a pnach gsaspectratio). Both default to today's: 1, Auto.
+enum class ObGsAspect : int
+{
+	Auto, // PCSX2's Auto 4:3/3:2
+	R4_3,
+	R16_9,
+};
+void ob_gs_set_display(uint32_t upscale, ObGsAspect aspect);
+// Before the first GS call: texture replacement root (outbreak.ini textures; PCSX2 layout
+// <root>/<serial>/replacements) and the game's serial. Empty root = off. Vulkan renderer only; Android: ignored.
+void ob_gs_set_textures(const char* root, const char* serial);
 // path 1..3. Only whole GIFtag units reach PCSX2; a split tail is carried per path to the next call.
 void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes);
 void ob_gs_priv_write(uint32_t offset, uint64_t value);

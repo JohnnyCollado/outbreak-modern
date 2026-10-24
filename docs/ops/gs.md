@@ -38,8 +38,9 @@ backend interface, privileged registers, readback, present and vblank).
 
 - `tools/ob/pcsx2-deps.bat` = the zstd 1.5.7 and shaderc 2026.2 (glslang, SPIRV-Headers, SPIRV-Tools) sections of
   PCSX2's `build-dependencies.bat`, verbatim (URLs, SHA-256, `shaderc-changes.patch`), unzipped with Windows `tar.exe`
-  (no 7-Zip). Why only these: zstd for GSLzma/GSDump, shaderc for Vulkan shader compile (loaded as a DLL). Qt, SDL,
-  FFmpeg, png/jpeg/webp, ryml, DirectX-Headers are not built: their users are excluded or stubbed.
+  (no 7-Zip). Why only these: zstd for GSLzma/GSDump (and libzip), shaderc for Vulkan shader compile (loaded as a
+  DLL); zlib + libpng (`pcsx2-deps-png.bat`) for texture replacement. Qt, SDL, FFmpeg, jpeg/webp, ryml,
+  DirectX-Headers are not built: their users are excluded or stubbed.
 
 ## Source lists and exclusions
 
@@ -47,8 +48,8 @@ backend interface, privileged registers, readback, present and vblank).
   anchor): `pcsx2GSSources`, `pcsx2GSSourcesUnshared`, the ARCH_X86 and USE_VULKAN appends; common base + x86
   emitter + WIN32 + FastJmp.asm; 3rdparty imgui and fmt lists; cpuinfo via add_subdirectory. Single ISA: `/arch:AVX2`,
   no `MULTI_ISA_*`. Renderers SW, HW, VK; no DX11/DX12/OpenGL. Core files outside GS/common: 0.
-- Excluded (REMOVE_ITEM): GS `GSCapture.cpp` (FFmpeg), `GSDump.cpp`, `GSLzma.cpp`, `GSPng.cpp`,
-  `Renderers/HW/GSTextureReplacements.cpp`, `GSTextureReplacementLoaders.cpp`; common `PrecompiledHeader.cpp`,
+- Excluded (REMOVE_ITEM): GS `GSCapture.cpp` (FFmpeg), `GSDump.cpp`, `GSLzma.cpp`, `GSPng.cpp`, and on Android
+  only `Renderers/HW/GSTextureReplacements.cpp`, `GSTextureReplacementLoaders.cpp`; common `PrecompiledHeader.cpp`,
   `Image.cpp`, `YAML.cpp`, `HTTPDownloader*.cpp`; imgui `imgui_demo.cpp`, `imgui_freetype.cpp` (stb_truetype instead).
   `Pcsx2Config.cpp` is not built (pulls CDVD/memcard/Pad/USB/audio).
 
@@ -144,6 +145,27 @@ backend interface, privileged registers, readback, present and vblank).
 - 1.4: access logo colours stippled (navy/black shown as dithered grey-purple; suspect `Dithering` or a 16-bit
   path); savedata glyphs thin/broken strokes.
 
-- 4K texture pack: `GSTextureReplacements` (+ `GSTextureReplacementLoaders.cpp`, `common/Image.cpp`) is stubbed now
-  and must be un-stubbed, which brings libpng/libjpeg/libwebp (and zlib) back into `pcsx2-deps.bat`.
+- Texture replacement on Android: still stubbed (libpng/zlib/libzip not built for arm64 yet).
+
+## High resolution, widescreen, texture packs (2026-10-24, PS2Recomp 0050)
+
+All three are off by default, so the gate and every default run are unchanged. Set in `outbreak.ini`
+(`native/outbreak.ini.example`); shown in the start-up line `[pcsx2-gs] open ... upscale=N aspect=A textures=T
+serial=S replacements=found|none|not built`.
+- **Upscale** (`upscale = 1..8`): `GSOptions.UpscaleMultiplier` in `MakeOptions` (`adapter/pcsx2_side.cpp`), Vulkan
+  renderer only (SW ignores it). Gate snapshots read GS local memory, so they stay at native resolution either way.
+- **Widescreen**: a `.pnach` in `<mods>/<serial>/` (runtime, 0050) writes the game's 4/3 aspect float at `0x00239D48`
+  as 16/9 (PCSX2 database `SLPM-65428_32088394.pnach`, gameplay part); its `gsaspectratio=16:9` reaches the adapter
+  (`ob_gs_set_display`), which sets `GSOptions.AspectRatio` and `EmuConfig.CurrentAspectRatio` (the present reads the
+  latter, `GSRenderer.cpp:319-337`; PCSX2's VMManager normally copies it, not built here). The window opens 16:9.
+  The database's FMV fix rewrites code and is left out (needs a recompile; its own note says it breaks the
+  collection screen).
+- **Texture packs** (`textures = <root>`, `<root>/<serial>/replacements`): `GSTextureReplacements*.cpp` built on
+  Windows (`OB_TEXTURE_REPLACEMENTS`), PNG via libpng 1.6.58, `<serial>.zip` packs via PCSX2's `3rdparty/libzip`
+  (zlib 1.3.2 + zstd); deps from `tools/ob/pcsx2-deps-png.bat`. The adapter sets `EmuFolders::Textures`, the serial
+  behind `VMManager::GetDiscSerial` (`stubs/host_stubs.cpp`, from the runtime's `activeGameSerial()`) and
+  `LoadTextureReplacements` (Vulkan only). Loading is PCSX2's default: on demand, on its worker thread, no precache.
+  `common/Image.cpp` stays stubbed (only texture dumping writes images).
+- Speed (J's Bar, hidden, `play.script`, after `load60s`): widescreen + 3x: median 60, mean 59.4 vsync/s; + the 4K
+  pack (4,074 PNG, 3.2 GB): median 59, mean 57.6, min 37 (`reports/2026-10-24-display-features.md`).
 - GS dumps (GSDump/GSLzma) are stubbed; un-stub only if dumps become a debugging need (zstd is already built).

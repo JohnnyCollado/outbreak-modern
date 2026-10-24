@@ -12,6 +12,7 @@ std::string EmuFolders::Cache;      // VK shader/pipeline cache dir; the smoke s
 std::string EmuFolders::Logs;
 std::string EmuFolders::Snapshots;
 std::string EmuFolders::Videos;
+std::string EmuFolders::Textures; // texture replacement root (<Textures>/<serial>/replacements); adapter sets it
 
 // ---- EmuConfig: GS reads only aspect-ratio, thread-pinning and hotkey fields; the non-GS option
 // structs keep zero / in-class defaults (their real constructors live in Pcsx2Config.cpp). ----

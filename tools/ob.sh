@@ -193,6 +193,7 @@ cmd_recompile() {
     local log="$OB_LOGS/ob-runner-build.log" start rc
     local px="${OB_PCSX2:-$OB_ROOT/pcsx2}" pxd="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}" egs="$REPO/native/pcsx2_gs" evu="$REPO/native/pcsx2_vu"
     [ -f "$pxd/bin/shaderc_shared.dll" ] || { echo "runner: $pxd/bin/shaderc_shared.dll missing; run ob.sh pcsx2-gs first"; return 1; }
+    pcsx2_png_deps "$pxd" || return 1
     # Debug info: none by default (linking ~5,800 objects with /Zi took 5+ min); OB_DEBUG=1 for full PDBs.
     local cxxf="/O2 /DNDEBUG" ldf="/INCREMENTAL:NO"
     [ "${OB_DEBUG:-0}" = 1 ] && cxxf="/O2 /Zi /DNDEBUG" ldf="/DEBUG:FULL /INCREMENTAL:NO"
@@ -216,12 +217,14 @@ cmd_recompile() {
     local rd="$OB_R/ps2xRuntime"
     rm -rf "$rd/resources/shaders" && mkdir -p "$rd/resources" &&
         cp -r "$px/bin/resources/shaders" "$rd/resources/" &&
-        cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$rd/" || { echo "runner: pcsx2 staging failed"; return 1; }
+        cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$pxd/bin/z.dll" "$pxd/bin/libpng16.dll" "$rd/" ||
+        { echo "runner: pcsx2 staging failed"; return 1; }
     if [ -n "$prof" ]; then
         # A copy that survives the next normal build: play-profile.bat runs it; hostprof finds the PDB beside it.
         local pr="$OB_ROOT/r-profile"
         rm -rf "$pr" && mkdir -p "$pr" &&
-            cp -r "$rd/ps2EntryRunner.exe" "$rd/ps2EntryRunner.pdb" "$rd/shaderc_shared.dll" "$rd/zstd.dll" "$rd/resources" "$pr/" ||
+            cp -r "$rd/ps2EntryRunner.exe" "$rd/ps2EntryRunner.pdb" "$rd/shaderc_shared.dll" "$rd/zstd.dll" "$rd/z.dll" \
+                "$rd/libpng16.dll" "$rd/resources" "$pr/" ||
             { echo "runner: profile copy to $pr failed"; return 1; }
         echo "runner: OB_PROFILE build copied to $pr (exe + pdb)"
     fi
@@ -321,6 +324,18 @@ cmd_gate() {
     "$PY" -I "$G" compare --frames "$OB_ROOT/frames-gate" --log "$OB_LOGS/boot-gate.log" --start "$start" "${tol[@]}"
 }
 
+# pcsx2_png_deps <deps>: zlib + libpng for PCSX2's texture replacement (tools/ob/pcsx2-deps-png.bat) when
+# libpng16.dll is missing; downloads two pinned archives once (~2 MB), ~1 min to build.
+pcsx2_png_deps() {
+    local deps="$1"
+    [ -f "$deps/bin/libpng16.dll" ] && return 0
+    mkdir -p "$deps" "$deps-build"
+    MSYS_NO_PATHCONV=1 cmd /c "$(cygpath -w "$VC")" "$(cygpath -w "$REPO/tools/ob/pcsx2-deps-png.bat")" \
+        "$(cygpath -w "$deps")" "$(cygpath -w "$deps-build")" > "$OB_LOGS/ob-pcsx2-deps-png.log" 2>&1 ||
+        { tail -5 "$OB_LOGS/ob-pcsx2-deps-png.log"; echo "pcsx2 png deps failed ($OB_LOGS/ob-pcsx2-deps-png.log)"; return 1; }
+    echo "pcsx2 png deps: built ($OB_LOGS/ob-pcsx2-deps-png.log)"
+}
+
 # pcsx2-gs: PCSX2 v2.9.134 tree (clone + upstream/pcsx2/*.patch if missing), zstd/shaderc deps
 # (tools/ob/pcsx2-deps.bat if missing), configure + build native/pcsx2_gs, stage shaders + DLLs beside
 # the smoke exe, run it with the Vulkan SDK off PATH so the staged shaderc_shared.dll is the one loaded.
@@ -341,6 +356,7 @@ cmd_pcsx2_gs() {
             "$(cygpath -w "$src")" "$(cygpath -w "$deps")" "$(cygpath -w "$deps-build")" > "$OB_LOGS/ob-pcsx2-deps.log" 2>&1 ||
             { tail -5 "$OB_LOGS/ob-pcsx2-deps.log"; echo "pcsx2-gs: deps failed ($OB_LOGS/ob-pcsx2-deps.log)"; return 1; }
     fi
+    pcsx2_png_deps "$deps" || return 1
     mkdir -p "$b"
     { vc cmake -S "$REPO/native/pcsx2_gs" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DOB_PCSX2="$src" -DOB_PCSX2_DEPS="$deps" &&
@@ -349,7 +365,8 @@ cmd_pcsx2_gs() {
     [ $rc = 0 ] || { tail -5 "$log"; echo "pcsx2-gs: build exit $rc ($log)"; return $rc; }
     rm -rf "$b/resources/shaders" && mkdir -p "$b/resources" &&
         cp -r "$src/bin/resources/shaders" "$b/resources/" &&
-        cp "$deps/bin/shaderc_shared.dll" "$deps/bin/zstd.dll" "$b/" || { echo "pcsx2-gs: staging failed"; return 1; }
+        cp "$deps/bin/shaderc_shared.dll" "$deps/bin/zstd.dll" "$deps/bin/z.dll" "$deps/bin/libpng16.dll" "$b/" ||
+        { echo "pcsx2-gs: staging failed"; return 1; }
     local np; np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
     ( cd "$b" && PATH="$np" ./ob_pcsx2_gs_smoke.exe ); rc=$?
     echo "pcsx2-gs: smoke exit $rc"; return $rc

@@ -69,9 +69,11 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   `host:` sit beside the image, or in the folder. stdout `[game] <image|folder|elf> <path> boot=... serial=...`.
 - `outbreak.ini` (engine, patch 0043): start-up settings beside the exe, or `PS2X_SETTINGS=<path>`; read once;
   keys `game` (image, folder or ELF; the command-line argument wins), `textures` (PCSX2 layout
-  `<root>/<serial>/replacements`, recorded and logged only), `mods` (reserved). A bad line is logged once as
+  `<root>/<serial>/replacements`, loaded by the PCSX2 GS with `pcsx2-vk` on Windows), `mods` (`<root>/<serial>/*.pnach`
+  memory patches, e.g. widescreen), `upscale` (1..8, `pcsx2-vk`), `window` (`<W>x<H>`), `gpu_driver`, `vu1`
+  (patches 0043-0050; `docs/ops/gs.md` "High resolution, widescreen, texture packs"). A bad line is logged once as
   `[settings] line N: ...`. Example and format: `native/outbreak.ini.example`. `ob.sh` stages none and passes the game
-  on the command line.
+  on the command line; `PS2X_SETTINGS=<path>` points a scripted boot at a test file.
 - `PS2X_FPS_LOG=1` (engine, patch 0044): `[fps]` lines with a visible window too (always on Android: logcat).
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 

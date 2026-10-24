@@ -4,7 +4,7 @@
 ; Read once at start-up. One "key = value" per line; a line starting with ';' or '#' is a comment (so a path
 ; may contain both). Keys are case-insensitive. A value may be in double quotes. A relative path is relative
 ; to this file's folder. A bad line is logged once as "[settings] line N: ..." and ignored; the runner logs
-; "[settings] from <path> (N bad line(s)): game=... textures=... mods=...".
+; "[settings] from <path> (N bad line(s)): game=... textures=... mods=... upscale=... window=...".
 
 ; game: your copy of the game. One of
 ;   - the disc image (ISO 9660, .iso), read in place: nothing is extracted or loaded whole;
@@ -15,11 +15,26 @@
 game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 
 ; textures: optional root of texture packs in PCSX2's layout, <root>\<serial>\replacements
-; (here <root>\SLPM-65428\replacements). Recorded and logged now; texture replacement itself comes later.
+; (here <root>\SLPM-65428\replacements, .png/.dds in any subfolders), or a <root>\SLPM-65428.zip. Loaded by
+; PCSX2's texture replacement on Windows with the Vulkan renderer (PS2X_GS=pcsx2-vk); not yet on Android.
+; The start-up log line "[pcsx2-gs] open ... replacements=found" confirms the pack was seen.
 ; textures = D:\Games\PS2\textures
 
-; mods: optional root for mods. Reserved for mod support: recorded only, nothing reads it yet.
+; mods: optional root for mods. Today: PCSX2 .pnach patch files in <root>\<serial>\ (here
+; <root>\SLPM-65428\*.pnach), memory writes only (patch 0050). Code patches are skipped with a log line: the
+; game's code is compiled ahead of time. Widescreen: a file with these lines (the gameplay part of
+; SLPM-65428_32088394.pnach in PCSX2's resources\patches.zip, "gameplay by synce"):
+;   gsaspectratio=16:9
+;   patch=1,EE,20239d48,extended,3fe38e38
 ; mods = D:\Games\PS2\mods
+
+; upscale: render resolution multiplier, 1 (native, the default) to 8. Vulkan renderer only (PS2X_GS=pcsx2-vk);
+; 3 is about 1080p. Make the window bigger to see the detail (window below, or resize it).
+; upscale = 3
+
+; window: the window's size at start-up, <width>x<height> (at least 320x224). Default: 640x448, or 797x448 with a
+; 16:9 pnach. The window can be resized while playing.
+; window = 1440x810
 
 ; gpu_driver: Android only. The Vulkan driver the game draws with: system (the phone's own, the default) or the
 ; name of a driver folder you put in the app's files dir as drivers/<name>/ (meta.json + the driver .so, e.g. a

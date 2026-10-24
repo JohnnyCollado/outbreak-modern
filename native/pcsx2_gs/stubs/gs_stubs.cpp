@@ -41,7 +41,9 @@ void GSDumpReplayer::UpdateGSStats() {}
 // ---- GSPng (GS/GSPng.cpp: libpng) ----
 bool GSPng::Save(GSPng::Format, const std::string&, const u8*, int, int, int, int, bool) { return false; }
 
+#if !defined(OB_TEXTURE_REPLACEMENTS)
 // ---- GSTextureReplacements (GS/Renderers/HW/GSTextureReplacements*.cpp) ----
+// Built for real on Windows (OB_TEXTURE_REPLACEMENTS, libpng + zlib + libzip); stubbed on Android for now.
 void GSTextureReplacements::Initialize() {}
 void GSTextureReplacements::GameChanged() {}
 void GSTextureReplacements::ReloadReplacementMap() {}
@@ -59,6 +61,7 @@ GSTexture* GSTextureReplacements::LookupReplacementTexture(const GSTextureCache:
 void GSTextureReplacements::ProcessAsyncLoadedTextures() {}
 void GSTextureReplacements::DumpTexture(const GSTextureCache::HashCacheKey&, const GIFRegTEX0&, const GIFRegTEXA&,
 	GSTextureCache::SourceRegion, GSLocalMemory&, u32) {}
+#endif
 
 #if defined(_WIN32)
 // ---- D3D:: (GS/Renderers/DX11/D3D.cpp, not built): no DXGI; Auto/SW resolve to Vulkan ----
