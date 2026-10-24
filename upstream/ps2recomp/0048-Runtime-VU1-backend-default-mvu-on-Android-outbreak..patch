@@ -1,0 +1,241 @@
+From 18a56022f249884ff777e35ae571f9ed04c33eff Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 07:01:15 -0400
+Subject: [PATCH] Runtime: VU1 backend default mvu on Android, outbreak.ini vu1
+
+An Android device has no environment to set PS2X_VU1 in.
+- runtime/ps2_platform_defaults.h: defaultVu1Mode(buildHasExternalVu1)
+  is "mvu" on Android when the build has the external VU1 (the
+  embedder's ARM64 microVU, loaded at run time), "interp" elsewhere
+  (desktop unchanged); selectVu1Mode: PS2X_VU1 (non-empty) wins, then
+  the settings file's vu1, then the default, and names the source.
+- Settings: vu1 = mvu | interp (lower-cased; another value is a bad
+  line and leaves it unset); the settings line ends with vu1=.
+- PS2Runtime::initialize logs "[vu1] <mode> from the settings|default"
+  when the variable did not decide. A backend that cannot load or start
+  still falls back to the interpreter.
+
+Tests: platform-defaults case (Android/desktop defaults, env over
+settings, empty env = unset, neither = default); game-source case
+(vu1 = MVU, quoted interp, vu1 = fast is a bad line).
+---
+ ps2xRuntime/include/runtime/ps2_game_source.h |  5 ++-
+ .../include/runtime/ps2_platform_defaults.h   | 34 +++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_game_source.cpp       | 14 ++++++--
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 23 +++++++++----
+ ps2xTest/src/ps2_fps_counter_tests.cpp        | 17 ++++++++++
+ ps2xTest/src/ps2_game_source_tests.cpp        | 17 ++++++++++
+ 6 files changed, 101 insertions(+), 9 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index 708db7e..4c08aef 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -20,7 +20,9 @@
+ //   gpu_driver = system | <name>   Android: the Vulkan driver of the external GS, the phone's own (system, the
+ //                       default) or a driver package in <files dir>/drivers/<name>/ (outbreak-modern
+ //                       native/pcsx2_gs/adapter/gpu_driver_android.cpp); recorded as given. Ignored elsewhere,
+-//                       with one "[settings] gpu_driver=... ignored" line.
++//                       with one "[settings] gpu_driver=... ignored" line
++//   vu1 = mvu | interp  the VU1 backend when PS2X_VU1 is unset (PS2X_VU1 wins); unset = the platform default
++//                       (Android with the external VU1: mvu, else interp; ps2_platform_defaults.h).
+ // A bad line is reported once ("[settings] line N: ...") and ignored.
+ 
+ #include <cstdint>
+@@ -38,6 +40,7 @@ namespace ps2game
+         std::filesystem::path textures; // empty = not set
+         std::filesystem::path mods;     // empty = not set
+         std::string gpuDriver;          // gpu_driver as written; empty = not set (system)
++        std::string vu1;                // vu1: "mvu" or "interp" (lower case); empty = not set (platform default)
+     };
+ 
+     // The note logged at start-up for gpu_driver on this platform: empty on Android, or when gpu_driver is unset
+diff --git a/ps2xRuntime/include/runtime/ps2_platform_defaults.h b/ps2xRuntime/include/runtime/ps2_platform_defaults.h
+index bc537fd..7f0a8b4 100644
+--- a/ps2xRuntime/include/runtime/ps2_platform_defaults.h
++++ b/ps2xRuntime/include/runtime/ps2_platform_defaults.h
+@@ -1,6 +1,8 @@
+ #ifndef PS2_PLATFORM_DEFAULTS_H
+ #define PS2_PLATFORM_DEFAULTS_H
+ 
++#include <string>
++
+ // Start-up defaults that differ per platform (patch 0044). An Android device has no environment to set PS2X_*
+ // in, so what a desktop run selects with a variable is the default there.
+ 
+@@ -17,6 +19,38 @@ namespace ps2platform
+         return "cpu";
+ #endif
+     }
++
++    // The VU1 backend when neither PS2X_VU1 nor the settings file's vu1 key chooses one: on Android, the external
++    // VU1 (ARMSX2's ARM64 microVU, libob_a64vu.so) when the build has one; else the interpreter (desktop default,
++    // unchanged).
++    inline const char *defaultVu1Mode(bool buildHasExternalVu1)
++    {
++#if defined(__ANDROID__)
++        return buildHasExternalVu1 ? "mvu" : "interp";
++#else
++        (void)buildHasExternalVu1;
++        return "interp";
++#endif
++    }
++
++    // PS2X_VU1 (non-empty) wins, then the settings file's vu1 (non-empty), then defaultVu1Mode. *source names the one
++    // that decided: "PS2X_VU1", "settings" or "default".
++    inline std::string selectVu1Mode(const char *env, const std::string &settingsVu1, bool buildHasExternalVu1,
++                                     const char **source)
++    {
++        if (env && *env)
++        {
++            *source = "PS2X_VU1";
++            return env;
++        }
++        if (!settingsVu1.empty())
++        {
++            *source = "settings";
++            return settingsVu1;
++        }
++        *source = "default";
++        return defaultVu1Mode(buildHasExternalVu1);
++    }
+ }
+ 
+ #endif
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index e2323e5..c1cebe5 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -132,6 +132,15 @@ namespace ps2game
+                 settings.gpuDriver = value; // a name, not a path: checked where it is used
+                 continue;
+             }
++            if (key == "vu1")
++            {
++                const std::string mode = lower(value);
++                if (mode.empty() || mode == "mvu" || mode == "interp")
++                    settings.vu1 = mode;
++                else
++                    bad("vu1 must be mvu or interp, not '" + value + "'");
++                continue;
++            }
+             std::filesystem::path *target = nullptr;
+             if (key == "game")
+                 target = &settings.game;
+@@ -141,7 +150,7 @@ namespace ps2game
+                 target = &settings.mods;
+             else
+             {
+-                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver)");
++                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, vu1)");
+                 continue;
+             }
+             if (value.empty())
+@@ -213,7 +222,8 @@ namespace ps2game
+                   << (settings.game.empty() ? "-" : settings.game.string())
+                   << " textures=" << (settings.textures.empty() ? "-" : settings.textures.string())
+                   << " mods=" << (settings.mods.empty() ? "-" : settings.mods.string())
+-                  << " gpu_driver=" << (settings.gpuDriver.empty() ? "system" : settings.gpuDriver) << std::endl;
++                  << " gpu_driver=" << (settings.gpuDriver.empty() ? "system" : settings.gpuDriver)
++                  << " vu1=" << (settings.vu1.empty() ? "-" : settings.vu1) << std::endl;
+ #if defined(__ANDROID__)
+         const bool android = true;
+ #else
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f1c2a5c..8aef221 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -9,6 +9,7 @@
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_fps_counter.h"
++#include "runtime/ps2_game_source.h"
+ #include "runtime/ps2_platform_defaults.h"
+ #include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_input_bindings.h"
+@@ -921,12 +922,22 @@ bool PS2Runtime::initialize(const char *title)
+         std::cout << "[gs] backend=" << gsMode << std::endl;
+     }
+     {
+-        // PS2X_VU1 selects the VU1 backend: unset or "interp" = the VU1 interpreter; "mvu" needs a build
+-        // with PS2X_EXTERNAL_VU1_DIR (PCSX2's microVU). Before m_memory.initialize (the backend may own the VU1
+-        // memories, ps2_vu1_external.h vu1Memory) and syncCoreSubsystems (which hands it the reset state). A
+-        // backend that cannot start falls back to the interpreter with one log line; no VU1 program has run yet.
+-        const char *vu1Env = std::getenv("PS2X_VU1");
+-        std::string vu1Mode = (vu1Env && *vu1Env) ? vu1Env : "interp";
++        // PS2X_VU1 selects the VU1 backend, else the settings file's vu1, else the platform default (interp;
++        // Android with the external VU1: mvu, ps2_platform_defaults.h): "interp" = the VU1 interpreter; "mvu" needs
++        // a build with PS2X_EXTERNAL_VU1_DIR (PCSX2's microVU; on Android ARMSX2's, loaded at run time). Before
++        // m_memory.initialize (the backend may own the VU1 memories, ps2_vu1_external.h vu1Memory) and
++        // syncCoreSubsystems (which hands it the reset state). A backend that cannot load or start falls back to the
++        // interpreter with one log line; no VU1 program has run yet.
++#ifdef PS2X_EXTERNAL_VU1
++        constexpr bool kBuildHasExternalVu1 = true;
++#else
++        constexpr bool kBuildHasExternalVu1 = false;
++#endif
++        const char *vu1Source = "default";
++        std::string vu1Mode = ps2platform::selectVu1Mode(std::getenv("PS2X_VU1"), ps2game::activeSettings().vu1,
++                                                         kBuildHasExternalVu1, &vu1Source);
++        if (std::string(vu1Source) != "PS2X_VU1")
++            std::cout << "[vu1] " << vu1Mode << " from the " << vu1Source << std::endl;
+         if (vu1Mode == "mvu")
+         {
+ #ifdef PS2X_EXTERNAL_VU1
+diff --git a/ps2xTest/src/ps2_fps_counter_tests.cpp b/ps2xTest/src/ps2_fps_counter_tests.cpp
+index 1e76072..9f34fce 100644
+--- a/ps2xTest/src/ps2_fps_counter_tests.cpp
++++ b/ps2xTest/src/ps2_fps_counter_tests.cpp
+@@ -52,5 +52,22 @@ void register_ps2_fps_counter_tests()
+ #endif
+             t.Equals(std::string(ps2platform::defaultGsMode(false)), std::string("cpu"), "no external GS in the build: cpu");
+         });
++
++        tc.Run("PS2X_VU1 default: Android picks the external VU1 (mvu), the desktop the interpreter; env > settings > default", [](TestCase &t)
++        {
++#if defined(__ANDROID__)
++            t.Equals(std::string(ps2platform::defaultVu1Mode(true)), std::string("mvu"), "Android with the external VU1");
++#else
++            t.Equals(std::string(ps2platform::defaultVu1Mode(true)), std::string("interp"), "desktop default unchanged");
++#endif
++            t.Equals(std::string(ps2platform::defaultVu1Mode(false)), std::string("interp"), "no external VU1 in the build: interp");
++            const char *source = nullptr;
++            t.Equals(ps2platform::selectVu1Mode("interp", "mvu", true, &source), std::string("interp"), "PS2X_VU1 wins over the settings");
++            t.Equals(std::string(source), std::string("PS2X_VU1"), "source PS2X_VU1");
++            t.Equals(ps2platform::selectVu1Mode("", "mvu", false, &source), std::string("mvu"), "empty PS2X_VU1 = unset: settings decide");
++            t.Equals(std::string(source), std::string("settings"), "source settings");
++            t.Equals(ps2platform::selectVu1Mode(nullptr, "", false, &source), std::string("interp"), "neither: the default");
++            t.Equals(std::string(source), std::string("default"), "source default");
++        });
+     });
+ }
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 2a5bc05..93c2636 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -354,5 +354,22 @@ void register_ps2_game_source_tests()
+             t.IsTrue(sys.gpuDriver == "System" && ps2game::gpuDriverNote(sys, false).empty(), "system: no note");
+             t.IsTrue(ps2game::gpuDriverNote(ps2game::Settings{}, false).empty(), "unset: no note");
+         });
++
++        tc.Run("settings: vu1 = mvu | interp (any case); anything else is a bad line and leaves it unset", [](TestCase &t)
++        {
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("vu1 = MVU\n", {}, s, messages);
++            t.Equals(messages.size(), size_t{0}, "vu1 is a known key");
++            t.IsTrue(s.vu1 == "mvu", "lower-cased: " + s.vu1);
++            ps2game::parseSettingsIni("VU1 = \"interp\"\n", {}, s, messages);
++            t.IsTrue(s.vu1 == "interp", "quoted interp: " + s.vu1);
++            ps2game::Settings bad;
++            ps2game::parseSettingsIni("vu1 = fast\n", {}, bad, messages);
++            t.Equals(messages.size(), size_t{1}, "one bad line");
++            t.IsTrue(bad.vu1.empty(), "a bad value leaves vu1 unset");
++            t.IsTrue(!messages.empty() && messages[0].find("vu1 must be mvu or interp") != std::string::npos,
++                     "reason given: " + (messages.empty() ? std::string() : messages[0]));
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

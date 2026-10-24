@@ -26,3 +26,9 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 ; Mesa Turnip package for Adreno). If that driver cannot be used, the log says why and the system driver is used.
 ; Ignored on Windows. Steps: docs/ops/android.md "GPU driver".
 ; gpu_driver = system
+
+; vu1: the PS2's second vector unit (it transforms the 3D geometry). mvu = a recompiler (fast: Windows PCSX2's
+; microVU, Android ARMSX2's ARM64 microVU), interp = the interpreter (slow, the reference). Default: interp on
+; Windows, mvu on Android. The PS2X_VU1 environment variable wins over this. If mvu cannot load or start, the log
+; says why and the interpreter runs.
+; vu1 = mvu

@@ -1,0 +1,13 @@
+/* libob_a64vu.so dynamic exports: the plain-types API of ../include/ob_pcsx2_vu.h and its table
+   (ob_pcsx2_vu_api, ../include/ob_pcsx2_vu_api.h, what the runner dlsyms) only. Everything else (ARMSX2,
+   vixl, fmt, the static libc++) stays local, so nothing in the .so can interpose on, or be interposed by, the
+   runner's own copies built from PCSX2 v2.9.134 headers. */
+{
+  global:
+    ob_pcsx2_vu_api;
+    extern "C++" {
+      ObPcsx2Vu::*;
+    };
+  local:
+    *;
+};

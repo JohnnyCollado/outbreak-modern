@@ -7,7 +7,14 @@
 // data memory, VF, VI (16 bits), ACC, Q, P, I, R, STATUS, MAC, CLIP, and the PATH1 (XGKICK) packets.
 // Built with PS2Recomp headers only; microVU is reached through the plain-types ob_pcsx2_vu.h.
 //
-// usage: ob_pcsx2_vu_compare <capture dir> [--repeat N] [--verbose] [--no-flag-hack]
+// One source, two builds: Windows (x86 microVU, native/pcsx2_vu) and Android arm64 (ob_vucompare_a64: ARMSX2's ARM64
+// microVU in libob_a64vu.so, native/pcsx2_vu/a64; the interpreter from the Android tree's libps2_runtime.a).
+// Golden files carry microVU's outputs from one build to the other: --write-golden DIR writes one
+// <capture name>.gold per capture (Windows: x86 microVU), --golden DIR compares this build's microVU against them
+// bit for bit on the same fields (arm64 vs x86 microVU). Both share microVU's flag-elimination design, so the
+// STATUS/MAC patterns that separate microVU from the interpreter should not separate the two microVUs.
+//
+// usage: ob_pcsx2_vu_compare <capture dir> [--repeat N] [--verbose] [--no-flag-hack] [--write-golden DIR] [--golden DIR]
 #include "ob_pcsx2_vu.h"
 
 #include "runtime/gs/gs_frontend.h"
@@ -286,8 +293,10 @@ namespace
     // ---- microVU backend ----
     struct Mvu
     {
-        std::unique_ptr<uint8_t[]> data{new uint8_t[0x4000]};
-        std::unique_ptr<uint8_t[]> code{new uint8_t[0x4000]};
+        // The backend's own VU1 memories (InitOwned, as the runner): arm64 microVU reaches VU1 data at a fixed
+        // offset from its register file, so only the backend can place it (native/pcsx2_vu/a64/a64_side.cpp).
+        uint8_t *data = nullptr;
+        uint8_t *code = nullptr;
         Packets *sink = nullptr;
         std::vector<uint8_t> lastCode;
         uint64_t generation = 0;
@@ -302,8 +311,10 @@ namespace
         bool init(std::string &err)
         {
             char e[512] = {};
-            if (!ObPcsx2Vu::Init(data.get(), code.get(), e, sizeof(e)))
+            if (!ObPcsx2Vu::InitOwned(e, sizeof(e)))
                 return err = e, false;
+            data = ObPcsx2Vu::OwnedData();
+            code = ObPcsx2Vu::OwnedCode();
             ObPcsx2Vu::SetPath1Sink(&Mvu::tap, this);
             return true;
         }
@@ -312,11 +323,11 @@ namespace
         {
             if (c.code != lastCode)
             {
-                std::memcpy(code.get(), c.code.data(), c.code.size());
+                std::memcpy(code, c.code.data(), c.code.size());
                 lastCode = c.code;
                 ++generation;
             }
-            std::memcpy(data.get(), c.dataBefore.data(), c.dataBefore.size());
+            std::memcpy(data, c.dataBefore.data(), c.dataBefore.size());
             ObPcsx2Vu::State s{};
             std::memcpy(s.vf, c.before.vf, sizeof(s.vf));
             s.vf[0][0] = s.vf[0][1] = s.vf[0][2] = 0u; // VF0 is hard-wired (0,0,0,1); execute() also resets it
@@ -345,7 +356,7 @@ namespace
         {
             ObPcsx2Vu::State s{};
             ObPcsx2Vu::GetState(s);
-            o.data.assign(data.get(), data.get() + 0x4000);
+            o.data.assign(data, data + 0x4000);
             std::memcpy(o.vf, s.vf, sizeof(o.vf));
             std::memcpy(o.vi, s.vi, sizeof(o.vi));
             std::memcpy(o.acc, s.acc, sizeof(o.acc));
@@ -359,6 +370,93 @@ namespace
             o.packets = packets;
         }
     };
+
+    // ---- golden files (--write-golden / --golden): one build's microVU outputs per capture ----
+    // <capture stem>.gold, little-endian: magic "OBVUGLD1", u32 version 1, u32 ended, u32 mvu cycles,
+    // u32 packet count, u64 code hash, u64 input hash (of the capture, to catch a mismatched set), then data
+    // memory (16 KB), VF[32][4], VI[16] (16 bits each in a u32), ACC[4], Q, P, I, R, STATUS, MAC, CLIP (u32 each),
+    // then per PATH1 packet u32 size + bytes.
+    constexpr char kGoldMagic[8] = {'O', 'B', 'V', 'U', 'G', 'L', 'D', '1'};
+    struct Golden
+    {
+        uint32_t ended = 0, mvuCycles = 0;
+        uint64_t codeHash = 0, inputHash = 0;
+        Outputs out{};
+    };
+
+    fs::path goldenPath(const fs::path &dir, const Capture &c) { return dir / (c.path.stem().string() + ".gold"); }
+
+    bool writeGolden(const fs::path &file, const Capture &c, const Outputs &o, const ObPcsx2Vu::RunResult &rr)
+    {
+        std::ofstream f(file, std::ios::binary | std::ios::trunc);
+        auto put = [&](const void *p, size_t n) { f.write(static_cast<const char *>(p), static_cast<std::streamsize>(n)); };
+        const uint32_t version = 1, ended = rr.ended ? 1u : 0u, cycles = rr.mvuCycles,
+                       count = static_cast<uint32_t>(o.packets.size());
+        put(kGoldMagic, 8);
+        put(&version, 4);
+        put(&ended, 4);
+        put(&cycles, 4);
+        put(&count, 4);
+        put(&c.h.codeHash, 8);
+        put(&c.h.inputHash, 8);
+        put(o.data.data(), o.data.size());
+        put(o.vf, sizeof(o.vf));
+        put(o.vi, sizeof(o.vi));
+        put(o.acc, sizeof(o.acc));
+        const uint32_t scal[7] = {o.q, o.p, o.i, o.r, o.status, o.mac, o.clip};
+        put(scal, sizeof(scal));
+        for (const auto &p : o.packets)
+        {
+            const uint32_t n = static_cast<uint32_t>(p.size());
+            put(&n, 4);
+            put(p.data(), p.size());
+        }
+        return static_cast<bool>(f);
+    }
+
+    bool readGolden(const fs::path &file, Golden &g, std::string &err)
+    {
+        std::ifstream in(file, std::ios::binary);
+        if (!in)
+            return err = "missing", false;
+        const std::vector<uint8_t> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        size_t o = 0;
+        auto take = [&](void *dst, size_t n) {
+            if (o + n > b.size())
+                return false;
+            std::memcpy(dst, b.data() + o, n);
+            o += n;
+            return true;
+        };
+        char magic[8];
+        uint32_t version = 0, count = 0, scal[7];
+        if (!take(magic, 8) || std::memcmp(magic, kGoldMagic, 8) != 0 || !take(&version, 4) || version != 1)
+            return err = "bad magic/version", false;
+        g.out.data.resize(0x4000);
+        if (!take(&g.ended, 4) || !take(&g.mvuCycles, 4) || !take(&count, 4) || !take(&g.codeHash, 8) ||
+            !take(&g.inputHash, 8) || !take(g.out.data.data(), 0x4000) || !take(g.out.vf, sizeof(g.out.vf)) ||
+            !take(g.out.vi, sizeof(g.out.vi)) || !take(g.out.acc, sizeof(g.out.acc)) || !take(scal, sizeof(scal)))
+            return err = "truncated", false;
+        g.out.q = scal[0];
+        g.out.p = scal[1];
+        g.out.i = scal[2];
+        g.out.r = scal[3];
+        g.out.status = scal[4];
+        g.out.mac = scal[5];
+        g.out.clip = scal[6];
+        for (uint32_t k = 0; k < count; ++k)
+        {
+            uint32_t n = 0;
+            std::vector<uint8_t> p;
+            if (!take(&n, 4))
+                return err = "truncated packet", false;
+            p.resize(n);
+            if (!take(p.data(), n))
+                return err = "truncated packet", false;
+            g.out.packets.push_back(std::move(p));
+        }
+        return true;
+    }
 
     double median(std::vector<double> v)
     {
@@ -476,12 +574,14 @@ int main(int argc, char **argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s <capture dir> [--repeat N] [--verbose] [--no-flag-hack]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <capture dir> [--repeat N] [--verbose] [--no-flag-hack] [--write-golden DIR] [--golden DIR]\n",
+                     argv[0]);
         return 2;
     }
     const fs::path dir = argv[1];
     int repeat = 20;
     bool verbose = false;
+    fs::path writeGoldenDir, goldenDir;
     for (int k = 2; k < argc; ++k)
     {
         if (!std::strcmp(argv[k], "--repeat") && k + 1 < argc)
@@ -490,6 +590,25 @@ int main(int argc, char **argv)
             verbose = true;
         else if (!std::strcmp(argv[k], "--no-flag-hack"))
             ObPcsx2Vu::SetFlagHack(false);
+        else if (!std::strcmp(argv[k], "--write-golden") && k + 1 < argc)
+            writeGoldenDir = argv[++k];
+        else if (!std::strcmp(argv[k], "--golden") && k + 1 < argc)
+            goldenDir = argv[++k];
+        else
+        {
+            std::fprintf(stderr, "unknown argument: %s\n", argv[k]);
+            return 2;
+        }
+    }
+    if (!writeGoldenDir.empty())
+    {
+        std::error_code mk;
+        fs::create_directories(writeGoldenDir, mk);
+        if (mk)
+        {
+            std::fprintf(stderr, "cannot create %s: %s\n", writeGoldenDir.string().c_str(), mk.message().c_str());
+            return 2;
+        }
     }
 
     const bool synth = dir == "--synthetic";
@@ -541,6 +660,8 @@ int main(int argc, char **argv)
     std::map<std::string, int> firstFieldKinds, anyFieldKinds, knownPattern;
     double sumInterpNs = 0, sumMvuNs = 0, sumCycles = 0;
     uint64_t sumMvuCycles = 0;
+    int goldWritten = 0, goldMatch = 0, goldMissing = 0, goldCycleDiff = 0;
+    std::map<std::string, int> goldFieldKinds;
 
     for (const auto &f : files)
     {
@@ -582,6 +703,54 @@ int main(int argc, char **argv)
         int nDiff = 0;
         std::vector<std::string> allDiffs;
         const std::string d = diff(iOut, mOut, "interp", "mvu", nDiff, &allDiffs);
+        if (!writeGoldenDir.empty())
+        {
+            if (writeGolden(goldenPath(writeGoldenDir, c), c, mOut, rr))
+                ++goldWritten;
+            else
+                std::printf("    golden: cannot write %s\n", goldenPath(writeGoldenDir, c).string().c_str());
+        }
+        std::string gd;
+        if (!goldenDir.empty())
+        {
+            Golden g;
+            std::string gerr;
+            int nG = 0;
+            std::vector<std::string> gDiffs;
+            if (!readGolden(goldenPath(goldenDir, c), g, gerr))
+            {
+                ++goldMissing;
+                gd = "golden " + gerr;
+            }
+            else if (g.codeHash != c.h.codeHash || g.inputHash != c.h.inputHash)
+            {
+                ++goldMissing;
+                gd = "golden is for another capture";
+            }
+            else
+            {
+                gd = diff(g.out, mOut, "x86", "mvu", nG, &gDiffs);
+                if (gd.empty() && (g.ended != 0) == rr.ended)
+                    ++goldMatch;
+                else
+                {
+                    std::map<std::string, int> kinds;
+                    for (const auto &x : gDiffs)
+                        kinds[x.substr(0, x.find_first_of(" :."))] = 1;
+                    for (const auto &[k, one] : kinds)
+                        goldFieldKinds[k] += one;
+                    if (gd.empty())
+                        gd = "ended flag differs";
+                    if (nG > 1)
+                        gd += " (+" + std::to_string(nG - 1) + " more)";
+                }
+                if (verbose)
+                    for (size_t k = 0; k < gDiffs.size() && k < 12; ++k)
+                        std::printf("    vs x86: %s\n", gDiffs[k].c_str());
+                if (g.mvuCycles != rr.mvuCycles)
+                    ++goldCycleDiff;
+            }
+        }
         if (d.empty() && rr.ended)
             ++match;
         else
@@ -641,6 +810,8 @@ int main(int argc, char **argv)
                     mi / cyc, mm / cyc, mi / std::max(1.0, mm), (rep.empty() && icycles == c.h.cyclesRun) ? "ok" : "DIFF",
                     d.empty() ? (rr.ended ? "match" : "NOT ENDED") : ("MISMATCH " + d).c_str(),
                     nDiff > 1 ? (" (+" + std::to_string(nDiff - 1) + " more)").c_str() : "");
+        if (!goldenDir.empty())
+            std::printf("    vs x86 golden: %s\n", gd.empty() ? "match" : ("MISMATCH " + gd).c_str());
         if (!rep.empty() && verbose)
             std::printf("    replay: %s (%d fields)\n", rep.c_str(), nRep);
         if (verbose)
@@ -665,6 +836,16 @@ int main(int argc, char **argv)
                 sumInterpNs / std::max(1.0, sumCycles), sumMvuNs / std::max(1.0, sumCycles),
                 sumInterpNs / std::max(1.0, sumMvuNs));
     std::printf("mvu counted %llu cycles vs interpreter %.0f over the same runs\n", static_cast<unsigned long long>(sumMvuCycles), sumCycles);
+    if (!writeGoldenDir.empty())
+        std::printf("golden: wrote %d files to %s\n", goldWritten, writeGoldenDir.string().c_str());
+    if (!goldenDir.empty())
+    {
+        std::printf("golden (%s): mvu == x86 golden bit for bit %d/%d, golden missing or for another capture %d, "
+                    "mvu cycle count differs %d\n",
+                    goldenDir.string().c_str(), goldMatch, loaded - skipped, goldMissing, goldCycleDiff);
+        for (const auto &[k, n] : goldFieldKinds)
+            std::printf("  vs x86: field %-10s differs in %d captures\n", k.c_str(), n);
+    }
 
     // Weighted by the boot's own cycle counts per program (summary.txt), the share of VU1 time each backend needs.
     uint64_t total = 0;

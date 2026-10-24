@@ -2,10 +2,12 @@
 # Android arm64 build and APK, Stage A1 (docs/ops/android.md). Called as `bash tools/ob.sh android [step]`.
 #   shaderc    libshaderc_shared.so for arm64 from the pinned sources tools/ob/pcsx2-deps.bat unpacked and patched
 #              ($OB_ROOT/pcsx2-deps-build/shaderc-2026.2; the four archives' SHA-256 are re-checked here)
-#   configure  NDK toolchain tree $OB_ANDROID_R (arm64-v8a, API 29, Release, c++_static), external GS = native/pcsx2_gs;
+#   configure  NDK toolchain tree $OB_ANDROID_R (arm64-v8a, API 29, Release, c++_static), external GS = native/pcsx2_gs,
+#              external VU1 = native/pcsx2_vu (ARMSX2's ARM64 microVU as libob_a64vu.so, sources $OB_ARMSX2 at its pin);
 #              clones libadrenotools (custom GPU driver loader, BSD-2-Clause) into $OB_ADRENOTOOLS at its pin if missing
 #   build      libps2EntryRunner.so (the first build compiles every game unit once; later builds are incremental)
-#   package    APK without Gradle: aapt2 link, lib/arm64-v8a/*.so (runner, shaderc, libadrenotools' two hooks),
+#   package    APK without Gradle: aapt2 link, lib/arm64-v8a/*.so (runner, shaderc, libadrenotools' two hooks,
+#              libob_a64vu.so: the runner dlopens it at start-up),
 #              assets/resources (PCSX2 shaders), zipalign,
 #              apksigner with the debug key in $OB_ROOT/android-keys (made by keytool on first use, never in git)
 #   verify     NEEDED libraries and undefined dynamic symbols of the .so files against the NDK's API-29 system libs
@@ -19,6 +21,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd -W) || exit 1
 : "${OB_PCSX2:=$OB_ROOT/pcsx2}" "${OB_PCSX2_DEPS:=$OB_ROOT/pcsx2-deps}"
 : "${OB_ANDROID_R:=$OB_ROOT/android-r}"
 : "${OB_ADRENOTOOLS:=$OB_ROOT/adrenotools}"
+: "${OB_ARMSX2:=$OB_ROOT/armsx2}" # ARMSX2 sparse clone, pinned in native/pcsx2_vu/a64/CMakeLists.txt (docs/ops/pins.md)
 # libadrenotools pin (docs/ops/pins.md): master 8fae8ce (2024-09-10), submodule liblinkernsbypass aa39758.
 ADRENOTOOLS_URL=https://github.com/bylaws/libadrenotools.git
 ADRENOTOOLS_PIN=8fae8ce254dfc1344527e05301e43f37dea2df80
@@ -85,23 +88,24 @@ step_adrenotools() {
 }
 
 step_configure() {
-    local log="$OB_LOGS/ob-android-configure.log" egs="$REPO/native/pcsx2_gs" rc
+    local log="$OB_LOGS/ob-android-configure.log" egs="$REPO/native/pcsx2_gs" evu="$REPO/native/pcsx2_vu" rc
     step_adrenotools || return 1
     if [ -f "$OB_ANDROID_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_ANDROID_R/CMakeCache.txt" &&
         grep -qxF "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=$RELFLAGS" "$OB_ANDROID_R/CMakeCache.txt" &&
-        grep -qxF "OB_ADRENOTOOLS:PATH=$OB_ADRENOTOOLS" "$OB_ANDROID_R/CMakeCache.txt"; then
+        grep -qxF "OB_ADRENOTOOLS:PATH=$OB_ADRENOTOOLS" "$OB_ANDROID_R/CMakeCache.txt" &&
+        grep -qxF "PS2X_EXTERNAL_VU1_DIR:PATH=$evu" "$OB_ANDROID_R/CMakeCache.txt"; then
         echo "configure: $OB_ANDROID_R already configured"; return 0
     fi
     # raylib 5.5: the source the Windows tools tree already fetched (no second download); the Android build of it
     # lives in this tree. sse2neon (PS2Recomp CMakeLists.txt:47-54, GitHub DLTcollab/sse2neon tag v1.9.1) is fetched
-    # once into $OB_ROOT/android-fetch, then reused. No PS2X_EXTERNAL_VU1_DIR: microVU is x86 only, PS2X_VU1 falls
-    # back to the interpreter.
+    # once into $OB_ROOT/android-fetch, then reused. PS2X_EXTERNAL_VU1_DIR: native/pcsx2_vu's Android branch builds
+    # libob_a64vu.so (ARMSX2's ARM64 microVU, a dependency of ps2EntryRunner, not linked: dlopened at start-up).
     cmake -S "$OB_SRC" -B "$OB_ANDROID_R" "${NDKCMAKE[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$RELFLAGS" \
         "-DCMAKE_C_FLAGS_RELWITHDEBINFO=$RELFLAGS" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF \
         -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF \
         -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_ROOT/android-fetch" \
         "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=$OB_T/_deps/raylib-src" \
-        "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$OB_PCSX2" "-DOB_PCSX2_DEPS=$OB_PCSX2_DEPS" "-DOB_ADRENOTOOLS=$OB_ADRENOTOOLS" > "$log" 2>&1
+        "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$OB_PCSX2" "-DOB_PCSX2_DEPS=$OB_PCSX2_DEPS" "-DOB_ADRENOTOOLS=$OB_ADRENOTOOLS"         "-DPS2X_EXTERNAL_VU1_DIR=$evu" "-DOB_ARMSX2=$OB_ARMSX2" > "$log" 2>&1
     rc=$?
     echo "configure: exit $rc ($log)"
     [ $rc = 0 ] || tail -20 "$log"
@@ -130,6 +134,10 @@ step_package() {
         [ -f "$OB_ANDROID_R/adrenotools/src/hook/$v" ] || { echo "package: $OB_ANDROID_R/adrenotools/src/hook/$v missing (build first)"; return 1; }
         "$LLVM/llvm-strip.exe" --strip-unneeded -o "$st/lib/arm64-v8a/$v" "$OB_ANDROID_R/adrenotools/src/hook/$v" || return 1
     done
+    # ARMSX2's ARM64 microVU: not NEEDED by the runner; adapter/hook.cpp dlopens it (a load failure = interp + reason).
+    v="$OB_ANDROID_R/ps2xRuntime/external_vu1/a64/libob_a64vu.so"
+    [ -f "$v" ] || { echo "package: $v missing (build first)"; return 1; }
+    "$LLVM/llvm-strip.exe" --strip-unneeded -o "$st/lib/arm64-v8a/libob_a64vu.so" "$v" || return 1
     cp -r "$OB_PCSX2/bin/resources/shaders" "$st/assets/resources/" || return 1
     (cd "$st/assets/resources" && find . -type f ! -name files.txt | sed 's|^\./||' | sort > files.txt)
     {
@@ -154,7 +162,7 @@ step_package() {
 
 step_verify() {
     "$PY" -I "$REPO/tools/ob/android_symcheck.py" "$LLVM" "$OB_ANDROID_NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/$API" \
-        "$APK_DIR/stage/lib/arm64-v8a/libps2EntryRunner.so" "$APK_DIR/stage/lib/arm64-v8a/libshaderc_shared.so"         "$APK_DIR/stage/lib/arm64-v8a/libhook_impl.so" "$APK_DIR/stage/lib/arm64-v8a/libmain_hook.so"
+        "$APK_DIR/stage/lib/arm64-v8a/libps2EntryRunner.so" "$APK_DIR/stage/lib/arm64-v8a/libshaderc_shared.so"         "$APK_DIR/stage/lib/arm64-v8a/libhook_impl.so" "$APK_DIR/stage/lib/arm64-v8a/libmain_hook.so"         "$APK_DIR/stage/lib/arm64-v8a/libob_a64vu.so"
 }
 
 case ${1:-all} in

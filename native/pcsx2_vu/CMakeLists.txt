@@ -2,6 +2,26 @@
 # compare tool. The x86 emitter, common, Perf/Log and the shared host stubs (eeHw, _cpuRegistersPack, EmuConfig)
 # come from ob_pcsx2_gs (native/pcsx2_gs), never compiled twice in one link: this directory add_subdirectory's
 # it only when no parent project already did. Study: research/2026-10-23-microvu-feasibility.md.
+cmake_minimum_required(VERSION 3.22)
+
+# Android arm64: ARMSX2's ARM64 microVU as its own shared library, libob_a64vu.so (a64/, built against ARMSX2's
+# headers, exports only the ob_pcsx2_vu.h API and its table; study research/2026-10-24-armsx2-microvu-feasibility.md).
+# The runner hookup is the same adapter/hook.cpp, which dlopens libob_a64vu.so at start-up (OB_PCSX2_VU_DLOPEN): it
+# is built here but not linked, so a library that cannot load or start falls back to the interpreter (patch 0041)
+# with the reason logged. tools/ob/android.sh packages it. Nothing below (x86 microVU, ob_pcsx2_gs) is used.
+if(ANDROID)
+    project(ob_pcsx2_vu C CXX)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/a64" "${CMAKE_CURRENT_BINARY_DIR}/a64")
+    if(TARGET ps2_runtime)
+        add_library(ps2x_external_vu1 STATIC adapter/hook.cpp)
+        target_compile_definitions(ps2x_external_vu1 PRIVATE OB_PCSX2_VU_DLOPEN=1)
+        target_include_directories(ps2x_external_vu1 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        target_link_libraries(ps2x_external_vu1 PRIVATE ps2_runtime dl)
+        add_dependencies(ps2x_external_vu1 ob_a64vu) # built with the runner, loaded at run time
+    endif()
+    return()
+endif()
+
 cmake_minimum_required(VERSION 3.24)
 project(ob_pcsx2_vu C CXX ASM_MASM)
 

@@ -1,12 +1,21 @@
 // hook: the PS2Recomp half of the runner's external VU1 (PS2X_VU1=mvu). Implements PS2ExternalVu1
 // (runtime/ps2_vu1_external.h) over the plain-types API include/ob_pcsx2_vu.h; PCSX2's microVU itself lives
 // behind src/pcsx2_side.cpp (built with PCSX2's headers and flags). The two header sets never meet.
+// Every call goes through the ObPcsx2Vu::Api table (include/ob_pcsx2_vu_api.h): the linked functions on Windows;
+// with OB_PCSX2_VU_DLOPEN (Android) the table of libob_a64vu.so (ARMSX2's ARM64 microVU, native/pcsx2_vu/a64),
+// loaded with dlopen at start-up, so a library that cannot load falls back to the interpreter with its reason,
+// exactly like a backend that cannot start.
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_diag_hooks.h"
 #include "runtime/ps2_vu1_external.h"
 
 #include "ob_pcsx2_vu.h"
+#include "ob_pcsx2_vu_api.h"
+
+#ifdef OB_PCSX2_VU_DLOPEN
+#include <dlfcn.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +24,51 @@
 
 namespace
 {
+	const ObPcsx2Vu::Api* g_vu = nullptr; // set by LoadApi before any backend object exists
+
+#ifdef OB_PCSX2_VU_DLOPEN
+	constexpr const char* kVuLibrary = "libob_a64vu.so"; // the APK's lib/arm64-v8a, the app's native lib dir
+
+	// dlopen + dlsym + version check; err gets the reason (dlerror's text) on failure.
+	bool LoadApi(char* err, uint32_t errSize)
+	{
+		if (g_vu)
+			return true;
+		void* lib = dlopen(kVuLibrary, RTLD_NOW | RTLD_LOCAL);
+		if (!lib)
+		{
+			const char* why = dlerror();
+			std::snprintf(err, errSize, "dlopen %s: %s", kVuLibrary, why ? why : "unknown error");
+			return false;
+		}
+		auto fn = reinterpret_cast<ObPcsx2VuApiFn>(dlsym(lib, OB_PCSX2_VU_API_SYMBOL));
+		if (!fn)
+		{
+			const char* why = dlerror();
+			std::snprintf(err, errSize, "%s has no %s: %s", kVuLibrary, OB_PCSX2_VU_API_SYMBOL, why ? why : "");
+			dlclose(lib);
+			return false;
+		}
+		const ObPcsx2Vu::Api* api = fn(ObPcsx2Vu::kApiVersion);
+		if (!api || api->stateSize != sizeof(ObPcsx2Vu::State))
+		{
+			std::snprintf(err, errSize, "%s: API version/layout mismatch (want version %u, State %zu bytes)", kVuLibrary,
+				ObPcsx2Vu::kApiVersion, sizeof(ObPcsx2Vu::State));
+			dlclose(lib);
+			return false;
+		}
+		g_vu = api; // the library stays loaded for the process
+		return true;
+	}
+#else
+	bool LoadApi(char*, uint32_t)
+	{
+		static const ObPcsx2Vu::Api api = ObPcsx2Vu::LinkedApi();
+		g_vu = &api;
+		return true;
+	}
+#endif
+
 	uint32_t FloatBits(float f)
 	{
 		uint32_t u;
@@ -40,7 +94,7 @@ namespace
 		PS2Vu1RunResult mscnt(PS2Memory& memory, uint32_t top, uint32_t itop, uint32_t fbrst) override
 		{
 			bind(memory);
-			return run(memory, ObPcsx2Vu::Tpc(), top, itop, fbrst);
+			return run(memory, g_vu->Tpc(), top, itop, fbrst);
 		}
 
 		void setState(const VU1State& s) override
@@ -61,13 +115,13 @@ namespace
 			o.mac = s.mac;
 			o.clip = s.clip;
 			o.tpc = s.pc & 0x3FF8u;
-			ObPcsx2Vu::SetState(o); // microVU is up from creation (InitOwned)
+			g_vu->SetState(o); // microVU is up from creation (InitOwned)
 		}
 
 		void readState(VU1State& out) override
 		{
 			ObPcsx2Vu::State o{};
-			ObPcsx2Vu::GetState(o);
+			g_vu->GetState(o);
 			out = VU1State{};
 			for (int r = 0; r < 32; ++r)
 				for (int l = 0; l < 4; ++l)
@@ -101,7 +155,7 @@ namespace
 		{
 			if (m_memory == &memory)
 				return;
-			if (memory.getVU1Data() != ObPcsx2Vu::OwnedData() || memory.getVU1Code() != ObPcsx2Vu::OwnedCode())
+			if (memory.getVU1Data() != g_vu->OwnedData() || memory.getVU1Code() != g_vu->OwnedCode())
 				fatal("PS2Memory does not use the backend's VU1 memory (PS2Memory initialized before the backend was set?)");
 			m_memory = &memory;
 		}
@@ -111,7 +165,7 @@ namespace
 			bind(memory);
 			// PCSX2's own per-call budget (vu1RunCycles, VUmicro.h:20); the interpreter's is 65536.
 			const ObPcsx2Vu::RunResult r =
-				ObPcsx2Vu::Run(startPC, top, itop, fbrst, memory.getVU1CodeGeneration(), 3000000u);
+				g_vu->Run(startPC, top, itop, fbrst, memory.getVU1CodeGeneration(), 3000000u);
 			if (!r.ended && m_unfinished++ < 8u)
 			{
 				std::fprintf(stderr, "[vu1] mvu: program at 0x%04x did not reach its E bit (%u cycles)\n", startPC,
@@ -134,12 +188,12 @@ namespace
 	public:
 		bool vu1Memory(uint8_t** code, uint8_t** data) override
 		{
-			*code = ObPcsx2Vu::OwnedCode();
-			*data = ObPcsx2Vu::OwnedData();
+			*code = g_vu->OwnedCode();
+			*data = g_vu->OwnedData();
 			return *code && *data;
 		}
 
-		Pcsx2MicroVu1() { ObPcsx2Vu::SetPath1Sink(&Path1, this); }
+		Pcsx2MicroVu1() { g_vu->SetPath1Sink(&Path1, this); }
 
 	private:
 		PS2Memory* m_memory = nullptr;
@@ -161,9 +215,11 @@ PS2ExternalVu1* ps2CreateExternalVu1(const char* mode, char* err, uint32_t errSi
 	if (m != "mvu")
 		return fail("ob_pcsx2_vu: unknown mode");
 	char why[512] = {};
-	if (!ObPcsx2Vu::InitOwned(why, sizeof(why)))
+	if (!LoadApi(why, sizeof(why)))
 		return fail(why);
-	std::fprintf(stderr, "[vu1] mvu active: %s\n", ObPcsx2Vu::Describe());
+	if (!g_vu->InitOwned(why, sizeof(why)))
+		return fail(why);
+	std::fprintf(stderr, "[vu1] mvu active: %s\n", g_vu->Describe());
 	std::fflush(stderr);
 	return new Pcsx2MicroVu1();
 }

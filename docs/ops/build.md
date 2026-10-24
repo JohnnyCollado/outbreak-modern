@@ -121,20 +121,31 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
   per-field counts, known patterns (STATUS/MAC left at their input value by microVU's flag elimination; P equal to
   the final Q), and ns per interpreter cycle (median of `--repeat` warm runs; only the run call is timed).
   `--synthetic` runs a few built-in programs instead. Exit 0 = all bit-exact, 1 = some differ, 2 = usage.
+- Golden files (for the arm64 build, `docs/ops/android.md` "VU1 on arm64"): `--write-golden DIR` writes microVU's
+  outputs per capture as `DIR/<capture>.gold` (same fields + ended flag and cycle count + the capture's code/input
+  hashes); `--golden DIR` compares this build's microVU with them bit for bit and prints
+  `golden (...): mvu == x86 golden bit for bit N/M`. x86 goldens: `C:\ob\vu1-captures\golden` (120, 2.5 MB) and
+  `golden-synthetic` (4); x86 microVU reads its own back 120/120. The same `compare/main.cpp` builds for arm64 as
+  `ob_vucompare_a64` (`tools/ob/vucompare_a64.sh`).
 - Baseline (2026-10-24, patch 0045): replay reproduces 100/120 (the 20 captures recorded before patch 0032 show
   `DIFF`, as before), interpreter 110 ns per VU1 cycle (182 with 0044); `C:\ob\logs\vucompare-0045d.log`. A change
   to the interpreter must keep the same replay-exact set.
 - `native/pcsx2_vu` caveats handled in code: in the runner, VU1 data, VU1 code and the 64 MB code cache are one
-  reservation made at startup (`InitOwned`, patch 0041; worst cache-to-data distance 64 MB); the compare tool's
-  `Init` searches within 2 GB of its own VU1 data. The disp32 reach (cache to data, globals to the rbx text pointer)
+  reservation made at startup (`InitOwned`, patch 0041; worst cache-to-data distance 64 MB); the compare tool uses
+  `InitOwned` too (since 2026-10-24: the arm64 build can only run on backend-owned VU1 data). The disp32 reach (cache to data, globals to the rbx text pointer)
   is checked in every build (failure = error, no run); MXCSR is set to `EmuConfig.Cpu.VU1FPCR` around each run; microVU's program cache is cleared when
   the code generation changes; PCSX2 config defaults are the verbatim `Pcsx2Config.cpp` constructor bodies
   (`src/config_defaults.cpp`, re-copy on a PCSX2 bump). No PCSX2 source edit.
 
 ## VU1 backend in the runner: `PS2X_VU1=interp|mvu` (patch 0033)
 
-- Selector read once at startup (`ps2_runtime.cpp`, next to `PS2X_GS`): unset or `interp` = PS2Recomp's VU1
-  interpreter; `mvu` = PCSX2's microVU (`native/pcsx2_vu`); anything else = `[vu1] unknown PS2X_VU1=...`, exit 2.
+- Selector read once at startup (`ps2_runtime.cpp`, next to `PS2X_GS`): `PS2X_VU1`, else `outbreak.ini`
+  `vu1 = mvu|interp`, else the platform default (`ps2platform::defaultVu1Mode`: `interp` on the desktop, `mvu` on
+  Android when the build has the external VU1; patch 0048; stdout `[vu1] <mode> from the settings|default` when the
+  variable did not decide). `interp` = PS2Recomp's VU1 interpreter; `mvu` = PCSX2's microVU (`native/pcsx2_vu`;
+  Android: ARMSX2's ARM64 microVU in `libob_a64vu.so`, dlopened by `adapter/hook.cpp`, so a load failure is a
+  fall-back like a start failure); anything else = `[vu1] unknown PS2X_VU1=...`, exit 2 (a bad `vu1` value is a
+  `[settings]` bad line, ignored).
   mvu starts right there, before PS2Memory and the window (patch 0041): stderr `[vu1] mvu active: <cache/data
   addresses, reach>`; if it cannot start (or the build has no microVU), stderr `[vu1] mvu unavailable (<reason>);
   falling back to interp` once and the interpreter runs. stdout `[vu1] backend=<mode actually used>`.

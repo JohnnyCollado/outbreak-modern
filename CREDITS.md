@@ -17,3 +17,10 @@
   [liblinkernsbypass](https://github.com/bylaws/liblinkernsbypass) (BSD-2-Clause), built from source into the Android
   app: they let a player load their own Vulkan driver (for example Mesa Turnip on Adreno) instead of the phone's.
   No driver is bundled; players supply their own.
+- **ARMSX2 developers (ARMSX2 Dev Team, yaps2 Dev Team, isztld)** -- the ARM64 microVU VU1 recompiler and its vixl
+  helpers (`pcsx2/arm64/microVU-arm64*`, `AsmHelpers`, `vuaot/`), GPL-3.0(+), built from
+  [github.com/ARMSX2/ARMSX2](https://github.com/ARMSX2/ARMSX2) at commit `90126bd` into the Android app's
+  `libob_a64vu.so` (`native/pcsx2_vu/a64`); nothing of it is copied into this repository.
+- **ARM Limited and the VIXL authors** -- [VIXL](https://github.com/Linaro/vixl) (BSD-3-Clause, its `LICENCE` file), the
+  AArch64 assembler PCSX2 vendors in `3rdparty/vixl`: behind the Android GS's software-renderer JIT and ARMSX2's
+  ARM64 microVU.

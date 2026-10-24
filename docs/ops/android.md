@@ -10,7 +10,7 @@ touches a device by itself: every `adb` command below needs the developer's "pro
 |---|---|---|
 | Runner + game code | `C:\ob\android-r` (NDK tree, RelWithDebInfo, `-O3 -g0`), `ps2xRuntime/libps2EntryRunner.so` | Same generated C++ as Windows (`C:\ob\src`); SSE through sse2neon (`USE_SSE2NEON`). The first build compiles every game unit once; later builds are incremental (same unity/PCH layout as Windows, patch 0028) |
 | PCSX2 GS | `native/pcsx2_gs`, Android branch of its `CMakeLists.txt` | Vulkan only; PCSX2's `ARCH_ARM64` lists (SW JIT on vixl, `GSVector4*_arm64.h`); common's Linux files minus `LnxMisc.cpp` (`stubs/android/` has its other functions; `shm_open` = memfd); `upstream/pcsx2/0001` adds `VK_KHR_android_surface`; `0002` lets the adapter hand PCSX2 a custom driver's libvulkan (GPU driver, below) |
-| microVU | not built | x86 only (`research/2026-10-23-microvu-feasibility.md`); `PS2X_VU1` stays the interpreter (patch 0041's fallback). VU1 runs only from the GAME overlay on, after character select. Patch 0045: no software quad `long double` and no fused multiply-add in the VU files (0 `__*tf3` calls, 0 `fmadd` in their objects), so arm64 VU1 results match Windows |
+| microVU (VU1 recompiler) | `native/pcsx2_vu/a64` -> `libob_a64vu.so` in the Android tree (`ps2xRuntime/external_vu1/a64/`) | ARMSX2's ARM64 microVU (pinned `90126bd`, `C:\ob\armsx2`), compiled against ARMSX2's own headers into its own shared library (study `research/2026-10-24-armsx2-microvu-feasibility.md`): hidden visibility, exports only the `ObPcsx2Vu::*` API and the `ob_pcsx2_vu_api` table. Not linked to the runner: `adapter/hook.cpp` dlopens it at start-up, so a library that cannot load or start falls back to the interpreter with the reason. Defaults: VU1 recompiler on, MTVU off, vu-aot and the on-disk program cache off. `PS2X_VU1` default on Android = `mvu` (patch 0048; `vu1 = interp` in `outbreak.ini` selects the interpreter). The interpreter (patch 0045: no software quad floats, no fused multiply-add) stays the fall-back |
 | shaderc | `C:\ob\android-shaderc-build/libshaderc/libshaderc_shared.so` | From the sources `tools/ob/pcsx2-deps.bat` unpacked and patched (`C:\ob\pcsx2-deps-build\shaderc-2026.2`); `android.sh shaderc` re-checks the four archives' SHA-256 |
 | Shaders | APK `assets/resources/shaders` + `files.txt` | Copied by the GS adapter to `<internal files>/resources` on first start (and when the list changes): PCSX2 reads resources as files |
 | APK | `C:\ob\android-apk\outbreak-modern.apk` | No Gradle: `aapt2 link` (`native/android/AndroidManifest.xml`), `lib/arm64-v8a/*.so` added, `zipalign`, `apksigner` with the debug key `C:\ob\android-keys\debug.keystore` (keytool, first package; never in git) |
@@ -46,7 +46,11 @@ in the NDK sysroot for API 29 (or be one of ours), every undefined dynamic symbo
   `outbreak.ini` there is read if present (`native/outbreak.ini.example`); without a `game` key the one `.iso` in that
   folder is the game (patch 0043). Memory cards: `files/mc0`.
 - Graphics: no environment on a device, so with no `PS2X_GS` an Android build with the external GS runs PCSX2's
-  Vulkan renderer (`pcsx2-vk`, patch 0044; desktop default stays `cpu`). VU1: interpreter (no microVU on arm64).
+  Vulkan renderer (`pcsx2-vk`, patch 0044; desktop default stays `cpu`). VU1: ARMSX2's ARM64 microVU (patch 0048:
+  `PS2X_VU1` unset = `mvu` on Android; `outbreak.ini` `vu1 = mvu|interp`, the variable wins). logcat shows
+  `[vu1] mvu from the default` (or `settings`), then `[vu1] mvu active: a64 mvu ...` or `[vu1] mvu unavailable
+  (<reason>); falling back to interp` (for example `dlopen libob_a64vu.so: ...` or the RWX code-cache mmap), and
+  `[vu1] backend=<mode used>`.
 - Window: the GS adapter takes the activity's `ANativeWindow`, releases raylib's EGL window surface (its GL
   context stays current without a surface) and presents with Vulkan into the window.
 - Input: the Odin's built-in controller through raylib's Android gamepad events and the patch 0038/0040 bindings.
@@ -91,6 +95,33 @@ How it works (`native/pcsx2_gs/adapter/gpu_driver*.{h,cpp}`, PCSX2 patch `upstre
 - Desktop: `gpu_driver` is read and logged, a non-system value logs `[settings] gpu_driver=<v> ignored: custom GPU
   drivers are Android only`.
 - libadrenotools pin and license: `docs/ops/pins.md`, `CREDITS.md`.
+
+## VU1 on arm64: vucompare on the device (each command needs the developer's "proceed")
+
+`tools/ob/vucompare_a64.sh` builds `native/pcsx2_vu/a64` standalone into `C:\ob\android-vu-build`: `libob_a64vu.so`
+and `ob_vucompare_a64` (the compare tool `native/pcsx2_vu/compare/main.cpp` for arm64; the interpreter from the
+Android tree's `libps2_runtime.a`, so run `ob.sh android build` first), stripped into `stage\`, symcheck'd. The
+Windows tool writes x86 microVU's outputs per capture as golden files (`bash tools/ob.sh vucompare --write-golden
+'C:\ob\vu1-captures\golden'`; `--synthetic --write-golden 'C:\ob\vu1-captures\golden-synthetic'`). On the device the
+tool runs arm64 microVU and the arm64 interpreter on each capture, compares microVU with the interpreter and (with
+`--golden`) with x86 microVU bit for bit (data memory, VF/VI/ACC/Q/P/I/R/STATUS/MAC/CLIP, PATH1 packets), and prints
+ns per VU1 cycle for both. A plain executable in `/data/local/tmp`, no APK involved.
+
+```
+adb -s <odin-ip>:33537 shell mkdir -p /data/local/tmp/obvu
+adb -s <odin-ip>:33537 push C:\ob\android-vu-build\stage\ob_vucompare_a64 C:\ob\android-vu-build\stage\libob_a64vu.so /data/local/tmp/obvu/
+adb -s <odin-ip>:33537 push C:\ob\vu1-captures /data/local/tmp/obvu/
+adb -s <odin-ip>:33537 shell chmod 755 /data/local/tmp/obvu/ob_vucompare_a64
+adb -s <odin-ip>:33537 shell "cd /data/local/tmp/obvu && LD_LIBRARY_PATH=. ./ob_vucompare_a64 --synthetic --repeat 20 --golden vu1-captures/golden-synthetic > synthetic.log 2>&1; echo exit $?"
+adb -s <odin-ip>:33537 shell "cd /data/local/tmp/obvu && LD_LIBRARY_PATH=. ./ob_vucompare_a64 vu1-captures --repeat 20 --golden vu1-captures/golden > vucompare-a64.log 2>&1; echo exit $?"
+adb -s <odin-ip>:33537 pull /data/local/tmp/obvu/synthetic.log C:\ob\logs\vucompare-a64-odin-synthetic.log
+adb -s <odin-ip>:33537 pull /data/local/tmp/obvu/vucompare-a64.log C:\ob\logs\vucompare-a64-odin.log
+adb -s <odin-ip>:33537 logcat -d -v time -s DEBUG:V libc:F > C:\ob\logs\vucompare-a64-odin-crash.log   (only after exit 134/139)
+```
+
+Exit 1 is expected (the STATUS/MAC flag-elimination differences from the interpreter, as on x86); the lines to read
+are `golden (...): mvu == x86 golden bit for bit N/120`, the per-field counts under it, and the `timing` / `weighted`
+ns-per-cycle lines. About 9 MB is pushed (captures 6.2 MB, goldens 2.5 MB); captures are game-derived: never in git.
 
 ## Device commands (each needs the developer's "proceed")
 
