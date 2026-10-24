@@ -1,0 +1,138 @@
+From 5484015339b8b856251648d6543e8c7db060be47 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 06:46:03 -0400
+Subject: [PATCH 46/47] Runtime: outbreak.ini gpu_driver (Android GPU driver
+ choice)
+
+outbreak.ini gains gpu_driver = system | <name>: on Android, the Vulkan
+driver of the external GS, the phone's own (system, the default) or a
+driver package in <files dir>/drivers/<name>/ (outbreak-modern's GS
+adapter, native/pcsx2_gs/adapter/gpu_driver_android.cpp, reads it from
+ps2game::activeSettings().gpuDriver). The value is kept as written (a
+name, not a path; the adapter checks it). Before, the key was a bad line.
+
+The start-up settings line now ends with gpu_driver=<value|system>.
+Off Android a set, non-system value logs one line:
+"[settings] gpu_driver=<v> ignored: custom GPU drivers are Android only"
+(gpuDriverNote).
+
+Test (ps2x, game source suite): gpu_driver is a known key, kept as
+written, the desktop note and no note on Android, for system or unset.
+Fails without: Settings has no gpuDriver, gpuDriverNote is undefined.
+---
+ ps2xRuntime/include/runtime/ps2_game_source.h |  9 +++++++
+ ps2xRuntime/src/lib/ps2_game_source.cpp       | 24 +++++++++++++++++--
+ ps2xTest/src/ps2_game_source_tests.cpp        | 17 +++++++++++++
+ 3 files changed, 48 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index 8efbaf9..708db7e 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -17,6 +17,10 @@
+ //   game = <ISO image, extracted folder or boot ELF>   the command-line argument wins over it
+ //   textures = <root>   PCSX2 layout: <root>/<serial>/replacements (recorded and exposed; not used yet)
+ //   mods = <root>       reserved for mod support (recorded only)
++//   gpu_driver = system | <name>   Android: the Vulkan driver of the external GS, the phone's own (system, the
++//                       default) or a driver package in <files dir>/drivers/<name>/ (outbreak-modern
++//                       native/pcsx2_gs/adapter/gpu_driver_android.cpp); recorded as given. Ignored elsewhere,
++//                       with one "[settings] gpu_driver=... ignored" line.
+ // A bad line is reported once ("[settings] line N: ...") and ignored.
+ 
+ #include <cstdint>
+@@ -33,8 +37,13 @@ namespace ps2game
+         std::filesystem::path game;     // empty = not set
+         std::filesystem::path textures; // empty = not set
+         std::filesystem::path mods;     // empty = not set
++        std::string gpuDriver;          // gpu_driver as written; empty = not set (system)
+     };
+ 
++    // The note logged at start-up for gpu_driver on this platform: empty on Android, or when gpu_driver is unset
++    // or "system"; else "[settings] gpu_driver=<v> ignored: custom GPU drivers are Android only".
++    std::string gpuDriverNote(const Settings &settings, bool android);
++
+     // Parses settings text; relative paths are resolved against baseDirectory. Bad lines go to messages.
+     void parseSettingsIni(const std::string &text, const std::filesystem::path &baseDirectory, Settings &settings,
+                           std::vector<std::string> &messages);
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index 2bb42d3..e2323e5 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -127,6 +127,11 @@ namespace ps2game
+             std::string value = trim(std::string_view(line).substr(equals + 1u));
+             if (value.size() >= 2u && value.front() == '"' && value.back() == '"')
+                 value = value.substr(1u, value.size() - 2u);
++            if (key == "gpu_driver")
++            {
++                settings.gpuDriver = value; // a name, not a path: checked where it is used
++                continue;
++            }
+             std::filesystem::path *target = nullptr;
+             if (key == "game")
+                 target = &settings.game;
+@@ -136,7 +141,7 @@ namespace ps2game
+                 target = &settings.mods;
+             else
+             {
+-                bad("unknown key '" + key + "' (game, textures, mods)");
++                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver)");
+                 continue;
+             }
+             if (value.empty())
+@@ -207,10 +212,25 @@ namespace ps2game
+         std::cout << "[settings] from " << path.string() << " (" << messages.size() << " bad line(s)): game="
+                   << (settings.game.empty() ? "-" : settings.game.string())
+                   << " textures=" << (settings.textures.empty() ? "-" : settings.textures.string())
+-                  << " mods=" << (settings.mods.empty() ? "-" : settings.mods.string()) << std::endl;
++                  << " mods=" << (settings.mods.empty() ? "-" : settings.mods.string())
++                  << " gpu_driver=" << (settings.gpuDriver.empty() ? "system" : settings.gpuDriver) << std::endl;
++#if defined(__ANDROID__)
++        const bool android = true;
++#else
++        const bool android = false;
++#endif
++        if (const std::string note = gpuDriverNote(settings, android); !note.empty())
++            std::cout << note << std::endl;
+         return true;
+     }
+ 
++    std::string gpuDriverNote(const Settings &settings, bool android)
++    {
++        if (android || settings.gpuDriver.empty() || lower(settings.gpuDriver) == "system")
++            return {};
++        return "[settings] gpu_driver=" + settings.gpuDriver + " ignored: custom GPU drivers are Android only";
++    }
++
+     std::filesystem::path textureReplacementDirectory(std::string_view serial)
+     {
+         const Settings &settings = activeSettings();
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 56b21fe..2a5bc05 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -337,5 +337,22 @@ void register_ps2_game_source_tests()
+             ps2game::setActiveSettings({});
+             t.IsTrue(ps2game::textureReplacementDirectory("SLPM-65428").empty(), "no textures root, no directory");
+         });
++
++        tc.Run("settings: gpu_driver recorded as a name; ignored off Android with one note", [](TestCase &t)
++        {
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("gpu_driver = \"turnip-25\"\n", std::filesystem::path("C:/games"), s, messages);
++            t.Equals(messages.size(), size_t{0}, "gpu_driver is a known key");
++            t.IsTrue(s.gpuDriver == "turnip-25", "value kept as written, not made a path: " + s.gpuDriver);
++            t.IsTrue(ps2game::gpuDriverNote(s, false) ==
++                         "[settings] gpu_driver=turnip-25 ignored: custom GPU drivers are Android only",
++                     "desktop note: " + ps2game::gpuDriverNote(s, false));
++            t.IsTrue(ps2game::gpuDriverNote(s, true).empty(), "no note on Android");
++            ps2game::Settings sys;
++            ps2game::parseSettingsIni("GPU_DRIVER = System\n", {}, sys, messages);
++            t.IsTrue(sys.gpuDriver == "System" && ps2game::gpuDriverNote(sys, false).empty(), "system: no note");
++            t.IsTrue(ps2game::gpuDriverNote(ps2game::Settings{}, false).empty(), "unset: no note");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

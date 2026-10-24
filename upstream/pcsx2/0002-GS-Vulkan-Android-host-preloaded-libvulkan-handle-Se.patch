@@ -1,0 +1,111 @@
+From eb18e43cc35d597b9c2aaa4f82edbd165c767429 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 06:18:10 -0400
+Subject: [PATCH] GS/Vulkan: Android host-preloaded libvulkan handle
+ (SetPreloadedVulkanLibrary)
+
+Android only. The host may hand PCSX2 a libvulkan handle it opened itself (a custom driver through libadrenotools); every later LoadVulkanLibrary() resolves the module entry points from it instead of opening the system libvulkan.so. The host keeps ownership: UnloadVulkanLibrary() never closes it. nullptr returns to the system library. A handle missing a module entry point falls back to the system library.
+---
+ pcsx2/GS/Renderers/Vulkan/VKLoader.cpp | 49 +++++++++++++++++++++++++-
+ pcsx2/GS/Renderers/Vulkan/VKLoader.h   |  6 ++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKLoader.cpp b/pcsx2/GS/Renderers/Vulkan/VKLoader.cpp
+index e094dd9..001223c 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKLoader.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/VKLoader.cpp
+@@ -14,6 +14,10 @@
+ #include <cstring>
+ #include <string>
+ 
++#ifdef __ANDROID__
++#include <dlfcn.h>
++#endif
++
+ extern "C" {
+ 
+ #define VULKAN_MODULE_ENTRY_POINT(name, required) PFN_##name name;
+@@ -38,14 +42,54 @@ void Vulkan::ResetVulkanLibraryFunctionPointers()
+ 
+ static DynamicLibrary s_vulkan_library;
+ 
++#ifdef __ANDROID__
++// Host-owned handle (SetPreloadedVulkanLibrary), and whether the loaded library is that handle.
++static void* s_preloaded_handle = nullptr;
++static bool s_preloaded_in_use = false;
++
++void Vulkan::SetPreloadedVulkanLibrary(void* handle)
++{
++	pxAssertRel(!IsVulkanLibraryLoaded(), "Vulkan module is not loaded.");
++	s_preloaded_handle = handle;
++}
++#endif
++
+ bool Vulkan::IsVulkanLibraryLoaded()
+ {
++#ifdef __ANDROID__
++	if (s_preloaded_in_use)
++		return true;
++#endif
+ 	return s_vulkan_library.IsOpen();
+ }
+ 
+ bool Vulkan::LoadVulkanLibrary(Error* error)
+ {
+-	pxAssertRel(!s_vulkan_library.IsOpen(), "Vulkan module is not loaded.");
++	pxAssertRel(!IsVulkanLibraryLoaded(), "Vulkan module is not loaded.");
++
++#ifdef __ANDROID__
++	if (s_preloaded_handle)
++	{
++		bool preloaded_missing = false;
++#define VULKAN_MODULE_ENTRY_POINT(name, required) \
++	name = reinterpret_cast<PFN_##name>(dlsym(s_preloaded_handle, #name)); \
++	if (!name) \
++	{ \
++		ERROR_LOG("Vulkan: Failed to load required module function {} from the preloaded library", #name); \
++		preloaded_missing = true; \
++	}
++
++#include "VKEntryPoints.inl"
++#undef VULKAN_MODULE_ENTRY_POINT
++
++		if (!preloaded_missing)
++		{
++			s_preloaded_in_use = true;
++			return true;
++		}
++		ResetVulkanLibraryFunctionPointers(); // and fall through to the system library
++	}
++#endif
+ 
+ #ifdef __APPLE__
+ 	// Check if a path to a specific Vulkan library has been specified.
+@@ -90,6 +134,9 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
+ void Vulkan::UnloadVulkanLibrary()
+ {
+ 	ResetVulkanLibraryFunctionPointers();
++#ifdef __ANDROID__
++	s_preloaded_in_use = false; // the host's handle stays open
++#endif
+ 	s_vulkan_library.Close();
+ }
+ 
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKLoader.h b/pcsx2/GS/Renderers/Vulkan/VKLoader.h
+index 75d0055..7cd1d49 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKLoader.h
++++ b/pcsx2/GS/Renderers/Vulkan/VKLoader.h
+@@ -99,4 +99,10 @@ namespace Vulkan
+ 	bool LoadVulkanDeviceFunctions(VkDevice device);
+ 	void UnloadVulkanLibrary();
+ 	void ResetVulkanLibraryFunctionPointers();
++#ifdef __ANDROID__
++	/// A libvulkan handle opened by the host (e.g. a custom driver through libadrenotools), used by every later
++	/// LoadVulkanLibrary() instead of the system libvulkan.so. The host keeps ownership: Unload never closes it.
++	/// nullptr goes back to the system library. Call while the library is not loaded.
++	void SetPreloadedVulkanLibrary(void* handle);
++#endif
+ } // namespace Vulkan
+-- 
+2.46.2.windows.1
+

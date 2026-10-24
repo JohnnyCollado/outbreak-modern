@@ -15,6 +15,8 @@
 - **Windows first.** Android later: Vulkan only, ARMSX2's driver database, and a choice between
   the system driver and a custom (Turnip) driver loaded by the app, aimed at as many Android GPUs
   as possible, Mali included.
+  Done for the custom driver (2026-10-24): `gpu_driver` in outbreak.ini, libadrenotools, Adreno only for now
+  (`docs/ops/android.md` "GPU driver"). ARMSX2's driver database (per-driver render-target read paths) is not ported.
 
 ## Where it plugs in
 

@@ -13,3 +13,7 @@
   stored in this repository (about 3 GB); get it from its author.
 - **Sean Barrett** -- [stb](https://github.com/nothings/stb) `stb_image_write.h` / `stb_image.h` (public domain or
   MIT), used by the diagnostics plugin `native/ob_diag` for PNG frame dumps; taken from raylib's bundled copy.
+- **Billy Laws (bylaws)** -- [libadrenotools](https://github.com/bylaws/libadrenotools) and
+  [liblinkernsbypass](https://github.com/bylaws/liblinkernsbypass) (BSD-2-Clause), built from source into the Android
+  app: they let a player load their own Vulkan driver (for example Mesa Turnip on Adreno) instead of the phone's.
+  No driver is bundled; players supply their own.

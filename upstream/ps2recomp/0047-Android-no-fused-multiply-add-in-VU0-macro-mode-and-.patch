@@ -1,0 +1,102 @@
+From f67cdf106ca7163ec01726b828d27a3a2f733722 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 06:46:03 -0400
+Subject: [PATCH 47/47] Android: no fused multiply-add in VU0 macro mode and
+ the CPU GS
+
+NDK clang contracts acc + a*b into one fused multiply-add by default
+(-ffp-contract=on): Kernel/Stubs/VU.cpp (the sceVu0* macro-mode library
+the game calls) had 458 fmadd/fmla-class instructions in the Android
+object, gs/gs_cpu_backend.cpp 36. The PS2, PCSX2 and our Windows (MSVC)
+build round the multiply and the add separately, so Android results
+differed in the last bits. Both files now include ps2_no_fp_contract.h
+first: the same pragmas as ps2_vu1_detail.h (patch 0045) turn
+contraction off for the translation unit. Android objects: 0 fused ops
+in both (llvm-objdump). Game units are untouched (runtime .cpp only).
+
+Test (ps2x, PS2VU0Math): sceVu0InnerProduct of (1,0,0,1+2^-12) and
+(-1,0,0,1+2^-12) is 0x3A000000 (product rounded to 1+2^-11, then -1);
+fused into the running sum, fma(x3, y3, -1) gives 0x3A000400. The same
+expression built with g++ -O2 -mfma -ffp-contract=fast gives 0x3A000400,
+with contraction off 0x3A000000.
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp   |  1 +
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp |  1 +
+ ps2xRuntime/src/lib/ps2_no_fp_contract.h  | 18 ++++++++++++++++++
+ ps2xTest/src/ps2_vu_tests.cpp             | 17 +++++++++++++++++
+ 4 files changed, 37 insertions(+)
+ create mode 100644 ps2xRuntime/src/lib/ps2_no_fp_contract.h
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index b7840d4..99f0900 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -1,3 +1,4 @@
++#include "../../ps2_no_fp_contract.h" // no fused multiply-add: VU0 macro mode rounds a*b, then +
+ #include "Common.h"
+ #include "VU.h"
+ 
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index f0ad507..322360a 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1,3 +1,4 @@
++#include "../ps2_no_fp_contract.h" // no fused multiply-add, as Windows/PCSX2 round
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/ps2_gs_common.h"
+ #include "runtime/gs/ps2_gs_psmct16.h"
+diff --git a/ps2xRuntime/src/lib/ps2_no_fp_contract.h b/ps2xRuntime/src/lib/ps2_no_fp_contract.h
+new file mode 100644
+index 0000000..6b04449
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_no_fp_contract.h
+@@ -0,0 +1,18 @@
++#ifndef PS2_NO_FP_CONTRACT_H
++#define PS2_NO_FP_CONTRACT_H
++
++// Floating-point contraction off for the rest of the translation unit. The PS2 (VU0 macro mode, the GS
++// rasteriser's interpolation as PCSX2 and our Windows build compute it) rounds every multiply and every add
++// separately; MSVC x64 never fuses them. NDK clang (-ffp-contract=on by default) and GCC (-ffp-contract=fast)
++// turn `acc + a * b` into one fused multiply-add on arm64 (or with FMA), one rounding instead of two, and the
++// results differ from Windows in the last bits. Include first, before any code (ps2_vu1_detail.h does the same
++// for the VU1 files, patch 0045).
++#if defined(__clang__)
++#pragma STDC FP_CONTRACT OFF
++#elif defined(_MSC_VER)
++#pragma fp_contract(off)
++#elif defined(__GNUC__)
++#pragma GCC optimize("fp-contract=off")
++#endif
++
++#endif
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index b96befe..e543717 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -81,6 +81,23 @@ void register_ps2_vu_tests()
+ {
+     MiniTest::Case("PS2VU0Math", [](TestCase &tc)
+     {
++        tc.Run("InnerProduct_rounds_each_product_before_the_add", [](TestCase &t)
++        {
++            // -1 + (1+2^-12)^2: the product rounds to 1+2^-11 (the 2^-24 tail is half an ulp, ties to even), so the
++            // sum is 2^-11 = 0x3A000000. Fused into the running sum (NDK clang's default contraction on arm64,
++            // fma(x3, y3, -1)) it would be 2^-11 + 2^-24 = 0x3A000400.
++            VuEnv env;
++            const float a = 1.0f + 1.0f / 4096.0f;
++            writeVec4(env, kA, 1.0f, 0.0f, 0.0f, a);
++            writeVec4(env, kB, -1.0f, 0.0f, 0.0f, a);
++            SET_GPR_U32(&env.ctx, 4, kA);
++            SET_GPR_U32(&env.ctx, 5, kB);
++            ps2_stubs::sceVu0InnerProduct(env.rdram.data(), &env.ctx, &env.runtime);
++            uint32_t raw = 0u;
++            std::memcpy(&raw, &env.ctx.f[0], sizeof(raw));
++            t.Equals(raw, 0x3A000000u, "InnerProduct: -1 + (1+2^-12)^2 rounds the product first (fused: 0x3A000400)");
++        });
++
+         tc.Run("MulVector_componentwise", [](TestCase &t)
+         {
+             VuEnv env;
+-- 
+2.46.2.windows.1
+

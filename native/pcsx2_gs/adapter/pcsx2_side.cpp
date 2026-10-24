@@ -41,6 +41,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <unistd.h>
+#include "gpu_driver_android.h"
 extern "C" struct android_app* GetAndroidApp(void);
 using HWND = void*;
 using DWORD = uint32_t;
@@ -58,6 +59,7 @@ namespace
 	                          // (Android: the ANativeWindow itself)
 	bool s_visible = false;   // parent window visible at attach: Mailbox present, else Disabled
 	std::atomic<u64> s_pending_size{0}; // (w << 32) | h from ob_gs_window_resized; 0 = none; applied in ob_gs_vsync
+	std::string s_gpu_driver;           // outbreak.ini gpu_driver (ob_gs_set_gpu_driver); used on Android only
 
 	void StopGsThread(const char* why); // below
 
@@ -237,7 +239,19 @@ namespace
 		// PCSX2's own log (swap chain present mode, fallbacks, resize errors) -> pcsx2-gs.log in the working dir.
 		Log::SetFileOutputLevel(LOGLEVEL_DEV, "pcsx2-gs.log");
 		const GSVSyncMode vsync = (s_child && s_visible) ? GSVSyncMode::Mailbox : GSVSyncMode::Disabled;
+#if defined(__ANDROID__)
+		// Every Android renderer presents through PCSX2's Vulkan device (SW too): pick its driver first
+		// (outbreak.ini gpu_driver, gpu_driver_android.h). A custom driver PCSX2 cannot open falls back once.
+		const bool custom_driver = ObGpuSelectDriver(s_gpu_driver);
+		s_open = s_child && GSopen(MakeOptions(t, true), t, s_basemem, vsync, false);
+		if (!s_open && custom_driver)
+		{
+			ObGpuDropCustom("PCSX2 could not create its Vulkan device with it");
+			s_open = GSopen(MakeOptions(t, true), t, s_basemem, vsync, false);
+		}
+#else
 		s_open = (s_child || CreateHiddenWindow()) && GSopen(MakeOptions(t, s_child && s_visible), t, s_basemem, vsync, false);
+#endif
 		std::fprintf(stderr, "[pcsx2-gs] open renderer=%d %s window=%s vsync=%d actual=%d surface=%dx%d\n",
 			static_cast<int>(t), s_open ? "ok" : "FAILED", s_child ? "child" : "hidden", static_cast<int>(vsync),
 			s_open && g_gs_device ? static_cast<int>(g_gs_device->GetVSyncMode()) : -1,
@@ -287,6 +301,12 @@ void ob_gs_init(ObGsRenderer renderer)
 {
 	std::lock_guard<std::mutex> lk(s_mu);
 	s_renderer = renderer;
+}
+
+void ob_gs_set_gpu_driver(const char* name)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	s_gpu_driver = name ? name : "";
 }
 
 // Qwords of the GIFtag units that fit whole in [p, p + qwc*16): GSState::Transfer (GSState.cpp:3392, :3455)

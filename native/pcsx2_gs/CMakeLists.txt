@@ -169,6 +169,9 @@ else()
     add_executable(ob_pcsx2_gs_adapter_tests tests/adapter_tests.cpp adapter/pcsx2_side.cpp)
     target_include_directories(ob_pcsx2_gs_adapter_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
     target_link_libraries(ob_pcsx2_gs_adapter_tests PRIVATE ob_pcsx2_gs)
+    # Android GPU driver choice, pure part (adapter/gpu_driver.cpp): setting, meta.json, fall-back decision, log lines.
+    add_executable(ob_gpu_driver_tests tests/gpu_driver_tests.cpp adapter/gpu_driver.cpp)
+    target_include_directories(ob_gpu_driver_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
 endif()
 
 # Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
@@ -182,6 +185,15 @@ if(TARGET ps2_runtime)
         # pcsx2_side.cpp: the activity's window and assets (android_app via raylib), raylib's EGL surface release.
         target_include_directories(ob_pcsx2_gs_adapter PRIVATE "${CMAKE_ANDROID_NDK}/sources/android/native_app_glue")
         target_link_libraries(ob_pcsx2_gs_adapter PUBLIC EGL android)
+        # Custom Vulkan driver (outbreak.ini gpu_driver; docs/ops/android.md "GPU driver"): libadrenotools
+        # (BSD-2-Clause, github.com/bylaws/libadrenotools, pin in docs/ops/pins.md) from source. adrenotools and
+        # linkernsbypass link in statically; its hooks libhook_impl.so + libmain_hook.so must sit in the APK's lib/
+        # (tools/ob/android.sh package takes them from <build>/adrenotools/src/hook).
+        set(OB_ADRENOTOOLS "C:/ob/adrenotools" CACHE PATH "libadrenotools source tree (pinned commit)")
+        add_subdirectory("${OB_ADRENOTOOLS}" "${CMAKE_BINARY_DIR}/adrenotools" EXCLUDE_FROM_ALL)
+        target_sources(ob_pcsx2_gs_adapter PRIVATE adapter/gpu_driver.cpp adapter/gpu_driver_android.cpp)
+        target_link_libraries(ob_pcsx2_gs_adapter PRIVATE adrenotools)
+        add_dependencies(ob_pcsx2_gs_adapter main_hook hook_impl)
     endif()
 
     add_library(ps2x_external_gs STATIC adapter/hook.cpp)

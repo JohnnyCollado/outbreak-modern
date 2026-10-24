@@ -134,13 +134,13 @@ cmd_test() {
     fi
     # GS thread tests (native/pcsx2_gs/tests): the command ring alone, and the adapter end to end on PCSX2's SW
     # renderer, built in the pcsx2-gs build dir (ob.sh pcsx2-gs staged resources/ and the DLLs there), Vulkan SDK off
-    # PATH as for the smoke.
+    # PATH as for the smoke; and the Android GPU driver choice's pure part (ob_gpu_driver_tests).
     log="$OB_LOGS/ob-test-pcsx2_gs.log"
     local gsb="${OB_PCSX2_GS_BUILD:-$OB_ROOT/pcsx2-gs-build}" np
     np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
-    if vc cmake --build "$gsb" --target ob_gs_ring_tests ob_pcsx2_gs_adapter_tests > "$OB_LOGS/ob-pcsx2-gs-tests-build.log" 2>&1; then
-        (cd "$gsb" && ./ob_gs_ring_tests.exe; PATH="$np" ./ob_pcsx2_gs_adapter_tests.exe) > "$log" 2>&1
-        p=$(awk '/^Passed: /{s+=$2} END{print s+0}' "$log"); t=$(awk '/^Total Tests: /{s+=$3; n++} END{print (n==2 ? s : 0)}' "$log")
+    if vc cmake --build "$gsb" --target ob_gs_ring_tests ob_pcsx2_gs_adapter_tests ob_gpu_driver_tests > "$OB_LOGS/ob-pcsx2-gs-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./ob_gs_ring_tests.exe; PATH="$np" ./ob_pcsx2_gs_adapter_tests.exe; ./ob_gpu_driver_tests.exe) > "$log" 2>&1
+        p=$(awk '/^Passed: /{s+=$2} END{print s+0}' "$log"); t=$(awk '/^Total Tests: /{s+=$3; n++} END{print (n==3 ? s : 0)}' "$log")
         echo "pcsx2_gs: $p/$t"
         [ "$t" -gt 0 ] && [ "$p" = "$t" ] || { red=1; grep -a 'Failed\]' "$log" | head -20; }
     else

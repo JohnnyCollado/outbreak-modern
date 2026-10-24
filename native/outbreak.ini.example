@@ -20,3 +20,9 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 
 ; mods: optional root for mods. Reserved for mod support: recorded only, nothing reads it yet.
 ; mods = D:\Games\PS2\mods
+
+; gpu_driver: Android only. The Vulkan driver the game draws with: system (the phone's own, the default) or the
+; name of a driver folder you put in the app's files dir as drivers/<name>/ (meta.json + the driver .so, e.g. a
+; Mesa Turnip package for Adreno). If that driver cannot be used, the log says why and the system driver is used.
+; Ignored on Windows. Steps: docs/ops/android.md "GPU driver".
+; gpu_driver = system

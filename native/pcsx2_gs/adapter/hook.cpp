@@ -1,6 +1,7 @@
 // hook: the PS2Recomp half of the runner's external GS. Implements PS2ExternalGS (runtime/gs/gs_external.h)
 // over the plain-types bridge (ob_gs_bridge.h); PCSX2 itself lives behind pcsx2_side.cpp.
 #include "runtime/gs/gs_external.h"
+#include "runtime/ps2_game_source.h"
 #include "runtime/ps2_memory.h"
 
 #include "ob_gs_bridge.h"
@@ -54,5 +55,6 @@ PS2ExternalGS* ps2CreateExternalGS(const char* mode)
 		ob_gs_init(ObGsRenderer::VK);
 	else
 		return nullptr;
+	ob_gs_set_gpu_driver(ps2game::activeSettings().gpuDriver.c_str()); // outbreak.ini, PS2Recomp patch 0046
 	return new Pcsx2ExternalGS();
 }

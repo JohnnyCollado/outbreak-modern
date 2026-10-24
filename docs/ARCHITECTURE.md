@@ -60,7 +60,7 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `CLAUDE.md` | Short working notes for Claude Code sessions in this repo | |
 | `upstream/ps2recomp/` | **Our PS2Recomp changes**: numbered patches 0001-00NN, each with a test, plus a README table | The real source of runtime changes; applied as commits in `C:\ob\up` |
 | `upstream/pcsx2/` | Our PCSX2 changes (none so far) | PCSX2 pinned at v2.9.134 (`docs/ops/pins.md`) |
-| `native/pcsx2_gs/` | PCSX2's GS built as a static library, host stubs, D3D shims, smoke test, and the adapter that connects it to PS2Recomp's hook; the adapter runs PCSX2 on its own GS thread fed by a ring (`adapter/gs_ring.h`, PCSX2 MTGS's scheme; `PS2X_GS_THREAD=0` inline) | `docs/ops/gs.md` |
+| `native/pcsx2_gs/` | PCSX2's GS built as a static library, host stubs, D3D shims, smoke test, and the adapter that connects it to PS2Recomp's hook; the adapter runs PCSX2 on its own GS thread fed by a ring (`adapter/gs_ring.h`, PCSX2 MTGS's scheme; `PS2X_GS_THREAD=0` inline); on Android it also picks the Vulkan driver (`adapter/gpu_driver*`: system, or a player-supplied package loaded through libadrenotools, with fall-back; `ob_gpu_driver_tests`) | `docs/ops/gs.md`, `docs/ops/android.md` (GPU driver) |
 | `native/pcsx2_vu/` | PCSX2's microVU (VU1 recompiler) built as a static library (wrapper TU, fakes, config defaults, link-only stubs), the runner's `PS2X_VU1=mvu` backend (`adapter/hook.cpp`, patch 0033; owns VU1 memory + code cache in one reservation and falls back to the interpreter, patch 0041), `ob_pcsx2_vu_compare`, the offline interpreter-vs-microVU diff on VU1 captures, and `ob_pcsx2_vu_tests` (placement under a crowded address space, fallback; run by `ob.sh test`) | `docs/ops/build.md` (VU1 backend, VU1 capture, vucompare), `research/2026-10-23-microvu-feasibility.md` |
 | `native/ob_diag/` | **The diagnostics plugin** `ob_diag.dll` over PS2Recomp's hook API (`runtime/ps2_diag_hooks.h`, patch 0036): scripted input (`PS2X_INPUT_SCRIPT`), frame dumps and captures (`PS2X_FRAME_DUMP_DIR`), frame-time CSV (`PS2X_FRAME_TIME`), guest PC sampler (`PS2X_PC_SAMPLE`), live mock controller on a named pipe (`PS2X_PAD_PIPE`; client `tools/ob/pad.py`), VU1 capture (`PS2X_VU1_CAPTURE`; `include/ob_vu1_capture.h` is the file format), and its tests (`ob_diag_tests`) | Built into `C:\ob\diag-build`; loaded only via `PS2X_DIAG` (ob.sh) or when placed beside the exe; a play build ships without it |
 | `gate/` | The correctness judge: scripted boot, frozen tolerance, reference hashes, baselines, evidence | `docs/ops/gate.md` |
@@ -139,6 +139,7 @@ PS2 hardware and emulation
 - Play!: https://github.com/jpd002/Play- (licence: https://github.com/jpd002/Play-/blob/master/License.txt)
 - DobieStation: https://github.com/PSI-Rockin/DobieStation
 - paraLLEl-GS: https://github.com/Arntzen-Software/parallel-gs
+- libadrenotools (BSD-2-Clause; custom Vulkan driver loading on Adreno, fetched 2026-10-24): https://github.com/bylaws/libadrenotools (README, `include/adrenotools/driver.h`, `tools/ADPKG.md`), https://github.com/bylaws/liblinkernsbypass; ARMSX2's use of it (reference only): https://raw.githubusercontent.com/ARMSX2/ARMSX2/HEAD/pcsx2/GS/Renderers/Vulkan/VKLoader.cpp
 
 Recompilation projects
 - PS2Recomp: https://github.com/ran-j/PS2Recomp

@@ -13,6 +13,9 @@ enum class ObGsRenderer : int
 
 // Records the renderer; GSopen happens lazily on the first ob_gs_* call below (except ob_gs_reset).
 void ob_gs_init(ObGsRenderer renderer);
+// outbreak.ini gpu_driver ("system", empty, or a driver folder name), before the first GS call. Android picks the
+// Vulkan driver from it at GSopen (gpu_driver_android.h); other platforms ignore it.
+void ob_gs_set_gpu_driver(const char* name);
 // path 1..3. Only whole GIFtag units reach PCSX2; a split tail is carried per path to the next call.
 void ob_gs_gif(uint32_t path, const uint8_t* data, uint32_t size_bytes);
 void ob_gs_priv_write(uint32_t offset, uint64_t value);
