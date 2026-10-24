@@ -57,12 +57,6 @@ list(REMOVE_ITEM gs_all
     GS/GSLzma.cpp                                 # GS dump reader (zstd + 3rdparty/lzma); only GSDumpReplayer uses it
     GS/GSPng.cpp                                  # libpng/zlib writer for dumps/snapshots; GSPng::Save stubbed
 )
-if(ANDROID)
-    # Texture replacement needs libpng/zlib/libzip, not built for Android yet: stubbed (stubs/gs_stubs.cpp).
-    list(REMOVE_ITEM gs_all
-        GS/Renderers/HW/GSTextureReplacementLoaders.cpp
-        GS/Renderers/HW/GSTextureReplacements.cpp)
-endif()
 list(TRANSFORM gs_all PREPEND "${P}/pcsx2/")
 
 # ---- common (common/CMakeLists.txt) ----
@@ -146,6 +140,29 @@ if(ANDROID)
     target_compile_options(ob_pcsx2_gs PRIVATE
         "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/stubs/android/ob_android_compat.h")
     target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo vixl android log dl)
+    # Texture replacement (GSTextureReplacements*.cpp), as on Windows: libpng 1.6.58 and zstd 1.5.7 built static
+    # from the sources tools/ob/pcsx2-deps*.bat unpacked, zlib from the NDK, PCSX2's 3rdparty libzip.
+    set(OB_DEPS_SRC "${OB_PCSX2_DEPS}-build")
+    find_package(ZLIB REQUIRED)
+    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+    set(PNG_STATIC ON CACHE BOOL "" FORCE)
+    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${OB_DEPS_SRC}/lpng1658" "${CMAKE_BINARY_DIR}/libpng" EXCLUDE_FROM_ALL)
+    set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${OB_DEPS_SRC}/zstd-1.5.7/build/cmake" "${CMAKE_BINARY_DIR}/zstd" EXCLUDE_FROM_ALL)
+    add_library(Zstd::Zstd ALIAS libzstd_static)
+    add_subdirectory("${P}/3rdparty/libzip" "${CMAKE_BINARY_DIR}/libzip" EXCLUDE_FROM_ALL)
+    target_compile_options(zip PRIVATE -w)
+    # This build's png.h/pnglibconf.h ahead of the Windows install's copies in ${OB_PCSX2_DEPS}/include.
+    target_include_directories(ob_pcsx2_gs BEFORE PRIVATE
+        "${OB_DEPS_SRC}/lpng1658" "${CMAKE_BINARY_DIR}/libpng")
+    target_compile_definitions(ob_pcsx2_gs PUBLIC OB_TEXTURE_REPLACEMENTS)
+    target_link_libraries(ob_pcsx2_gs PUBLIC zip png_static)
 else()
     # PCSX2_DEFS (BuildParameters.cmake, Release, x86, WIN32) + pcsx2/CMakeLists WIN32 block; single ISA.
     target_compile_definitions(ob_pcsx2_gs PUBLIC

@@ -16,7 +16,8 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 
 ; textures: optional root of texture packs in PCSX2's layout, <root>\<serial>\replacements
 ; (here <root>\SLPM-65428\replacements, .png/.dds in any subfolders), or a <root>\SLPM-65428.zip. Loaded by
-; PCSX2's texture replacement on Windows with the Vulkan renderer (PS2X_GS=pcsx2-vk); not yet on Android.
+; PCSX2's texture replacement with the Vulkan renderer (PS2X_GS=pcsx2-vk on Windows; always on Android, where
+; a relative root such as "textures = textures" is the app's files folder).
 ; The start-up log line "[pcsx2-gs] open ... replacements=found" confirms the pack was seen.
 ; textures = D:\Games\PS2\textures
 

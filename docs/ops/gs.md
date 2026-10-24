@@ -62,7 +62,7 @@ backend interface, privileged registers, readback, present and vblank).
 - `config_stubs.cpp`: `EmuFolders`, `EmuConfig`, empty option-struct ctors. GSOptions ctor, `GetRendererName`,
   `RestartOptionsAreEqual`, `ShouldDump` and friends are copied verbatim from `Pcsx2Config.cpp` v2.9.134 with line
   cites: **re-copy them on every PCSX2 bump**.
-- `gs_stubs.cpp`: GSCapture, GSDumpBase/GSDumpReplayer, `GSPng::Save`, GSTextureReplacements (10 fns), `D3D::`
+- `gs_stubs.cpp`: GSCapture, GSDumpBase/GSDumpReplayer, `GSPng::Save`, GSTextureReplacements (10 fns, only without `OB_TEXTURE_REPLACEMENTS`; both builds define it now), `D3D::`
   (`GetPreferredRenderer` = VK, so SW also presents through the Vulkan device).
 - `ui_stubs.cpp`: `ImGuiFreeType::GetFontLoader`, `ImGuiManager` (Initialize makes a real empty ImGui context +
   default font: `GSDeviceVK::RenderImGui` runs every present), `FullscreenUI::Render`, `RGBA8Image`.
@@ -145,7 +145,7 @@ backend interface, privileged registers, readback, present and vblank).
 - 1.4: access logo colours stippled (navy/black shown as dithered grey-purple; suspect `Dithering` or a 16-bit
   path); savedata glyphs thin/broken strokes.
 
-- Texture replacement on Android: still stubbed (libpng/zlib/libzip not built for arm64 yet).
+- Texture replacement on Android: built since 2026-10-24 (`reports/2026-10-24-android.md` entry 16).
 
 ## High resolution, widescreen, texture packs (2026-10-24, PS2Recomp 0050)
 
@@ -163,8 +163,9 @@ serial=S replacements=found|none|not built`.
   The database's FMV fix rewrites code and is left out (needs a recompile; its own note says it breaks the
   collection screen).
 - **Texture packs** (`textures = <root>`, `<root>/<serial>/replacements`): `GSTextureReplacements*.cpp` built on
-  Windows (`OB_TEXTURE_REPLACEMENTS`), PNG via libpng 1.6.58, `<serial>.zip` packs via PCSX2's `3rdparty/libzip`
-  (zlib 1.3.2 + zstd); deps from `tools/ob/pcsx2-deps-png.bat`. The adapter sets `EmuFolders::Textures`, the serial
+  Windows and Android (`OB_TEXTURE_REPLACEMENTS`), PNG via libpng 1.6.58, `<serial>.zip` packs via PCSX2's
+  `3rdparty/libzip` (zlib + zstd); Windows deps from `tools/ob/pcsx2-deps-png.bat`, Android builds libpng and zstd
+  from the same sources (`C:\ob\pcsx2-deps-build`) with the NDK's zlib. The adapter sets `EmuFolders::Textures`, the serial
   behind `VMManager::GetDiscSerial` (`stubs/host_stubs.cpp`, from the runtime's `activeGameSerial()`) and
   `LoadTextureReplacements` (Vulkan only). Loading is PCSX2's default: on demand, on its worker thread, no precache.
   `common/Image.cpp` stays stubbed (only texture dumping writes images).
