@@ -1,0 +1,772 @@
+From ecf5d2d409224f7f2547af3cd6568a427e1e489a Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 06:31:24 -0400
+Subject: [PATCH] VU1: float fast path without long double, cheaper per-cycle
+ bookkeeping
+
+The FMAC flag/clamp check recomputed every lane in long double. On MSVC
+long double is double; on arm64 Android it is IEEE quad done in software
+(87 soft-float library calls in ps2_vu1_core.cpp, ~33x a double lane on
+x86 soft-fp). It now runs in double, which is what every Windows result
+and the 120 recorded VU1 captures already used:
+- the product of two VU floats is exact in double; a + b*c rounds once
+  (round toward zero), keeping sign and zero, never crossing FLT_MIN;
+  the only quad/double difference was a sum within one double step above
+  FLT_MAX (FLT_MAX + 2^70: quad reported overflow, Windows did not).
+- ps2_vu1_detail.h turns floating-point contraction off for the VU
+  files: NDK clang (-ffp-contract=on) fused acc + a*b into fmadd (67 in
+  ps2_vu1_upper.cpp, 34 in ps2_vu1_lower.cpp), one rounding instead of
+  two, so Android VU1 results differed from Windows in the last bits.
+
+Per-cycle overheads, results unchanged:
+- commitReadyPipelines: returns before the earliest queued ready cycle;
+  per queue, visits only queues whose next ready cycle has come and only
+  their valid entries (bit mask), in the same order.
+- Decoded-pair cache: a new code generation bumps an epoch and pairs
+  decode on first use, instead of re-decoding all 2,048 pairs; the pair
+  is returned by reference.
+- XGKICK: the 64 KiB packet buffer moved out of XgkickPipeline, so
+  m_xgkick = {} (every XGKICK and execute) no longer clears 64 KiB; a
+  qword that does not wrap is one memcpy instead of 16 modulo copies.
+- normalizeOperand inline in the header; VI ready/write loops walk the
+  set bits.
+
+Tests (ps2x VU1 suite, 3 cases): FLT_MAX + 2^70 (ADD and MADD) is no
+overflow, FLT_MAX + 2^104 is; MADD -1 + (1+2^-12)^2 = 0x3A000000 (fused:
+0x3A000400); denormal operand reads as zero, a -2^-149 result flushes to
+-0 with Z/S/U. Fail without (GCC build, 80-bit long double): the
+overflow case reports x overflow (MAC c000); with -mfma the MADD case
+gives 0x3A000400. vucompare: the same 100/120 captures replay exactly.
+---
+ ps2xRuntime/include/runtime/ps2_vu1.h   |  56 ++++++-
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp | 210 +++++++++++++-----------
+ ps2xRuntime/src/lib/vu/ps2_vu1_detail.h |  12 ++
+ ps2xTest/src/ps2_vu1_tests.cpp          |  84 ++++++++++
+ 4 files changed, 264 insertions(+), 98 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
+index 67c8184..a58bc6f 100644
+--- a/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -2,6 +2,7 @@
+ #define PS2_VU1_H
+ 
+ #include <array>
++#include <bit>
+ #include <cstdint>
+ 
+ class GS;
+@@ -177,10 +178,12 @@ private:
+         bool valid = false;
+     };
+ 
++    // The PATH1 transfer state. Its 64 KiB packet buffer is m_xgkickPacket, outside the struct, so that
++    // `m_xgkick = {}` (every XGKICK and every execute()) clears a few fields instead of 64 KiB. Only the bytes
++    // the current transfer copied are ever read.
+     struct XgkickPipeline
+     {
+         static constexpr uint32_t kBufferSize = 0x10000u;
+-        std::array<uint8_t, kBufferSize> packet{};
+         uint32_t sourceAddress = 0;
+         uint32_t totalBytes = 0;
+         uint32_t copiedBytes = 0;
+@@ -203,6 +206,11 @@ private:
+     Unit m_unit;
+     VU1State m_state;
+     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
++    // Pair i of m_decodedCodeCache is current when m_decodedEpoch[i] == m_cacheEpoch. A new code generation
++    // bumps m_cacheEpoch and pairs decode on first use, instead of re-decoding all 2,048 pairs at once.
++    std::array<uint64_t, kMaxDecodedPairs> m_decodedEpoch{};
++    uint64_t m_cacheEpoch = 0;
++    DecodedInstructionPair m_uncachedDecoded{};
+     const uint8_t *m_cachedVuCode = nullptr;
+     const PS2Memory *m_cachedMemory = nullptr;
+     uint32_t m_cachedCodeSize = 0;
+@@ -217,6 +225,7 @@ private:
+     std::array<PendingViWrite, kMaxPendingViWrites> m_viWritePipeline{};
+     std::array<PendingAccWrite, kMaxPendingAccWrites> m_accWritePipeline{};
+     XgkickPipeline m_xgkick{};
++    std::array<uint8_t, XgkickPipeline::kBufferSize> m_xgkickPacket{};
+     std::array<std::array<uint64_t, 4>, 32> m_vfReady{};
+     std::array<uint64_t, 16> m_viReady{};
+     std::array<uint64_t, 4> m_accReady{};
+@@ -225,6 +234,24 @@ private:
+     std::array<uint64_t, 4> m_accLatestWrite{};
+ 
+     uint64_t m_cycle = 0;
++    // Earliest readyCycle among the queued pipeline entries, overall and per queue (UINT64_MAX: none queued).
++    // commitReadyPipelines() returns at once before m_nextCommitCycle and scans only the queues whose own
++    // next cycle has come, instead of scanning all ~50 entries every cycle.
++    enum CommitQueue : uint8_t
++    {
++        CommitFlag = 0,
++        CommitFdiv,
++        CommitEfu,
++        CommitStore,
++        CommitVf,
++        CommitVi,
++        CommitAcc,
++        CommitQueueCount
++    };
++    uint64_t m_nextCommitCycle = UINT64_MAX;
++    std::array<uint64_t, CommitQueueCount> m_nextCommit{};
++    // Bit i set: entry i of that queue is valid (the commit scan visits only those, in index order).
++    std::array<uint32_t, CommitQueueCount> m_validMask{};
+     uint64_t m_nextWriteSequence = 0;
+     uint64_t m_efuResourceReady = 0;
+     uint32_t m_workingClip = 0;
+@@ -250,8 +277,16 @@ private:
+     static void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
+     static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
+     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
+-    DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
++    const DecodedInstructionPair &getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+     void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
++    void noteQueued(CommitQueue queue, uint32_t index, uint64_t readyCycle)
++    {
++        m_validMask[queue] |= 1u << index;
++        if (readyCycle < m_nextCommit[queue])
++            m_nextCommit[queue] = readyCycle;
++        if (readyCycle < m_nextCommitCycle)
++            m_nextCommitCycle = readyCycle;
++    }
+ 
+     void execUpper(uint32_t instr);
+     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
+@@ -261,8 +296,8 @@ private:
+     void applyFmacDest(float *dst, float *result, uint8_t dest);
+     void applyFmacDestAcc(float *result, uint8_t dest);
+     void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
+-    bool calculateFmacExactResult(uint32_t component, long double &result) const;
+-    uint8_t normalizeFmacExactResult(float &value, long double exactResult) const;
++    bool calculateFmacExactResult(uint32_t component, double &result) const;
++    uint8_t normalizeFmacExactResult(float &value, double exactResult) const;
+     uint32_t calculateFmacProductSticky(uint8_t dest) const;
+     void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
+     void queueFsset(uint16_t immediate);
+@@ -287,7 +322,18 @@ private:
+     void markPairWrites(const DecodedInstructionPair &decoded);
+     bool pipelinesPending() const;
+ 
+-    float normalizeOperand(float value) const;
++    // Inline (called for every lane of every FMAC operand from the upper/lower files): denormal -> signed zero,
++    // Inf/NaN -> signed FLT_MAX.
++    float normalizeOperand(float value) const
++    {
++        uint32_t bits = std::bit_cast<uint32_t>(value);
++        const uint32_t exponent = (bits >> 23) & 0xFFu;
++        if (exponent == 0u)
++            bits &= 0x80000000u;
++        else if (exponent == 0xFFu)
++            bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
++        return std::bit_cast<float>(bits);
++    }
+     float normalizeResult(float value, uint32_t &laneFlags) const;
+     uint32_t microAddressMask() const;
+     int32_t readBranchVi(uint8_t reg) const;
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index a85645e..94921d1 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -83,6 +83,9 @@ void VU1Interpreter::resetScheduler()
+     m_accLatestWrite = {};
+     m_nextWriteSequence = 0;
+     m_efuResourceReady = 0;
++    m_nextCommitCycle = UINT64_MAX;
++    m_nextCommit.fill(UINT64_MAX);
++    m_validMask = {};
+     m_workingClip = m_state.clip;
+     m_viBranchBackupValue = 0;
+     m_viBranchBackupReg = 0;
+@@ -107,23 +110,6 @@ float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
+     return normalizeOperand(vf[bc & 3u]);
+ }
+ 
+-float VU1Interpreter::normalizeOperand(float value) const
+-{
+-    uint32_t bits = 0;
+-    std::memcpy(&bits, &value, sizeof(bits));
+-    const uint32_t exponent = (bits >> 23) & 0xFFu;
+-    if (exponent == 0u)
+-    {
+-        bits &= 0x80000000u;
+-    }
+-    else if (exponent == 0xFFu)
+-    {
+-        bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+-    }
+-    std::memcpy(&value, &bits, sizeof(value));
+-    return value;
+-}
+-
+ float VU1Interpreter::normalizeResult(float value, uint32_t &laneFlags) const
+ {
+     uint32_t bits = 0;
+@@ -204,7 +190,7 @@ void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
+         if ((dest & laneForComponent(component)) == 0u)
+             continue;
+ 
+-        long double exactResult = 0.0L;
++        double exactResult = 0.0;
+         if (calculateFmacExactResult(component, exactResult))
+         {
+             laneFlags[component] = normalizeFmacExactResult(result[component], exactResult);
+@@ -217,8 +203,16 @@ void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
+     }
+ }
+ 
++// The FMAC result again in double, before it is rounded to float, so the Z/S/U/O flags and the clamp see the
++// value the float result came from (float overflow saturates to infinity, underflow to a denormal or zero).
++// Double is exact for every single product of two VU floats (48-bit mantissa, exponent within +-256) and for
++// sums whose operands are close in magnitude; otherwise it rounds (round toward zero, run() sets it), which
++// preserves sign and zero and never crosses FLT_MIN. It was long double until patch 0045: on MSVC long double
++// IS double, so the Windows results (and the 120 recorded captures) were already these; on arm64 Android long
++// double is IEEE quad done in software (~87 library calls in this file) and differed from Windows only where a
++// sum lands within one double rounding step above FLT_MAX (FLT_MAX + 2^70: quad says overflow, double does not).
+ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
+-                                               long double &result) const
++                                               double &result) const
+ {
+     const uint32_t upper = m_currentUpperInstruction;
+     const uint8_t op = static_cast<uint8_t>(upper & 0x3Fu);
+@@ -230,7 +224,7 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
+ 
+     const auto operand = [this](float value)
+     {
+-        return static_cast<long double>(normalizeOperand(value));
++        return static_cast<double>(normalizeOperand(value));
+     };
+     const auto vs = [&](uint32_t lane)
+     {
+@@ -245,8 +239,8 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
+         return operand(m_state.acc[lane]);
+     };
+ 
+-    const long double q = operand(m_state.q);
+-    const long double i = operand(m_state.i);
++    const double q = operand(m_state.q);
++    const double i = operand(m_state.i);
+ 
+     if (op < 0x3Cu)
+     {
+@@ -314,7 +308,7 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
+                 static constexpr uint8_t left[4] = {1u, 2u, 0u, 3u};
+                 static constexpr uint8_t right[4] = {2u, 0u, 1u, 3u};
+                 result = component == 3u
+-                             ? 0.0L
++                             ? 0.0
+                              : acc(component) - vs(left[component]) * vt(right[component]);
+                 break;
+             }
+@@ -389,7 +383,7 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
+             static constexpr uint8_t left[4] = {1u, 2u, 0u, 3u};
+             static constexpr uint8_t right[4] = {2u, 0u, 1u, 3u};
+             result = component == 3u
+-                         ? 0.0L
++                         ? 0.0
+                          : vs(left[component]) * vt(right[component]);
+             break;
+         }
+@@ -401,16 +395,16 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
+ }
+ 
+ uint8_t VU1Interpreter::normalizeFmacExactResult(float &value,
+-                                                  long double exactResult) const
++                                                  double exactResult) const
+ {
+     const bool negative = std::signbit(exactResult);
+-    const long double magnitude = std::fabs(exactResult);
+-    const long double maximum = static_cast<long double>(std::numeric_limits<float>::max());
+-    const long double minimum = static_cast<long double>(std::numeric_limits<float>::min());
++    const double magnitude = std::fabs(exactResult);
++    const double maximum = static_cast<double>(std::numeric_limits<float>::max());
++    const double minimum = static_cast<double>(std::numeric_limits<float>::min());
+     uint8_t flags = negative ? 0x2u : 0u;
+ 
+     uint32_t bits = negative ? 0x80000000u : 0u;
+-    if (magnitude == 0.0L)
++    if (magnitude == 0.0)
+     {
+         flags |= 0x1u;
+         std::memcpy(&value, &bits, sizeof(value));
+@@ -479,7 +473,7 @@ uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
+         }
+ 
+         float product = left * right;
+-        const long double exactProduct = static_cast<long double>(left) * static_cast<long double>(right);
++        const double exactProduct = static_cast<double>(left) * static_cast<double>(right); // exact in double
+         const uint8_t productFlags = normalizeFmacExactResult(product, exactProduct);
+         // Product-sum instructions report Z/S/U/O from the add/subtract result
+         // as current flags, while every product condition accumulates into the
+@@ -534,6 +528,7 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
+     entry->valid = true;
+     entry->issueCycle = m_cycle;
+     entry->readyCycle = m_cycle + kFmacLatency;
++    noteQueued(CommitFlag, static_cast<uint32_t>(entry - m_flagPipeline.data()), entry->readyCycle);
+     entry->mac = mac;
+     entry->status = status;
+     entry->extraSticky = extraSticky;
+@@ -573,6 +568,7 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
+             entry.valid = true;
+             entry.issueCycle = m_cycle;
+             entry.readyCycle = m_cycle + kFmacLatency;
++            noteQueued(CommitFlag, static_cast<uint32_t>(&entry - m_flagPipeline.data()), entry.readyCycle);
+             entry.status = static_cast<uint32_t>(immediate) & 0xFC0u;
+             entry.writesSticky = true;
+             return;
+@@ -592,6 +588,7 @@ void VU1Interpreter::queueClip(uint32_t clip)
+             entry.valid = true;
+             entry.issueCycle = m_cycle;
+             entry.readyCycle = m_cycle + kFmacLatency;
++            noteQueued(CommitFlag, static_cast<uint32_t>(&entry - m_flagPipeline.data()), entry.readyCycle);
+             entry.clip = m_workingClip;
+             entry.writesClip = true;
+             return;
+@@ -616,6 +613,7 @@ void VU1Interpreter::queueFcset(uint32_t clip)
+             entry.valid = true;
+             entry.issueCycle = m_cycle;
+             entry.readyCycle = m_cycle + kFmacLatency;
++            noteQueued(CommitFlag, static_cast<uint32_t>(&entry - m_flagPipeline.data()), entry.readyCycle);
+             entry.clip = m_workingClip;
+             entry.writesClip = true;
+             return;
+@@ -630,6 +628,7 @@ void VU1Interpreter::queueQ(float value, uint32_t latency, uint32_t statusDi)
+     value = normalizeResult(value, ignoredFlags);
+     m_fdiv.valid = true;
+     m_fdiv.readyCycle = m_cycle + latency;
++    noteQueued(CommitFdiv, 0u, m_fdiv.readyCycle);
+     m_fdiv.value = value;
+     m_fdiv.statusDi = statusDi & 0x30u;
+ }
+@@ -644,6 +643,7 @@ void VU1Interpreter::queueP(float value, uint32_t latency)
+         {
+             entry.valid = true;
+             entry.readyCycle = m_cycle + latency;
++            noteQueued(CommitEfu, static_cast<uint32_t>(&entry - m_efu.data()), entry.readyCycle);
+             entry.value = value;
+             // EFU throughput is one cycle shorter than result visibility.
+             m_efuResourceReady = m_cycle + (latency > 0u ? latency - 1u : 0u);
+@@ -661,6 +661,7 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
+         {
+             store.valid = true;
+             store.readyCycle = m_cycle + 1u;
++            noteQueued(CommitStore, static_cast<uint32_t>(&store - m_storePipeline.data()), store.readyCycle);
+             store.address = address;
+             store.laneMask = laneMask;
+             std::copy(words, words + 4, store.words.begin());
+@@ -682,6 +683,7 @@ void VU1Interpreter::queueVfWrite(uint8_t reg, uint8_t laneMask,
+             write = {};
+             write.valid = true;
+             write.readyCycle = m_cycle + latency;
++            noteQueued(CommitVf, static_cast<uint32_t>(&write - m_vfWritePipeline.data()), write.readyCycle);
+             write.sequence = ++m_nextWriteSequence;
+             write.reg = reg;
+             write.laneMask = laneMask;
+@@ -708,6 +710,7 @@ void VU1Interpreter::queueViWrite(uint8_t reg, int32_t value, uint32_t latency)
+             write = {};
+             write.valid = true;
+             write.readyCycle = m_cycle + latency;
++            noteQueued(CommitVi, static_cast<uint32_t>(&write - m_viWritePipeline.data()), write.readyCycle);
+             write.sequence = ++m_nextWriteSequence;
+             write.reg = reg;
+             write.value = value;
+@@ -729,6 +732,7 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
+             write = {};
+             write.valid = true;
+             write.readyCycle = m_cycle + latency;
++            noteQueued(CommitAcc, static_cast<uint32_t>(&write - m_accWritePipeline.data()), write.readyCycle);
+             write.sequence = ++m_nextWriteSequence;
+             write.laneMask = laneMask;
+             std::copy(value, value + 4, write.value.begin());
+@@ -745,11 +749,37 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
+ 
+ void VU1Interpreter::commitReadyPipelines()
+ {
+-    for (FlagPipelineEntry &entry : m_flagPipeline)
++    // Nothing becomes ready before m_nextCommitCycle: the scans below would change nothing.
++    if (m_cycle < m_nextCommitCycle)
++        return;
++
++    // The same commit order as before (queue by queue, each in index order), but a queue is visited only
++    // when its own next ready cycle has come (otherwise it has no ready entry), and only its valid entries
++    // (m_validMask). The entries that stay queued give that queue's next cycle.
++    const auto commitQueue = [this](CommitQueue queue, auto *entries, auto &&commit)
+     {
+-        if (!entry.valid || entry.readyCycle > m_cycle)
+-            continue;
++        if (m_cycle < m_nextCommit[queue])
++            return;
++        uint64_t next = UINT64_MAX;
++        uint32_t &mask = m_validMask[queue];
++        for (uint32_t bits = mask; bits != 0u; bits &= bits - 1u)
++        {
++            const uint32_t index = static_cast<uint32_t>(std::countr_zero(bits));
++            auto &entry = entries[index];
++            if (entry.readyCycle > m_cycle)
++            {
++                next = std::min(next, entry.readyCycle);
++                continue;
++            }
++            commit(entry);
++            entry = {};
++            mask &= ~(1u << index);
++        }
++        m_nextCommit[queue] = next;
++    };
+ 
++    commitQueue(CommitFlag, m_flagPipeline.data(), [this](FlagPipelineEntry &entry)
++    {
+         if (entry.writesMac)
+             m_state.mac = entry.mac;
+         if (entry.writesStatus)
+@@ -763,30 +793,22 @@ void VU1Interpreter::commitReadyPipelines()
+         }
+         if (entry.writesClip)
+             m_state.clip = entry.clip;
+-        entry = {};
+-    }
++    });
+ 
+-    if (m_fdiv.valid && m_fdiv.readyCycle <= m_cycle)
++    commitQueue(CommitFdiv, &m_fdiv, [this](ScalarPipelineEntry &fdiv)
+     {
+-        m_state.q = m_fdiv.value;
+-        const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
++        m_state.q = fdiv.value;
++        const uint32_t currentDi = fdiv.statusDi & 0x30u;
+         m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
+-        m_fdiv = {};
+-    }
++    });
+ 
+-    for (ScalarPipelineEntry &entry : m_efu)
++    commitQueue(CommitEfu, m_efu.data(), [this](ScalarPipelineEntry &entry)
+     {
+-        if (entry.valid && entry.readyCycle <= m_cycle)
+-        {
+-            m_state.p = entry.value;
+-            entry = {};
+-        }
+-    }
++        m_state.p = entry.value;
++    });
+ 
+-    for (PendingStore &store : m_storePipeline)
++    commitQueue(CommitStore, m_storePipeline.data(), [this](PendingStore &store)
+     {
+-        if (!store.valid || store.readyCycle > m_cycle)
+-            continue;
+         if (m_activeVuData && store.address + 16u <= m_activeVuDataSize)
+         {
+             uint32_t oldWords[4]{};
+@@ -798,13 +820,10 @@ void VU1Interpreter::commitReadyPipelines()
+             }
+             std::memcpy(m_activeVuData + store.address, oldWords, sizeof(oldWords));
+         }
+-        store = {};
+-    }
++    });
+ 
+-    for (PendingVfWrite &write : m_vfWritePipeline)
++    commitQueue(CommitVf, m_vfWritePipeline.data(), [this](PendingVfWrite &write)
+     {
+-        if (!write.valid || write.readyCycle > m_cycle)
+-            continue;
+         for (uint32_t component = 0; component < 4u; ++component)
+         {
+             if ((write.laneMask & laneForComponent(component)) != 0u &&
+@@ -813,22 +832,16 @@ void VU1Interpreter::commitReadyPipelines()
+                 m_state.vf[write.reg][component] = write.value[component];
+             }
+         }
+-        write = {};
+-    }
++    });
+ 
+-    for (PendingViWrite &write : m_viWritePipeline)
++    commitQueue(CommitVi, m_viWritePipeline.data(), [this](PendingViWrite &write)
+     {
+-        if (!write.valid || write.readyCycle > m_cycle)
+-            continue;
+         if (m_viLatestWrite[write.reg] == write.sequence)
+             m_state.vi[write.reg] = static_cast<int16_t>(write.value);
+-        write = {};
+-    }
++    });
+ 
+-    for (PendingAccWrite &write : m_accWritePipeline)
++    commitQueue(CommitAcc, m_accWritePipeline.data(), [this](PendingAccWrite &write)
+     {
+-        if (!write.valid || write.readyCycle > m_cycle)
+-            continue;
+         for (uint32_t component = 0; component < 4u; ++component)
+         {
+             if ((write.laneMask & laneForComponent(component)) != 0u &&
+@@ -837,8 +850,11 @@ void VU1Interpreter::commitReadyPipelines()
+                 m_state.acc[component] = write.value[component];
+             }
+         }
+-        write = {};
+-    }
++    });
++
++    m_nextCommitCycle = UINT64_MAX;
++    for (const uint64_t queueNext : m_nextCommit)
++        m_nextCommitCycle = std::min(m_nextCommitCycle, queueNext);
+ }
+ 
+ void VU1Interpreter::progressXgkick()
+@@ -858,17 +874,26 @@ void VU1Interpreter::progressXgkick()
+         }
+ 
+         const uint32_t qwordOffset = m_xgkick.copiedBytes;
+-        for (uint32_t i = 0; i < 16u; ++i)
++        const uint32_t start = (m_xgkick.sourceAddress + m_xgkick.copiedBytes) % m_activeVuDataSize;
++        if (start + 16u <= m_activeVuDataSize)
+         {
+-            const uint32_t source = (m_xgkick.sourceAddress + m_xgkick.copiedBytes + i) % m_activeVuDataSize;
+-            m_xgkick.packet[m_xgkick.copiedBytes + i] = m_activeVuData[source];
++            // One qword that does not wrap: the per-byte loop below would copy the same bytes.
++            std::memcpy(m_xgkickPacket.data() + qwordOffset, m_activeVuData + start, 16u);
++        }
++        else
++        {
++            for (uint32_t i = 0; i < 16u; ++i)
++            {
++                const uint32_t source = (start + i) % m_activeVuDataSize;
++                m_xgkickPacket[qwordOffset + i] = m_activeVuData[source];
++            }
+         }
+         m_xgkick.copiedBytes += 16u;
+ 
+         if (m_xgkick.currentTagEnd == 0u)
+         {
+             uint64_t tagLo = 0;
+-            std::memcpy(&tagLo, m_xgkick.packet.data() + qwordOffset, sizeof(tagLo));
++            std::memcpy(&tagLo, m_xgkickPacket.data() + qwordOffset, sizeof(tagLo));
+             const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+             const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+             uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+@@ -921,11 +946,11 @@ void VU1Interpreter::finishXgkick()
+         return;
+ 
+     if (PS2DiagHooks *diag = ps2DiagHooks())
+-        diag->onVu1Path1(m_xgkick.packet.data(), m_xgkick.totalBytes);
++        diag->onVu1Path1(m_xgkickPacket.data(), m_xgkick.totalBytes);
+     if (m_activeMemory)
+-        m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
++        m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkickPacket.data(), m_xgkick.totalBytes);
+     else if (m_activeGs)
+-        m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
++        m_activeGs->processGIFPacket(m_xgkickPacket.data(), m_xgkick.totalBytes);
+     m_xgkick.active = false;
+ }
+ 
+@@ -1008,11 +1033,8 @@ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &d
+                     ready = std::max(ready, m_vfReady[access.reg][component]);
+             }
+         }
+-        for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+-        {
+-            if ((usage->viRead & (1u << reg)) != 0u)
+-                ready = std::max(ready, m_viReady[reg]);
+-        }
++        for (uint32_t bits = usage->viRead & 0xFFFEu; bits != 0u; bits &= bits - 1u)
++            ready = std::max(ready, m_viReady[std::countr_zero(bits)]);
+         for (uint32_t component = 0; component < 4u; ++component)
+         {
+             if ((usage->accRead & laneForComponent(component)) != 0u)
+@@ -1066,11 +1088,8 @@ void VU1Interpreter::markPairWrites(const DecodedInstructionPair &decoded)
+         }
+     }
+ 
+-    for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+-    {
+-        if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
+-            m_viReady[reg] = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
+-    }
++    for (uint32_t bits = decoded.lowerUsage.viWrite & 0xFFFEu; bits != 0u; bits &= bits - 1u)
++        m_viReady[std::countr_zero(bits)] = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
+     for (uint32_t component = 0; component < 4u; ++component)
+     {
+         if ((decoded.upperUsage.accWrite & laneForComponent(component)) != 0u)
+@@ -1537,9 +1556,9 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
+ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
+                                              const PS2Memory *memory, uint64_t generation)
+ {
+-    const uint32_t pairCount = std::min<uint32_t>(codeSize / 8u, kMaxDecodedPairs);
+-    for (uint32_t i = 0; i < pairCount; ++i)
+-        m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
++    // Lazy: every pair is stale until getDecodedInstructionPairForPc decodes it on first use (the result is the
++    // same as decoding all pairs here; the code cannot change without a new generation).
++    ++m_cacheEpoch;
+ 
+     m_cachedVuCode = vuCode;
+     m_cachedMemory = memory;
+@@ -1548,17 +1567,17 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+     m_decodedCodeCacheValid = true;
+ }
+ 
+-VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPairForPc(
++const VU1Interpreter::DecodedInstructionPair &VU1Interpreter::getDecodedInstructionPairForPc(
+     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc)
+ {
+     if ((pc & 7u) != 0u)
+-        return decodeInstructionPair(vuCode, pc);
++        return m_uncachedDecoded = decodeInstructionPair(vuCode, pc);
+ 
+     const bool trackedVu1Code = memory != nullptr &&
+                                 ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) ||
+                                  (m_unit == Unit::VU0 && vuCode == memory->getVU0Code()));
+     if (!trackedVu1Code)
+-        return decodeInstructionPair(vuCode, pc);
++        return m_uncachedDecoded = decodeInstructionPair(vuCode, pc);
+ 
+     const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
+     if (!m_decodedCodeCacheValid ||
+@@ -1570,8 +1589,13 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPair
+         rebuildDecodedCodeCache(vuCode, codeSize, memory, generation);
+     }
+     const uint32_t pairIndex = pc / 8u;
+-    if (pairIndex >= kMaxDecodedPairs)
+-        return decodeInstructionPair(vuCode, pc);
++    if (pairIndex >= kMaxDecodedPairs || pairIndex >= codeSize / 8u)
++        return m_uncachedDecoded = decodeInstructionPair(vuCode, pc);
++    if (m_decodedEpoch[pairIndex] != m_cacheEpoch)
++    {
++        m_decodedCodeCache[pairIndex] = decodeInstructionPair(vuCode, pc);
++        m_decodedEpoch[pairIndex] = m_cacheEpoch;
++    }
+     return m_decodedCodeCache[pairIndex];
+ }
+ 
+@@ -1643,7 +1667,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         if (m_state.pc + 8u > codeSize)
+             break;
+ 
+-        const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
++        const DecodedInstructionPair &decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+         if (decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
+         {
+             reportReservedInstruction(decoded.upperUsage.reserved, decoded.upperUsage.reserved ? decoded.upper : decoded.lower);
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h b/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h
+index ed0ee71..9c13b0a 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_detail.h
+@@ -3,6 +3,18 @@
+ 
+ #include <cstdint>
+ 
++// VU arithmetic rounds every multiply and every add separately (the FMAC is not a fused multiply-add, and MSVC
++// x64 builds never fuse). Clang (Android NDK, -ffp-contract=on by default) and GCC (-ffp-contract=fast) would
++// turn `acc + a * b` into one fused operation on arm64 or with FMA, and the results would differ from Windows
++// in the last bits. Every VU translation unit includes this header before its code.
++#if defined(__clang__)
++#pragma STDC FP_CONTRACT OFF
++#elif defined(_MSC_VER)
++#pragma fp_contract(off)
++#elif defined(__GNUC__)
++#pragma GCC optimize("fp-contract=off")
++#endif
++
+ // Instruction field extraction helpers
+ static inline uint8_t DEST(uint32_t i) { return (uint8_t)((i >> 21) & 0xF); }
+ static inline uint8_t FT(uint32_t i) { return (uint8_t)((i >> 16) & 0x1F); }
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+index 362bfe1..85230dc 100644
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -1716,6 +1716,90 @@ void register_ps2_vu1_tests()
+                      "underflow should flush to signed zero before writeback");
+         });
+ 
++        // Patch 0045: the flag/clamp check runs in double (was long double: IEEE quad in software on arm64).
++        // These pin the Windows results, which the 120 recorded captures were made with.
++        tc.Run("VU1 FMAC overflow check: FLT_MAX plus less than a double step is not an overflow, plus 2^104 is", [](TestCase &t)
++        {
++            Vu1Fixture fx;
++            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++
++            writeVuInstructionPair(fx.code, 0u, 0u,
++                                   makeVuUpper(0x28u, 0xCu, 2u, 1u, 3u)); // ADD.xy vf3, vf1, vf2
++            writeVuInstructionPair(fx.code, 8u, 0u,
++                                   makeVuUpper(0x29u, 0x8u, 5u, 4u, 6u)); // MADD.x vf6, vf4, vf5
++
++            VU1Interpreter vu1;
++            const float fltMax = std::numeric_limits<float>::max();
++            vu1.state().vf[1][0] = fltMax;
++            vu1.state().vf[2][0] = std::ldexp(1.0f, 70);  // below FLT_MAX's double step (2^75)
++            vu1.state().vf[1][1] = fltMax;
++            vu1.state().vf[2][1] = std::ldexp(1.0f, 104); // half a float step: exact in double
++            vu1.state().acc[0] = fltMax;
++            vu1.state().vf[4][0] = std::ldexp(1.0f, 35);
++            vu1.state().vf[5][0] = std::ldexp(1.0f, 35);  // product 2^70
++            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
++                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
++                        0u, 0u, 0u, 4u);
++
++            t.Equals(std::bit_cast<uint32_t>(vu1.state().vf[3][0]), 0x7F7FFFFFu, "x: FLT_MAX + 2^70 truncates to FLT_MAX");
++            t.Equals(std::bit_cast<uint32_t>(vu1.state().vf[3][1]), 0x7F7FFFFFu, "y: FLT_MAX + 2^104 clamps to FLT_MAX");
++            t.Equals(vu1.state().mac, 0x4000u, "ADD: overflow on y only (quad or x87 long double also flags x)");
++            t.Equals(vu1.state().status, 0x208u, "ADD: current and sticky O");
++
++            vu1.resume(fx.code, PS2_VU1_CODE_SIZE,
++                       fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
++                       0u, 0u, 5u);
++            t.Equals(std::bit_cast<uint32_t>(vu1.state().vf[6][0]), 0x7F7FFFFFu, "MADD: FLT_MAX + 2^35 * 2^35 is FLT_MAX");
++            t.Equals(vu1.state().mac, 0u, "MADD: no overflow from an addend below the double step");
++            t.Equals(vu1.state().status, 0x200u, "MADD: no current flag; the ADD's sticky O stays");
++        });
++
++        tc.Run("VU1 MADD rounds the product before the add (no fused multiply-add)", [](TestCase &t)
++        {
++            Vu1Fixture fx;
++            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++
++            writeVuInstructionPair(fx.code, 0u, 0u,
++                                   makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u)); // MADD.x vf3, vf1, vf2
++
++            VU1Interpreter vu1;
++            const float onePlus = std::bit_cast<float>(0x3F800800u); // 1 + 2^-12
++            vu1.state().acc[0] = -1.0f;
++            vu1.state().vf[1][0] = onePlus;
++            vu1.state().vf[2][0] = onePlus; // product 1 + 2^-11 + 2^-24: the 2^-24 is cut off in float
++            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
++                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
++                        0u, 0u, 0u, 5u);
++
++            t.Equals(std::bit_cast<uint32_t>(vu1.state().vf[3][0]), 0x3A000000u,
++                     "-1 + (1+2^-12)^2 = 2^-11 with the product rounded first (fused: 0x3A000400)");
++            t.Equals(vu1.state().mac, 0u, "normal result: no MAC flag");
++            t.Equals(vu1.state().status, 0u, "normal result: no status flag");
++        });
++
++        tc.Run("VU1 FMAC flushes denormal operands to zero and a tiny result to signed zero with U+Z", [](TestCase &t)
++        {
++            Vu1Fixture fx;
++            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
++
++            writeVuInstructionPair(fx.code, 0u, 0u,
++                                   makeVuUpper(0x28u, 0xCu, 2u, 1u, 3u)); // ADD.xy vf3, vf1, vf2
++
++            VU1Interpreter vu1;
++            vu1.state().vf[1][0] = std::bit_cast<float>(0x00000001u); // smallest denormal: read as +0
++            vu1.state().vf[2][0] = 0.0f;
++            vu1.state().vf[1][1] = std::numeric_limits<float>::min();
++            vu1.state().vf[2][1] = std::bit_cast<float>(0x80800001u); // -(FLT_MIN + 2^-149)
++            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
++                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
++                        0u, 0u, 0u, 5u);
++
++            t.Equals(std::bit_cast<uint32_t>(vu1.state().vf[3][0]), 0u, "x: denormal + 0 = +0");
++            t.Equals(std::bit_cast<uint32_t>(vu1.state().vf[3][1]), 0x80000000u, "y: -2^-149 flushes to -0");
++            t.Equals(vu1.state().mac, 0x44Cu, "x zero; y zero, sign and underflow");
++            t.Equals(vu1.state().status, 0x1C7u, "current and sticky Z/S/U");
++        });
++
+         tc.Run("FMAC product contributes Z/S/U/O sticky flags", [](TestCase &t)
+         {
+             Vu1Fixture fx;
+-- 
+2.46.2.windows.1
+

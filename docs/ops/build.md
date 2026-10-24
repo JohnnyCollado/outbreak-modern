@@ -121,6 +121,9 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
   per-field counts, known patterns (STATUS/MAC left at their input value by microVU's flag elimination; P equal to
   the final Q), and ns per interpreter cycle (median of `--repeat` warm runs; only the run call is timed).
   `--synthetic` runs a few built-in programs instead. Exit 0 = all bit-exact, 1 = some differ, 2 = usage.
+- Baseline (2026-10-24, patch 0045): replay reproduces 100/120 (the 20 captures recorded before patch 0032 show
+  `DIFF`, as before), interpreter 110 ns per VU1 cycle (182 with 0044); `C:\ob\logs\vucompare-0045d.log`. A change
+  to the interpreter must keep the same replay-exact set.
 - `native/pcsx2_vu` caveats handled in code: in the runner, VU1 data, VU1 code and the 64 MB code cache are one
   reservation made at startup (`InitOwned`, patch 0041; worst cache-to-data distance 64 MB); the compare tool's
   `Init` searches within 2 GB of its own VU1 data. The disp32 reach (cache to data, globals to the rbx text pointer)
