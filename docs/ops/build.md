@@ -108,7 +108,12 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
   symbols (PDB beside the exe) and the report: per-thread CPU time (`GetThreadTimes` over the window), on-CPU samples,
   top 30 functions (exclusive) and modules per busy thread. Generated game code has public names only: a sample is
   named after the public that starts its function (`.pdata`), otherwise `game code (generated)`; code with no module
-  is JIT (microVU's cache). Exclusive only: no call stacks.
+  is JIT (microVU's cache). Exclusive only by default.
+- Callers: `--stacks GameThread` (any thread name) also keeps that thread's full register context and the top 2 KB of
+  its stack per sample (copied while suspended into a buffer reserved up front, `ReadProcessMemory`, no allocation);
+  after the window `StackWalk64` unwinds each copy (code read live) and the report adds, for the thread's top 12
+  functions, their most frequent 3-frame caller chains. Export-only DLLs (VCRUNTIME140) name a sample after the
+  nearest export, so `memchr` there can be any copy routine: read its callers, not its name (2026-10-24).
 - Developer run: `play-profile.bat` (git-ignored, beside `play.bat`: the same line on `C:\ob\r-profile`), walk into
   J's Bar, run the hostprof command above from a second shell.
 

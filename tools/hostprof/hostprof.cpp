@@ -1,7 +1,12 @@
 // hostprof: an external sampling profiler for the runner (or any process), outside the engine.
 //
 //   hostprof.exe (--pid N | --name ps2EntryRunner.exe) [--secs 30] [--hz 1000] [--out report.txt] [--min-cycles 50000]
+//                [--stacks THREAD]
 //
+// --stacks THREAD (a thread name, e.g. GameThread): for that thread's samples also keep the full register context and
+// the top kStackBytes of its stack, copied while it is suspended into a buffer reserved before sampling. After the
+// window, StackWalk64 unwinds each from that copy (code from the live process) and the report adds, for the thread's
+// top functions, their most frequent callers (kCallerDepth frames, "self <- caller <- caller's caller").
 // Sampling: every tick, for each thread of the target that used CPU since the previous tick (QueryThreadCycleTime
 // delta >= --min-cycles; suspending a waiting thread itself costs it some cycles),
 // SuspendThread, GetThreadContext (RIP, RSP), ResumeThread. Nothing is allocated, locked or printed between suspend
@@ -33,7 +38,35 @@ struct Sample {
     uint64_t rip;
     uint64_t rsp;
     uint32_t thread; // index into g_threads
+    int32_t stack = -1; // index into the stack records (--stacks), -1 = none
 };
+
+constexpr size_t kStackBytes = 2048;
+constexpr int kCallerDepth = 3;
+
+// --stacks: the suspended thread's registers and stack top, for StackWalk64 after the window.
+struct StackRec {
+    CONTEXT ctx;
+    uint64_t base; // address of bytes[0] (= Rsp)
+    size_t size;   // bytes read
+    uint8_t bytes[kStackBytes];
+};
+
+// StackWalk64 reads stack memory from the active record (copied while suspended), anything else (code, unwind data)
+// from the live process.
+const StackRec* g_walkRec = nullptr;
+BOOL CALLBACK walkRead(HANDLE proc, DWORD64 addr, PVOID buf, DWORD size, LPDWORD read) {
+    const StackRec* r = g_walkRec;
+    if (r && addr >= r->base && addr + size <= r->base + r->size) {
+        std::memcpy(buf, r->bytes + (addr - r->base), size);
+        if (read) *read = size;
+        return TRUE;
+    }
+    SIZE_T got = 0;
+    const BOOL ok = ReadProcessMemory(proc, reinterpret_cast<LPCVOID>(addr), buf, size, &got);
+    if (read) *read = DWORD(got);
+    return ok;
+}
 
 struct ThreadRec {
     DWORD tid = 0;
@@ -46,9 +79,11 @@ struct ThreadRec {
     uint64_t idleTicks = 0;  // cycle counter unchanged: not suspended
     uint64_t failTicks = 0;  // suspend / context failed
     FILETIME k0{}, u0{};     // times at first sight
+    bool wantStack = false;  // --stacks names this thread
 };
 
 std::vector<ThreadRec> g_threads;
+std::string g_stackThread; // --stacks
 
 uint64_t ft64(const FILETIME& f) { return (uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime; }
 
@@ -93,6 +128,7 @@ void refreshThreads(DWORD pid) {
         PWSTR desc = nullptr;
         if (SUCCEEDED(GetThreadDescription(h, &desc)) && desc) { r.name = narrow(desc); LocalFree(desc); }
         if (r.name.empty()) r.name = "(unnamed)";
+        r.wantStack = !g_stackThread.empty() && r.name == g_stackThread;
         FILETIME c, e;
         GetThreadTimes(h, &c, &e, &r.k0, &r.u0);
         g_threads.push_back(std::move(r));
@@ -107,6 +143,7 @@ struct Args {
     int hz = 1000;
     std::string out;
     uint64_t minCycles = 50000;
+    std::string stacks; // thread name for --stacks; empty = off
 };
 
 bool parseArgs(int argc, char** argv, Args& a) {
@@ -123,6 +160,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (k == "--hz") { if (!(v = val("--hz"))) return false; a.hz = std::atoi(v); }
         else if (k == "--out") { if (!(v = val("--out"))) return false; a.out = v; }
         else if (k == "--min-cycles") { if (!(v = val("--min-cycles"))) return false; a.minCycles = std::strtoull(v, nullptr, 10); }
+        else if (k == "--stacks") { if (!(v = val("--stacks"))) return false; a.stacks = v; }
         else { std::fprintf(stderr, "hostprof: unknown argument %s\n", argv[i]); return false; }
     }
     if ((a.pid == 0) == a.name.empty()) { std::fprintf(stderr, "hostprof: give exactly one of --pid N, --name EXE\n"); return false; }
@@ -197,7 +235,8 @@ double pct(uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : 
 int main(int argc, char** argv) {
     Args a;
     if (!parseArgs(argc, argv, a)) {
-        std::fprintf(stderr, "usage: hostprof (--pid N | --name EXE) [--secs 30] [--hz 1000] [--out FILE] [--min-cycles 50000]\n");
+        std::fprintf(stderr, "usage: hostprof (--pid N | --name EXE) [--secs 30] [--hz 1000] [--out FILE] [--min-cycles 50000]"
+                             " [--stacks THREAD]\n");
         return 2;
     }
     if (!a.name.empty()) {
@@ -211,6 +250,7 @@ int main(int argc, char** argv) {
     QueryFullProcessImageNameW(proc, 0, exePathW, &exeLen);
     const std::string exePath = narrow(exePathW);
 
+    g_stackThread = a.stacks;
     refreshThreads(a.pid);
     if (g_threads.empty()) { std::fprintf(stderr, "hostprof: no threads opened in pid %lu\n", a.pid); return 1; }
 
@@ -221,6 +261,14 @@ int main(int argc, char** argv) {
     if (!samples) { std::fprintf(stderr, "hostprof: cannot reserve %zu samples\n", cap); return 1; }
     size_t n = 0;
     bool full = false;
+    // --stacks: one record per tick of the named thread (it is sampled at most once per tick).
+    StackRec* stacks = nullptr;
+    size_t stackCap = 0, stackN = 0;
+    if (!a.stacks.empty()) {
+        stackCap = size_t(ticks);
+        stacks = static_cast<StackRec*>(VirtualAlloc(nullptr, stackCap * sizeof(StackRec), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!stacks) { std::fprintf(stderr, "hostprof: cannot reserve %zu stack records\n", stackCap); return 1; }
+    }
 
     std::printf("hostprof: pid %lu (%s), %zu threads, %.0f s at %d Hz\n", a.pid, exePath.c_str(), g_threads.size(), a.secs, a.hz);
     std::fflush(stdout);
@@ -235,7 +283,7 @@ int main(int argc, char** argv) {
     LONGLONG nextRefresh = q0.QuadPart + qf.QuadPart / 4;
     uint64_t tick = 0, overruns = 0;
     double busyQ = 0; // time spent inside the per-tick loop
-    CONTEXT ctx;
+    CONTEXT ctx{};
     bool exited = false;
     const uint64_t minCycles = a.minCycles;
 
@@ -263,13 +311,34 @@ int main(int argc, char** argv) {
             if (!ran) { ++t.idleTicks; continue; }
             if (n >= cap) { full = true; break; }
             // ---- suspended: no allocation, no locks, no output ----
+            const bool keepStack = t.wantStack && stackN < stackCap;
             if (SuspendThread(t.h) == DWORD(-1)) { ++t.failTicks; continue; }
-            ctx.ContextFlags = CONTEXT_CONTROL;
-            const BOOL got = GetThreadContext(t.h, &ctx); // also waits until the suspension took effect
+            int32_t stackIndex = -1;
+            BOOL got;
+            if (keepStack) {
+                // Full context + stack top into the reserved record (ReadProcessMemory: no allocation).
+                StackRec& r = stacks[stackN];
+                r.ctx.ContextFlags = CONTEXT_FULL;
+                got = GetThreadContext(t.h, &r.ctx);
+                SIZE_T read = 0;
+                // Near the stack's top a full read crosses into an unmapped page and fails: retry smaller.
+                bool ok = got && ReadProcessMemory(proc, reinterpret_cast<LPCVOID>(r.ctx.Rsp), r.bytes, kStackBytes, &read);
+                if (got && !ok)
+                    ok = ReadProcessMemory(proc, reinterpret_cast<LPCVOID>(r.ctx.Rsp), r.bytes, kStackBytes / 8, &read);
+                if (ok && read) {
+                    r.base = r.ctx.Rsp;
+                    r.size = read;
+                    stackIndex = int32_t(stackN++);
+                }
+                if (got) ctx.Rip = r.ctx.Rip, ctx.Rsp = r.ctx.Rsp;
+            } else {
+                ctx.ContextFlags = CONTEXT_CONTROL;
+                got = GetThreadContext(t.h, &ctx); // also waits until the suspension took effect
+            }
             ResumeThread(t.h);
             // ---- resumed ----
             if (!got) { ++t.failTicks; continue; }
-            samples[n++] = Sample{ctx.Rip, ctx.Rsp, uint32_t(i)};
+            samples[n++] = Sample{ctx.Rip, ctx.Rsp, uint32_t(i), stackIndex};
         }
         QueryPerformanceCounter(&qnow);
         busyQ += double(qnow.QuadPart - t0.QuadPart);
@@ -394,6 +463,47 @@ int main(int argc, char** argv) {
             const FuncKey& k = sym.funcs[top[f].first];
             std::fprintf(out, "   %5.1f%% %7llu  %-28s %s\n", pct(top[f].second, perThread[i]), (unsigned long long)top[f].second,
                          k.module.substr(0, 28).c_str(), k.name.c_str());
+        }
+        std::fprintf(out, "\n");
+        if (!t.wantStack || stackN == 0)
+            continue;
+        // --stacks: callers of the top functions, from StackWalk64 over each sample's copied stack.
+        std::unordered_map<uint32_t, std::map<std::string, uint64_t>> callers; // function -> "c1 <- c2" -> samples
+        uint64_t walked = 0, unwalked = 0;
+        for (size_t s = 0; s < n; ++s) {
+            if (samples[s].thread != i || samples[s].stack < 0) continue;
+            const StackRec& r = stacks[samples[s].stack];
+            CONTEXT c = r.ctx;
+            STACKFRAME64 fr{};
+            fr.AddrPC.Offset = c.Rip; fr.AddrPC.Mode = AddrModeFlat;
+            fr.AddrFrame.Offset = c.Rbp; fr.AddrFrame.Mode = AddrModeFlat;
+            fr.AddrStack.Offset = c.Rsp; fr.AddrStack.Mode = AddrModeFlat;
+            g_walkRec = &r;
+            std::string chain;
+            int depth = 0;
+            for (int d = 0; d <= kCallerDepth; ++d) {
+                if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &fr, &c, walkRead,
+                                 SymFunctionTableAccess64, SymGetModuleBase64, nullptr) || fr.AddrPC.Offset == 0)
+                    break;
+                if (d == 0) continue; // frame 0 is the sampled function itself
+                const FuncKey& ck = sym.funcs[sym.resolve(fr.AddrPC.Offset - 1)];
+                chain += (depth++ ? " <- " : "") + ck.name;
+            }
+            g_walkRec = nullptr;
+            if (depth == 0) { ++unwalked; continue; }
+            ++walked;
+            ++callers[fid[s]][chain];
+        }
+        std::fprintf(out, "   callers (--stacks: %llu samples unwound, %llu not), for the top 12 functions:\n",
+                     (unsigned long long)walked, (unsigned long long)unwalked);
+        for (size_t f = 0; f < top.size() && f < 12; ++f) {
+            auto it = callers.find(top[f].first);
+            if (it == callers.end()) continue;
+            std::vector<std::pair<std::string, uint64_t>> cs(it->second.begin(), it->second.end());
+            std::sort(cs.begin(), cs.end(), [](auto& x, auto& y) { return x.second > y.second; });
+            std::fprintf(out, "   %s:\n", sym.funcs[top[f].first].name.c_str());
+            for (size_t c = 0; c < cs.size() && c < 6; ++c)
+                std::fprintf(out, "      %5.1f%%  <- %s\n", pct(cs[c].second, top[f].second), cs[c].first.c_str());
         }
         std::fprintf(out, "\n");
     }

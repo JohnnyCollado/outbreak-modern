@@ -1,0 +1,327 @@
+From bca62d2920385a42e4d59c9221c8d54fc99efbda Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 13:03:27 -0400
+Subject: [PATCH] Runtime: decode-only GS frontend skips drawing data; DMA
+ chain buffer recycled
+
+Two game-thread costs found by sampling with call stacks in Outbreak's
+busiest scene (J's Bar), with an external GS drawing:
+
+1. The CPU GS frontend decoded every vertex for a backend that does
+   nothing (GSNullBackend) and built a draw batch at every vertex kick
+   (writeRegisterPacked + vertexKick + buildDrawBatch: 3.2% of the game
+   thread). Now useNullBackendForExternalGS also sets decode-only
+   (GS::decodeOnly()): a PACKED tag without an A+D slot is skipped whole,
+   only A+D slots are decoded in the others, REGLIST data is skipped (it
+   carries only vertex/texture registers), and a vertex kick builds no
+   batch. A+D writes (SIGNAL/FINISH/LABEL, CSR, the readback's transfer
+   registers) are decoded as before; the external GS still gets every
+   packet from the arbiter. setRasterBackend clears it.
+
+2. writeIORegister built each DMA chain in a fresh local vector, growing
+   it chunk by chunk and freeing it after processing: memmove/memcpy in
+   vector insert, heap allocation and NtFreeVirtualMemory together 13.1%
+   of the game thread. The chain buffer is now recycled: the largest
+   processed chain's buffer is kept as a spare (capacity retained) for
+   the next chain.
+
+Result (outbreak-modern hostprof, 45 s of the busy stretch): copies and
+allocation 13.1% -> ~5.3%, GS decoding 3.2% -> below 0.7%; the unpaced
+J's Bar check (play.script to load90s) 63 s -> 53 s with the same
+capture ticks (6449/8253).
+
+Test (ps2x, PS2ExternalGS): a packet of a PACKED vertex tag, a REGLIST
+tag and a PACKED A+D FINISH; with a hook the frontend is decode-only,
+skips the first two and still sets CSR FINISH, and the hook gets the
+whole packet; without a hook the full decode sets the same FINISH.
+Fails without: no GS::decodeOnly (compile error). The buffer recycling
+changes no behaviour (the existing DMA chain tests cover the data).
+---
+ ps2xRuntime/include/runtime/gs/gs_frontend.h |  6 +++
+ ps2xRuntime/include/runtime/ps2_memory.h     |  3 ++
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       | 38 ++++++++++++--
+ ps2xRuntime/src/lib/ps2_memory.cpp           | 20 +++++++-
+ ps2xTest/src/ps2_gs_external_tests.cpp       | 53 ++++++++++++++++++++
+ 5 files changed, 116 insertions(+), 4 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 992aa08..ed15904 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -107,7 +107,12 @@ public:
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
+     // With an external GS set (gs_external.h): swap in the decode-only
+     // GSNullBackend. No hook: no change (the CPU backend keeps drawing).
++    // Patch 0052: decode-only also skips what only drawing needs: PACKED data
++    // other than A+D (a tag without A+D is skipped whole), REGLIST data, and
++    // the draw batch at a vertex kick. A+D writes (SIGNAL/FINISH/LABEL, CSR,
++    // the transfer registers of the readback) are decoded as before.
+     void useNullBackendForExternalGS();
++    [[nodiscard]] bool decodeOnly() const noexcept { return m_decodeOnly; }
+ 
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+@@ -231,6 +236,7 @@ private:
+     GSFrameReg m_preferredDisplaySourceFrame{};
+     uint32_t m_preferredDisplayDestFbp = 0;
+     bool m_hasPreferredDisplaySource = false;
++    bool m_decodeOnly = false; // useNullBackendForExternalGS
+     std::vector<uint8_t> m_hostPresentationFrame;
+     uint32_t m_hostPresentationWidth = 0;
+     uint32_t m_hostPresentationHeight = 0;
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index a0cc843..5d5127e 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -380,6 +380,9 @@ public:
+     std::vector<PendingTransfer> m_pendingGifTransfers;
+     std::vector<PendingTransfer> m_pendingVif0Transfers;
+     std::vector<PendingTransfer> m_pendingVif1Transfers;
++    // Patch 0052: the DMA chain buffer is recycled (its capacity kept) instead of allocated, grown and freed per chain.
++    std::vector<uint8_t> m_chainSpare;
++    void recycleChainBuffers(std::vector<PendingTransfer> &transfers);
+     std::mutex m_completedDmacMutex;
+     std::vector<uint32_t> m_completedDmacCauses;
+ 
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 5bfa9ce..472c918 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -14,6 +14,8 @@
+ 
+ namespace
+ {
++    constexpr uint8_t GIF_REG_AD = 0x0E; // GIFtag register descriptor A+D (writeRegisterPacked case 0x0E)
++
+     static constexpr uint32_t kHostFrameWidth = 640u;
+ 
+     GSPrimReg decodePrimRegister(uint64_t value)
+@@ -728,6 +730,16 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ 
+         if (flg == GIF_FMT_PACKED)
+         {
++            // Decode-only (external GS): only A+D slots matter; a tag without one is skipped whole.
++            const bool adOnly = m_decodeOnly;
++            if (adOnly && std::find(regs, regs + nreg, static_cast<uint8_t>(GIF_REG_AD)) == regs + nreg)
++            {
++                const uint64_t payload = static_cast<uint64_t>(nloop) * nreg * 16u;
++                if (offset + payload > sizeBytes)
++                    return;
++                offset += static_cast<uint32_t>(payload);
++                continue;
++            }
+             for (uint32_t loop = 0; loop < nloop; ++loop)
+             {
+                 for (uint32_t r = 0; r < nreg; ++r)
+@@ -737,10 +749,20 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+                     uint64_t lo = loadLE64(data + offset);
+                     uint64_t hi = loadLE64(data + offset + 8);
+                     offset += 16;
+-                    writeRegisterPacked(regs[r], lo, hi);
++                    if (!adOnly || regs[r] == GIF_REG_AD)
++                        writeRegisterPacked(regs[r], lo, hi);
+                 }
+             }
+         }
++        else if (flg == GIF_FMT_REGLIST && m_decodeOnly)
++        {
++            // Decode-only: REGLIST carries no A+D (vertex and texture registers only, all drawing state).
++            const uint64_t words = static_cast<uint64_t>(nloop) * nreg;
++            const uint64_t payload = (words + (words & 1u)) * 8u;
++            if (offset + payload > sizeBytes)
++                return;
++            offset += static_cast<uint32_t>(payload);
++        }
+         else if (flg == GIF_FMT_REGLIST)
+         {
+             for (uint32_t loop = 0; loop < nloop; ++loop)
+@@ -786,6 +808,10 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+         if (pre)
+             writeRegisterUnlocked(GS_REG_PRIM, (tag.lo >> 47u) & 0x7FFu);
+ 
++        // Decode-only (external GS): only A+D slots matter; a tag without one is skipped whole (patch 0052).
++        const bool adOnly = m_decodeOnly;
++        if (adOnly && std::find(tag.regs, tag.regs + tag.nreg, GIF_REG_AD) == tag.regs + tag.nreg)
++            return true;
+         uint32_t offset = tag.payloadOffset;
+         for (uint32_t loop = 0u; loop < tag.nloop; ++loop)
+         {
+@@ -794,7 +820,8 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+                 const uint64_t lo = loadLE64(data + offset);
+                 const uint64_t hi = loadLE64(data + offset + 8u);
+                 offset += 16u;
+-                writeRegisterPacked(tag.regs[r], lo, hi);
++                if (!adOnly || tag.regs[r] == GIF_REG_AD)
++                    writeRegisterPacked(tag.regs[r], lo, hi);
+             }
+         }
+ 
+@@ -1610,7 +1637,7 @@ void GS::vertexKick(bool drawing)
+     if (m_vtxCount < needed)
+         return;
+ 
+-    if (drawing && m_backend)
++    if (drawing && m_backend && !m_decodeOnly)
+     {
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
+         updatePreferredDisplaySourceForDraw(batch);
+@@ -1694,7 +1721,11 @@ void GS::useNullBackendForExternalGS()
+     // hook tee, the readback hand-off), so the CPU rasteriser is replaced by
+     // no-ops. Without a hook nothing changes: the CPU backend stays.
+     if (ps2ExternalGS())
++    {
+         setRasterBackend(std::make_unique<GSNullBackend>());
++        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++        m_decodeOnly = true;
++    }
+ }
+ 
+ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+@@ -1704,6 +1735,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+ 
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
++    m_decodeOnly = false; // useNullBackendForExternalGS sets it again after this
+     if (m_backend)
+     {
+         m_backend->Flush();
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index e867801..09108be 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1403,7 +1403,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                     uint32_t asp = (chcr >> 4) & 0x3u;
+                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
+                     const int kMaxChainTags = 4096;
+-                    std::vector<uint8_t> chainBuf;
++                    std::vector<uint8_t> chainBuf = std::move(m_chainSpare); // recycled (patch 0052)
++                    chainBuf.clear();
+ 
+                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
+                     {
+@@ -1606,6 +1607,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                             m_pendingVif0Transfers.push_back(std::move(pt));
+                         }
+                     }
++                    else if (chainBuf.capacity() > m_chainSpare.capacity())
++                    {
++                        m_chainSpare = std::move(chainBuf); // no data: keep the recycled buffer
++                    }
+                     // else if (channelBase == 0x10009000u)
+                     // {
+ 
+@@ -1718,6 +1723,16 @@ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
+     queueCompletedDmacCause(cause);
+ }
+ 
++// Keeps the largest processed chain buffer as the spare for the next DMA chain (patch 0052).
++void PS2Memory::recycleChainBuffers(std::vector<PendingTransfer> &transfers)
++{
++    for (PendingTransfer &p : transfers)
++    {
++        if (p.chainData.capacity() > m_chainSpare.capacity())
++            m_chainSpare = std::move(p.chainData);
++    }
++}
++
+ void PS2Memory::processPendingTransfers()
+ {
+     const bool hadGif = !m_pendingGifTransfers.empty();
+@@ -1799,6 +1814,7 @@ void PS2Memory::processPendingTransfers()
+             }
+         }
+     }
++    recycleChainBuffers(m_pendingGifTransfers);
+     m_pendingGifTransfers.clear();
+ 
+     const bool hadVif0 = !m_pendingVif0Transfers.empty();
+@@ -1857,6 +1873,7 @@ void PS2Memory::processPendingTransfers()
+             }
+         }
+     }
++    recycleChainBuffers(m_pendingVif0Transfers);
+     m_pendingVif0Transfers.clear();
+ 
+     const bool hadVif1 = !m_pendingVif1Transfers.empty();
+@@ -1915,6 +1932,7 @@ void PS2Memory::processPendingTransfers()
+             }
+         }
+     }
++    recycleChainBuffers(m_pendingVif1Transfers);
+     m_pendingVif1Transfers.clear();
+ 
+     if (m_gifArbiter)
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index ab245f1..e68ee4a 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -302,6 +302,48 @@ namespace
+         return out;
+     }
+ 
++    // Patch 0052: a packet of a PACKED vertex tag (3 x XYZ2), a REGLIST tag (RGBAQ, XYZ2) and a PACKED A+D FINISH.
++    // Decode-only must skip the first two whole and still land on the FINISH (CSR bit 1).
++    std::vector<uint8_t> makeVertexThenFinishPacket()
++    {
++        const uint64_t q[] = {
++            3ull | (1ull << 60), 0x5ull,                         // PACKED, NLOOP 3, NREG 1: XYZ2
++            0x11ull, 0x12ull, 0x21ull, 0x22ull, 0x31ull, 0x32ull, // 3 qwords of vertex data
++            1ull | (1ull << 58) | (2ull << 60), 0x51ull,         // REGLIST, NLOOP 1, NREG 2: RGBAQ, XYZ2
++            0x41ull, 0x42ull,                                    // 2 x 8 bytes (even: no padding)
++            1ull | (1ull << 15) | (1ull << 60), 0xEull,          // PACKED A+D, EOP
++            0x0ull, 0x61ull,                                     // FINISH
++        };
++        std::vector<uint8_t> bytes(sizeof(q));
++        std::memcpy(bytes.data(), q, sizeof(q));
++        return bytes;
++    }
++
++    struct DecodeOnlyRun
++    {
++        bool decodeOnly = false;
++        bool finish = false;
++        size_t hookPackets = 0u;
++    };
++
++    DecodeOnlyRun runVertexThenFinish(bool withHook)
++    {
++        DecodeOnlyRun out;
++        PS2Runtime runtime;
++        if (!runtime.memory().initialize() || !runtime.syncCoreSubsystems())
++            return out;
++        RecordingExternalGS rec;
++        ExternalGSScope scope(withHook ? &rec : nullptr);
++        runtime.gs().useNullBackendForExternalGS();
++        out.decodeOnly = runtime.gs().decodeOnly();
++        const std::vector<uint8_t> pkt = makeVertexThenFinishPacket();
++        runtime.memory().submitGifPacket(GifPathId::Path3, pkt.data(), static_cast<uint32_t>(pkt.size()), true);
++        out.finish = (runtime.memory().gs().csr.load() & 0x2ull) != 0u;
++        for (const ExternalGSEvent &ev : rec.events)
++            out.hookPackets += ev.kind == 'p' && ev.data == pkt;
++        return out;
++    }
++
+     // PS2X_FRAME_TIME: the guest waits kFrameTimeVSyncs vsyncs (resuming at itself), then stops.
+     constexpr uint32_t kFrameTimeVSyncs = 3u;
+     uint32_t s_frameTimeVSyncsSeen = 0u;
+@@ -372,6 +414,17 @@ void register_ps2_gs_external_tests()
+ {
+     MiniTest::Case("PS2ExternalGS", [](TestCase &tc)
+     {
++        tc.Run("decode-only skips vertex PACKED and REGLIST data and still decodes the A+D FINISH", [](TestCase &t)
++        {
++            const DecodeOnlyRun ext = runVertexThenFinish(true);
++            t.IsTrue(ext.decodeOnly, "an external GS makes the frontend decode-only");
++            t.IsTrue(ext.finish, "decode-only: the FINISH after the skipped tags sets CSR FINISH");
++            t.Equals(ext.hookPackets, static_cast<size_t>(1u), "the hook still receives the whole packet");
++            const DecodeOnlyRun cpu = runVertexThenFinish(false);
++            t.IsFalse(cpu.decodeOnly, "no hook: the CPU backend decodes everything");
++            t.IsTrue(cpu.finish, "full decode: the same FINISH");
++        });
++
+         tc.Run("external GS hook sees arbiter packets, privileged writes and vsync in order", [](TestCase &t)
+         {
+             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+-- 
+2.46.2.windows.1
+
