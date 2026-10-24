@@ -52,7 +52,10 @@ in the NDK sysroot for API 29 (or be one of ours), every undefined dynamic symbo
   (<reason>); falling back to interp` (for example `dlopen libob_a64vu.so: ...` or the RWX code-cache mmap), and
   `[vu1] backend=<mode used>`.
 - Window: the GS adapter takes the activity's `ANativeWindow`, releases raylib's EGL window surface (its GL
-  context stays current without a surface) and presents with Vulkan into the window.
+  context stays current without a surface), resets the window's buffers to its own size (raylib had shrunk them to
+  its 640x448 screen: 796x448 on a 1080p display) and presents with Vulkan into the window at the display's
+  resolution (`attach android window 1920x1080` on the Odin). `upscale = 2..3` in `outbreak.ini` then shows its
+  detail: 3 holds 60 fps in J's Bar on the Odin (`reports/2026-10-24-android.md` entry 14).
 - Input: the Odin's built-in controller through raylib's Android gamepad events and the patch 0038/0040 bindings.
 - Speed: `[fps] tick N | R fps` once per second in logcat (patch 0044).
 - GPU driver: `[gpu] driver=...` once at GS start (below).

@@ -522,6 +522,12 @@ void ob_gs_attach_window(void*, uint32_t, uint32_t, bool)
 			eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 		eglDestroySurface(dpy, surf);
 	}
+	// raylib shrank the window's buffers to its 640x448 screen at the display's shape (796x448 on a 1920x1080
+	// screen, rcore_android.c InitGraphicsDevice -> ANativeWindow_setBuffersGeometry(render size)), so Android
+	// stretched a 796x448 picture to the screen and an upscaled render lost its detail on the way. 0, 0, 0 = the
+	// window's own size and format: PCSX2 presents at the display's resolution (reports/2026-10-24-android.md
+	// entries 13-14).
+	ANativeWindow_setBuffersGeometry(win, 0, 0, 0);
 	s_child = win;
 	s_visible = true;
 	WindowInfo wi;
