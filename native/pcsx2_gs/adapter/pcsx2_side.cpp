@@ -26,7 +26,26 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
+
+#if defined(__ANDROID__)
+// Android (Stage A1): PCSX2 presents into the NativeActivity's ANativeWindow through VK_KHR_android_surface
+// (upstream/pcsx2/0001). raylib (rcore_android.c) owns that window with an EGL surface; attach releases the surface
+// (the context stays current without one) so Vulkan can connect to the window.
+#include <EGL/egl.h>
+#include <android/asset_manager.h>
+#include <android/native_window.h>
+#include <android_native_app_glue.h>
+#include <cerrno>
+#include <sys/stat.h>
+#include <pthread.h>
+#include <unistd.h>
+extern "C" struct android_app* GetAndroidApp(void);
+using HWND = void*;
+using DWORD = uint32_t;
+static DWORD GetCurrentThreadId() { return static_cast<DWORD>(gettid()); }
+#endif
 
 namespace
 {
@@ -36,11 +55,101 @@ namespace
 	alignas(64) u8 s_basemem[0x2000] = {};
 	std::vector<u8> s_rgba;
 	HWND s_child = nullptr;   // set by ob_gs_attach_window: PCSX2 presents into this child of the runner window
+	                          // (Android: the ANativeWindow itself)
 	bool s_visible = false;   // parent window visible at attach: Mailbox present, else Disabled
 	std::atomic<u64> s_pending_size{0}; // (w << 32) | h from ob_gs_window_resized; 0 = none; applied in ob_gs_vsync
 
 	void StopGsThread(const char* why); // below
 
+#if defined(__ANDROID__)
+	bool MakeDirs(const std::string& path)
+	{
+		for (size_t i = 1; i <= path.size(); ++i)
+		{
+			if (i == path.size() || path[i] == '/')
+			{
+				const std::string part = path.substr(0, i);
+				if (mkdir(part.c_str(), 0755) != 0 && errno != EEXIST)
+					return false;
+			}
+		}
+		return true;
+	}
+
+	// The APK's assets/resources tree (PCSX2's shaders) copied to <internal files>/resources once per APK build:
+	// PCSX2 reads resources as files (GSDevice.cpp:445). assets/resources/files.txt (written by tools/ob/android.sh)
+	// lists them, as AAssetDir lists no subdirectories; a copy whose files.txt matches is kept.
+	std::string ExtractResources(const char* internal_dir)
+	{
+		android_app* app = GetAndroidApp();
+		AAssetManager* am = (app && app->activity) ? app->activity->assetManager : nullptr;
+		const std::string root = std::string(internal_dir) + "/resources";
+		if (!am)
+			return root;
+		auto read_asset = [am](const std::string& name, std::string& out) {
+			AAsset* a = AAssetManager_open(am, name.c_str(), AASSET_MODE_STREAMING);
+			if (!a)
+				return false;
+			out.resize(static_cast<size_t>(AAsset_getLength64(a)));
+			const int got = out.empty() ? 0 : AAsset_read(a, out.data(), out.size());
+			AAsset_close(a);
+			return got == static_cast<int>(out.size());
+		};
+		std::string list, old;
+		if (!read_asset("resources/files.txt", list))
+		{
+			std::fprintf(stderr, "[pcsx2-gs] android: no assets/resources/files.txt in the APK\n");
+			return root;
+		}
+		if (FILE* f = std::fopen((root + "/files.txt").c_str(), "rb"))
+		{
+			char buf[4096];
+			size_t n;
+			while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+				old.append(buf, n);
+			std::fclose(f);
+		}
+		if (old == list)
+			return root;
+		size_t count = 0, begin = 0;
+		while (begin < list.size())
+		{
+			size_t end = list.find('\n', begin);
+			if (end == std::string::npos)
+				end = list.size();
+			std::string rel = list.substr(begin, end - begin);
+			begin = end + 1;
+			if (!rel.empty() && rel.back() == '\r')
+				rel.pop_back();
+			if (rel.empty())
+				continue;
+			std::string bytes;
+			const std::string dst = root + "/" + rel;
+			if (!read_asset("resources/" + rel, bytes) || !MakeDirs(dst.substr(0, dst.rfind('/'))))
+				continue;
+			if (FILE* f = std::fopen(dst.c_str(), "wb"))
+			{
+				std::fwrite(bytes.data(), 1, bytes.size(), f);
+				std::fclose(f);
+				++count;
+			}
+		}
+		if (FILE* f = std::fopen((root + "/files.txt").c_str(), "wb"))
+		{
+			std::fwrite(list.data(), 1, list.size(), f);
+			std::fclose(f);
+		}
+		std::fprintf(stderr, "[pcsx2-gs] android: %zu resource files extracted to %s\n", count, root.c_str());
+		return root;
+	}
+
+	bool CreateHiddenWindow()
+	{
+		return false; // Android always attaches the activity's window first
+	}
+
+	GSRendererType ToType(ObGsRenderer r) { return r == ObGsRenderer::VK ? GSRendererType::VK : GSRendererType::SW; }
+#else
 	// Child of the runner window: no background, disabled and hit-test transparent so input stays with the parent.
 	LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	{
@@ -80,6 +189,7 @@ namespace
 		ObPcsx2GS::SetRenderWindow(wi);
 		return true;
 	}
+#endif
 
 	// Same settings as smoke/main.cpp MakeOptions (reference manifest, plan ## Interfaces), except a visible window
 	// deinterlaces: Outbreak runs SMODE2 INT=1 FFMD=0 with both circuits merged one line apart (PMODE 0x7f27), and
@@ -109,8 +219,17 @@ namespace
 		if (s_tried)
 			return s_open;
 		s_tried = true;
+#if defined(__ANDROID__)
+		{
+			android_app* app = GetAndroidApp();
+			const char* internal = (app && app->activity && app->activity->internalDataPath) ? app->activity->internalDataPath : ".";
+			EmuFolders::AppRoot = internal;
+			EmuFolders::Resources = ExtractResources(internal);
+		}
+#else
 		EmuFolders::AppRoot = std::string(Path::GetDirectory(FileSystem::GetProgramPath()));
 		EmuFolders::Resources = Path::Combine(EmuFolders::AppRoot, "resources");
+#endif
 		EmuFolders::Cache = Path::Combine(EmuFolders::AppRoot, "cache");
 		if (!FileSystem::EnsureDirectoryExists(EmuFolders::Cache.c_str(), false))
 			std::fprintf(stderr, "[pcsx2-gs] shader cache dir %s not created; shaders compile every launch\n", EmuFolders::Cache.c_str());
@@ -284,6 +403,53 @@ static void ExecVsync(const uint64_t priv[15], uint64_t csr, uint64_t imr, uint6
 	GSvsync((csr & 0x2000) ? 1 : 0, true);
 }
 
+#if defined(__ANDROID__)
+void ob_gs_attach_window(void*, uint32_t, uint32_t, bool)
+{
+	std::lock_guard<std::mutex> lk(s_mu);
+	if (s_tried || s_child)
+		return;
+	android_app* app = GetAndroidApp();
+	ANativeWindow* win = app ? app->window : nullptr;
+	if (!win)
+	{
+		std::fprintf(stderr, "[pcsx2-gs] android: no ANativeWindow at attach\n");
+		return;
+	}
+	// raylib drew nothing yet; drop its EGL window surface so the window is free for Vulkan. Its context stays
+	// current without a surface (EGL_KHR_surfaceless_context), so raylib's per-frame GL calls stay harmless.
+	EGLDisplay dpy = eglGetCurrentDisplay();
+	EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
+	EGLContext ctx = eglGetCurrentContext();
+	bool surfaceless = false;
+	if (dpy != EGL_NO_DISPLAY && surf != EGL_NO_SURFACE)
+	{
+		surfaceless = eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx) == EGL_TRUE;
+		if (!surfaceless)
+			eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+		eglDestroySurface(dpy, surf);
+	}
+	s_child = win;
+	s_visible = true;
+	WindowInfo wi;
+	wi.type = WindowInfo::Type::Android;
+	wi.window_handle = win;
+	wi.surface_width = static_cast<u32>(ANativeWindow_getWidth(win));
+	wi.surface_height = static_cast<u32>(ANativeWindow_getHeight(win));
+	wi.surface_scale = 1.0f;
+	ObPcsx2GS::SetRenderWindow(wi);
+	std::fprintf(stderr, "[pcsx2-gs] attach android window %ux%u egl surface released=%d surfaceless=%d\n",
+		wi.surface_width, wi.surface_height, surf != EGL_NO_SURFACE ? 1 : 0, surfaceless ? 1 : 0);
+	std::fflush(stderr);
+}
+
+void ob_gs_window_resized(uint32_t w, uint32_t h)
+{
+	if (!s_child || w == 0 || h == 0)
+		return;
+	s_pending_size.store((static_cast<u64>(w) << 32) | h);
+}
+#else
 void ob_gs_attach_window(void* hwnd, uint32_t w, uint32_t h, bool visible)
 {
 	std::lock_guard<std::mutex> lk(s_mu);
@@ -326,6 +492,7 @@ void ob_gs_window_resized(uint32_t w, uint32_t h)
 	std::fprintf(stderr, "[pcsx2-gs] resize request %ux%u child=%ldx%ld\n", w, h, rc.right, rc.bottom);
 	std::fflush(stderr);
 }
+#endif
 
 static uint32_t ExecReadLocal(uint8_t* dst, uint32_t max_bytes)
 {
@@ -472,7 +639,11 @@ namespace
 
 	void RingThreadInit(void*)
 	{
+#if defined(_WIN32)
 		SetThreadDescription(GetCurrentThread(), L"GSThread");
+#else
+		pthread_setname_np(pthread_self(), "GSThread");
+#endif
 		// As MTGS::ThreadEntryPoint: default rounding (nearest, no FTZ), not whatever the creating thread had.
 		FPControlRegister::SetCurrent(FPControlRegister::GetDefault());
 	}

@@ -21,6 +21,10 @@
 #include <cstdarg>
 #include <cstdio>
 
+#if !defined(_WIN32)
+#include <sys/mman.h>
+#endif
+
 // ---- window (ob API) ----
 static WindowInfo s_render_window;
 
@@ -99,8 +103,16 @@ bool FMVstarted = false;
 // ---- SysMemory (pcsx2/Memory.h): only the SW-renderer JIT range is ever requested by GS ----
 u8* SysMemory::GetCodePtr(size_t offset)
 {
+#if defined(_WIN32)
 	static u8* s_swrec = static_cast<u8*>(
 		VirtualAlloc(nullptr, HostMemoryMap::SWrecSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+#else
+	// Android/POSIX: one RWX anonymous mapping, as the Win32 branch (the arm64 JIT flushes the icache itself).
+	static u8* s_swrec = []() -> u8* {
+		void* p = mmap(nullptr, HostMemoryMap::SWrecSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		return p == MAP_FAILED ? nullptr : static_cast<u8*>(p);
+	}();
+#endif
 	pxAssertRel(s_swrec, "SW JIT code allocation failed");
 	pxAssertRel(offset >= HostMemoryMap::SWrecOffset && offset <= HostMemoryMap::SWrecOffset + HostMemoryMap::SWrecSize,
 		"ob_pcsx2_gs: only the SWrec code range exists");

@@ -2,7 +2,17 @@
 
 Source: phase 1.1 T4 summary (patch 0020), tools/ob.sh. Since patch 0037 the script player, frame dumps and the
 other diagnostics live in the ob_diag plugin (`native/ob_diag`); `ob.sh boot` loads it with `PS2X_DIAG` unless
-`--no-diag`. Every boot logs `[fps] tick N | R fps` once per second when the window is hidden (patch 0035).
+`--no-diag`. Every boot logs `[fps] tick N | R fps` once per second when the window is hidden (patch 0035; also with
+`PS2X_FPS_LOG=1` and always on Android, patch 0044).
+
+## Which game copy boots (patch 0043)
+`ob.sh boot` and `ob.sh gate` pass `$OB_GAME` to the runner: default `game_files/SLPM_654.28` (the extracted folder,
+as before). `OB_GAME=<image.iso>` boots the disc image in place, `OB_GAME=<folder>` an extracted folder (boot ELF from
+its `SYSTEM.CNF`). The log's first lines say which: `[game] image|folder|elf <path> boot=cdrom0:\SLPM_654.28;1
+serial=SLPM-65428`. With an image, `mc0` is `<image folder>/mc0`. Verified 2026-10-24: gate 3/3 from
+`ps2_emu/roms/Biohazard - Outbreak (English v2.1).iso` (max 0) and from `game_files`; `gate/play.script` from the
+image reaches J's Bar (`C:\ob\frames-playiso\load240s-1.png`). A plain runner start takes the same from
+`outbreak.ini` beside the exe (`native/outbreak.ini.example`) when no argument is given.
 
 ## Scripted boot (the normal form)
 `bash tools/ob.sh boot --script gate/boot.script --tag T` — hidden window, the script drives the pad on guest vsyncs

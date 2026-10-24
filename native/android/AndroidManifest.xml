@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Outbreak Modern, Android Stage A1 (tools/ob/android.sh, docs/ops/android.md). No Java/Kotlin code: the
+     framework's NativeActivity loads lib/arm64-v8a/libps2EntryRunner.so (android.app.lib_name), whose raylib
+     platform layer (android_native_app_glue) calls the runner's main(). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.outbreakmodern.app"
+    android:versionCode="1"
+    android:versionName="0.1-a1">
+
+    <!-- raylib's window is OpenGL ES (released when PCSX2's Vulkan GS attaches); the GS needs Vulkan 1.1. -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="Outbreak Modern"
+        android:hasCode="false"
+        android:extractNativeLibs="true"
+        android:isGame="true"
+        android:appCategory="game"
+        android:allowBackup="false">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            <meta-data android:name="android.app.lib_name" android:value="ps2EntryRunner" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.GAME" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

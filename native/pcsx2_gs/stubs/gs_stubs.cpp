@@ -5,7 +5,9 @@
 #include "GS/GSCapture.h"
 #include "GS/GSDump.h"
 #include "GS/GSPng.h"
+#if defined(_WIN32)
 #include "GS/Renderers/DX11/D3D.h" // ob shim (include/), not PCSX2's
+#endif
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 #include "GSDumpReplayer.h"
 
@@ -58,8 +60,10 @@ void GSTextureReplacements::ProcessAsyncLoadedTextures() {}
 void GSTextureReplacements::DumpTexture(const GSTextureCache::HashCacheKey&, const GIFRegTEX0&, const GIFRegTEXA&,
 	GSTextureCache::SourceRegion, GSLocalMemory&, u32) {}
 
+#if defined(_WIN32)
 // ---- D3D:: (GS/Renderers/DX11/D3D.cpp, not built): no DXGI; Auto/SW resolve to Vulkan ----
 wil::com_ptr_nothrow<IDXGIFactory5> D3D::CreateFactory(bool) { return {}; }
 std::vector<GSAdapterInfo> D3D::GetAdapterInfo(IDXGIFactory5*) { return {}; }
 // GSUtil::GetPreferredRenderer() asks this on Windows; the SW renderer presents through it too.
 GSRendererType D3D::GetPreferredRenderer() { return GSRendererType::VK; }
+#endif

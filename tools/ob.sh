@@ -22,9 +22,12 @@
 #   tools/ob.sh depcheck                     dry run after touching gs_frontend.h: 0 generated game units must rebuild
 #   tools/ob.sh hostprof-build               external sampling profiler tools/hostprof into $OB_HOSTPROF_BUILD
 #                                            (C:/ob/hostprof-build/hostprof.exe); pair with OB_PROFILE=1 recompile
+#   tools/ob.sh android [shaderc|configure|build|package|verify|all]  Android arm64 .so + APK (tools/ob/android.sh,
+#                                            docs/ops/android.md); never touches a device
 #
 # Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
-# OB_RUN=<repo>/game_files (read only); OB_VCVARS=VS2022 Community vcvars64.bat;
+# OB_RUN=<repo>/game_files (read only; recompile input); OB_GAME=$OB_RUN/SLPM_654.28 (what boot/gate run: the
+# ELF, an extracted folder or an ISO image); OB_VCVARS=VS2022 Community vcvars64.bat;
 # OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build,
 # OB_PCSX2_VU_BUILD=C:/ob/pcsx2-vu-build, OB_DIAG_BUILD=C:/ob/diag-build (ob_diag.dll, ob_diag_tests.exe).
 # Writes nothing inside the repo; logs go to $OB_LOGS. cmake/ctest/MSVC steps run via tools/ob/vc.bat
@@ -35,6 +38,9 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 : "${OB_SRC:=$OB_ROOT/src}" "${OB_T:=$OB_ROOT/t}" "${OB_R:=$OB_ROOT/r}" "${OB_WORK:=$OB_ROOT/work}"
 : "${OB_OVL:=$OB_ROOT/ovl}" "${OB_LOGS:=$OB_ROOT/logs}" "${OB_SPLAT:=$OB_ROOT/splat/SLPM_654.28}"
 : "${OB_RUN:=$REPO/game_files}"
+# The game the runner boots (patch 0043): the boot ELF in the extracted folder (default, as before), the folder
+# itself, or an ISO 9660 disc image, e.g. OB_GAME="$REPO/ps2_emu/roms/Biohazard - Outbreak (English v2.1).iso".
+: "${OB_GAME:=$OB_RUN/SLPM_654.28}"
 : "${OB_DIAG_BUILD:=$OB_ROOT/diag-build}" "${OB_PCSX2_VU_BUILD:=$OB_ROOT/pcsx2-vu-build}"
 : "${OB_VCVARS:=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 export OB_VCVARS
@@ -270,13 +276,13 @@ cmd_boot() {
     # Vulkan SDK off PATH so the staged shaderc_shared.dll beside the runner is the one loaded (as cmd_pcsx2_gs).
     local np; np=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i vulkansdk | paste -sd:)
     PATH="$np" PS2X_FRAME_DUMP_DIR="$(cygpath -w "$frames")" powershell -NoProfile -Command "
-        \$elf = '$(cygpath -w "$OB_RUN/SLPM_654.28")'
+        \$elf = '$(cygpath -w "$OB_GAME")'
         \$p = Start-Process -FilePath '$(cygpath -w "$OB_R/ps2xRuntime/ps2EntryRunner.exe")' -ArgumentList ('\"' + \$elf + '\"') -WorkingDirectory '$logs' -RedirectStandardOutput '$logs\\boot-$tag.log' -RedirectStandardError '$logs\\boot-$tag.err' -PassThru
         \$null = \$p.Handle
         if (-not \$p.WaitForExit(${secs}000)) { Stop-Process -Id \$p.Id -Force; 'stopped after $secs s'; exit 124 }
         'exited by itself, code ' + \$p.ExitCode; exit \$p.ExitCode"
     local rc=$?
-    echo "boot $tag: exit $rc; log $OB_LOGS/boot-$tag.log; frames $frames"
+    echo "boot $tag: exit $rc; game $OB_GAME; log $OB_LOGS/boot-$tag.log; frames $frames"
     return $rc
 }
 
@@ -427,5 +433,6 @@ case ${1:-} in
     vucompare) shift; cmd_vucompare "$@" ;;
     depcheck) cmd_depcheck ;;
     hostprof-build) cmd_hostprof_build ;;
-    *) sed -n '6,24p' "$0"; exit 2 ;;
+    android) shift; bash "$REPO/tools/ob/android.sh" "$@" ;;
+    *) sed -n '6,26p' "$0"; exit 2 ;;
 esac

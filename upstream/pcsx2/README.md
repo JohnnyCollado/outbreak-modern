@@ -9,4 +9,4 @@ a81f1aa. Procedure as for PS2Recomp (docs/ops/workspace.md:31-37): commit on a l
 
 | Patch | What | Why it could not be a stub |
 |---|---|---|
-| (none yet) | | |
+| 0001 | **GS/Vulkan: Android surface and unversioned shaderc.** `WindowInfo::Type::Android` (window_handle = `ANativeWindow*`, appended last); `VK_USE_PLATFORM_ANDROID_KHR` on `__ANDROID__`; `vkCreateAndroidSurfaceKHR` entry point; `VK_KHR_android_surface` required for an Android window; `VKSwapChain` creates the surface from the window; `libshaderc_shared.so` loaded without a version suffix on Android (an APK carries only `lib*.so`). All under `__ANDROID__`; Windows unchanged (gate 3/3 after it). | The surface type switch is inside `VKSwapChain::CreateVulkanSurface` and `GSDeviceVK::SelectInstanceExtensions`; the library name is a literal in `VKShaderCache.cpp:142-147` |

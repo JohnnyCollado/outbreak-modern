@@ -14,7 +14,7 @@ in git. [`PROJECT_CONTEXT.md`; `docs/native-port-design.md`]
 ## 2. How it runs
 
 ```
-player's disc (game_files/, git-ignored)
+player's disc: ISO image or extracted folder (game_files/, ps2_emu/roms/, git-ignored; runner: patch 0043)
   ├─ SLPM_654.28 (main ELF) + prog/*.BIN overlays (DEMO, SUBMAIN, NETDNAS)
   │     │  ps2_analyzer + ps2_recomp (PS2Recomp + our patches)      tools/ob.sh recompile
   │     ▼
@@ -34,6 +34,10 @@ ps2EntryRunner.exe at run time
   SPU2 (sound) ... not producing sound yet
   window/input ... raylib window and pad (bindings: input.ini, patches 0038/0040); PCSX2 Vulkan draws into a child window;
                    title = frame counter
+  disc ........... cdrom0: = the ISO 9660 image (ps2x/iop/iso9660.h: real LSNs, buffered reads) or the folder;
+                   settings outbreak.ini (game, textures, mods; patch 0043)
+  Android ........ arm64 .so in an APK (NativeActivity, no Java); PCSX2 Vulkan on the ANativeWindow; VU1 interpreter
+                   (docs/ops/android.md)
   diagnostics .... optional plugin ob_diag.dll (native/ob_diag) on the hook API runtime/ps2_diag_hooks.h
 ```
 Sources: GS choice [`docs/ops/gs.md` Decisions; `research/2026-10-22-gpu-gs-options.md`];
@@ -61,7 +65,10 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `native/ob_diag/` | **The diagnostics plugin** `ob_diag.dll` over PS2Recomp's hook API (`runtime/ps2_diag_hooks.h`, patch 0036): scripted input (`PS2X_INPUT_SCRIPT`), frame dumps and captures (`PS2X_FRAME_DUMP_DIR`), frame-time CSV (`PS2X_FRAME_TIME`), guest PC sampler (`PS2X_PC_SAMPLE`), live mock controller on a named pipe (`PS2X_PAD_PIPE`; client `tools/ob/pad.py`), VU1 capture (`PS2X_VU1_CAPTURE`; `include/ob_vu1_capture.h` is the file format), and its tests (`ob_diag_tests`) | Built into `C:\ob\diag-build`; loaded only via `PS2X_DIAG` (ob.sh) or when placed beside the exe; a play build ships without it |
 | `gate/` | The correctness judge: scripted boot, frozen tolerance, reference hashes, baselines, evidence | `docs/ops/gate.md` |
 | `tools/ob.sh` (+ `tools/ob/`) | Windows driver: build tools, recompile, boot, test, gate, pcsx2-gs | `tools/ob/sync_changed.py` keeps rebuilds incremental |
+| `native/outbreak.ini.example` | Commented example of the runner's `outbreak.ini` (game image/folder, textures root, mods root; patch 0043) | Copy beside the exe, or to the Android app's files dir |
+| `native/android/` | `AndroidManifest.xml` of the Stage A1 APK (NativeActivity, `com.outbreakmodern.app`) | Packaged by `tools/ob/android.sh` (`ob.sh android`) |
 | `native/input.ini.example` | Commented example of the runner's `input.ini` (host key/gamepad bindings, patches 0038/0040) | Not staged; copy beside the exe to use |
+| `tools/ob/android.sh` (+ `apk_add_libs.py`, `android_symcheck.py`) | Android arm64 build and APK without Gradle: shaderc, NDK tree `C:\ob\android-r`, aapt2/zipalign/apksigner, offline symbol check | `docs/ops/android.md` |
 | `tools/hostprof/` | External sampling profiler `hostprof.exe` (suspend, read RIP, resume per thread; DbgHelp symbols; per-thread CPU time and top functions). Outside the engine: attaches to a running `ps2EntryRunner.exe` | Built by `ob.sh hostprof-build` into `C:\ob\hostprof-build`; names host functions in an `OB_PROFILE=1` build (`tools/ob/profile.cmake`, `docs/ops/build.md` "Host profiling") |
 | `tools/gate/` | Gate scoring (`gate.py`) and reference handling (`refs.py`) | |
 | `tools/mwo3_to_elf.py`, `tools/splat_functions.py` | Turn overlay `.BIN` files into ELFs and function lists for the recompiler | With tests |

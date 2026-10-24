@@ -1,0 +1,22 @@
+; outbreak.ini: start-up settings of the runner (PS2Recomp patch 0043). Copy as outbreak.ini beside
+; ps2EntryRunner.exe (Windows), or into the app's files dir on Android
+; (/sdcard/Android/data/com.outbreakmodern.app/files/outbreak.ini). PS2X_SETTINGS=<path> names another file.
+; Read once at start-up. One "key = value" per line; a line starting with ';' or '#' is a comment (so a path
+; may contain both). Keys are case-insensitive. A value may be in double quotes. A relative path is relative
+; to this file's folder. A bad line is logged once as "[settings] line N: ..." and ignored; the runner logs
+; "[settings] from <path> (N bad line(s)): game=... textures=... mods=...".
+
+; game: your copy of the game. One of
+;   - the disc image (ISO 9660, .iso), read in place: nothing is extracted or loaded whole;
+;   - a folder with the disc's files copied out (the boot file comes from its SYSTEM.CNF);
+;   - the boot ELF inside such a folder (SLPM_654.28), as before.
+; A path on the command line wins over this. Android: when game is not set, the one .iso in the app's files
+; dir is used. Memory cards (mc0) live beside the image, or in the folder.
+game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
+
+; textures: optional root of texture packs in PCSX2's layout, <root>\<serial>\replacements
+; (here <root>\SLPM-65428\replacements). Recorded and logged now; texture replacement itself comes later.
+; textures = D:\Games\PS2\textures
+
+; mods: optional root for mods. Reserved for mod support: recorded only, nothing reads it yet.
+; mods = D:\Games\PS2\mods

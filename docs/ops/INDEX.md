@@ -11,6 +11,7 @@ changed it.
 - `gate.md` — the gate: files, refs.py, display-mode probe result
 - `reference-capture.md` — PCSX2 reference settings (UI path, ini key), hotkeys, per-screen capture checklist
 - `gs.md` — the GPU GS: PCSX2 GS decision, phase 1.3 stop, where it plugs in
+- `android.md` — Android arm64 build and APK (Stage A1): tree, steps, package id, install/run/logcat commands, where the ISO goes
 boot.md | Booting the runner | 16
 gotchas.md | Harness and build gotchas | 33
 pins.md | Pins | 14

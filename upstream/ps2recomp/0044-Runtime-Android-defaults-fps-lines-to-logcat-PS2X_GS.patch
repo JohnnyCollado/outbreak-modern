@@ -1,0 +1,162 @@
+From 832cef05a84ba90292dd34a3ecb2d5bd5ce0cfef Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 04:30:07 -0400
+Subject: [PATCH] Runtime: Android defaults: [fps] lines to logcat, PS2X_GS =
+ external Vulkan GS
+
+An Android device has no environment to set PS2X_* in and no title bar.
+- Ps2FpsCounter::logsLines(hidden, PS2X_FPS_LOG): the once-per-second
+  "[fps] tick N | R fps" line, printed only with a hidden window, is
+  also printed on Android (stdout is logcat) and with PS2X_FPS_LOG=1.
+- runtime/ps2_platform_defaults.h: PS2X_GS unset = "pcsx2-vk" on
+  Android when the build has the external GS; "cpu" everywhere else
+  (desktop unchanged).
+
+Tests (ps2x fps counter suite, 2 cases): hidden logs, PS2X_FPS_LOG=1
+logs with a visible window, other values do not force it, a visible
+desktop window does not; the desktop GS default stays cpu, a build
+without the external GS defaults to cpu.
+---
+ ps2xRuntime/include/runtime/ps2_fps_counter.h | 13 ++++++++++
+ .../include/runtime/ps2_platform_defaults.h   | 22 +++++++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 15 ++++++++----
+ ps2xTest/src/ps2_fps_counter_tests.cpp        | 24 +++++++++++++++++++
+ 4 files changed, 70 insertions(+), 4 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_platform_defaults.h
+
+diff --git a/ps2xRuntime/include/runtime/ps2_fps_counter.h b/ps2xRuntime/include/runtime/ps2_fps_counter.h
+index 162e0fd..fc22a4e 100644
+--- a/ps2xRuntime/include/runtime/ps2_fps_counter.h
++++ b/ps2xRuntime/include/runtime/ps2_fps_counter.h
+@@ -32,6 +32,19 @@ public:
+ 
+     double fps() const { return m_fps; }
+ 
++    // Whether the rate also goes to stdout as "[fps] tick N | R fps" once per second: with a hidden window (nobody
++    // sees the title), on Android (no title bar; stdout is logcat), or when PS2X_FPS_LOG=1 (fpsLogEnv).
++    static bool logsLines(bool hiddenWindow, const char *fpsLogEnv)
++    {
++#if defined(__ANDROID__)
++        constexpr bool platformLogs = true;
++#else
++        constexpr bool platformLogs = false;
++#endif
++        const bool forced = fpsLogEnv != nullptr && fpsLogEnv[0] == '1' && fpsLogEnv[1] == '\0';
++        return hiddenWindow || platformLogs || forced;
++    }
++
+     // "<base> | 59.9 fps"
+     static std::string title(const std::string &base, double fps)
+     {
+diff --git a/ps2xRuntime/include/runtime/ps2_platform_defaults.h b/ps2xRuntime/include/runtime/ps2_platform_defaults.h
+new file mode 100644
+index 0000000..bc537fd
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_platform_defaults.h
+@@ -0,0 +1,22 @@
++#ifndef PS2_PLATFORM_DEFAULTS_H
++#define PS2_PLATFORM_DEFAULTS_H
++
++// Start-up defaults that differ per platform (patch 0044). An Android device has no environment to set PS2X_*
++// in, so what a desktop run selects with a variable is the default there.
++
++namespace ps2platform
++{
++    // The GS when PS2X_GS is unset: on Android, the external GS's Vulkan renderer when the build has one; else the
++    // built-in CPU GS (desktop default, unchanged).
++    inline const char *defaultGsMode(bool buildHasExternalGs)
++    {
++#if defined(__ANDROID__)
++        return buildHasExternalGs ? "pcsx2-vk" : "cpu";
++#else
++        (void)buildHasExternalGs;
++        return "cpu";
++#endif
++    }
++}
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 805350c..f1c2a5c 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -9,6 +9,7 @@
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_fps_counter.h"
++#include "runtime/ps2_platform_defaults.h"
+ #include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_input_bindings.h"
+ #include "ThreadNaming.h"
+@@ -884,10 +885,15 @@ bool PS2Runtime::syncCoreSubsystems()
+ bool PS2Runtime::initialize(const char *title)
+ {
+     {
+-        // PS2X_GS selects the GS: unset or "cpu" = the built-in CPU GS; the
+-        // external modes need a build with PS2X_EXTERNAL_GS_DIR.
++        // PS2X_GS selects the GS: unset or "cpu" = the built-in CPU GS (Android: the external Vulkan GS when
++        // built, ps2_platform_defaults.h); the external modes need a build with PS2X_EXTERNAL_GS_DIR.
+         const char *gsEnv = std::getenv("PS2X_GS");
+-        const std::string gsMode = (gsEnv && *gsEnv) ? gsEnv : "cpu";
++#ifdef PS2X_EXTERNAL_GS
++        constexpr bool kBuildHasExternalGs = true;
++#else
++        constexpr bool kBuildHasExternalGs = false;
++#endif
++        const std::string gsMode = (gsEnv && *gsEnv) ? gsEnv : ps2platform::defaultGsMode(kBuildHasExternalGs);
+         if (gsMode == "pcsx2-sw" || gsMode == "pcsx2-vk")
+         {
+ #ifdef PS2X_EXTERNAL_GS
+@@ -2804,7 +2810,8 @@ void PS2Runtime::run()
+         if (s_fps.update(hostNow, m_eeScheduler->currentVSyncTick()))
+         {
+             SetWindowTitle(Ps2FpsCounter::title(s_windowTitle, s_fps.fps()).c_str());
+-            if (s_windowHidden)
++            static const bool s_fpsLines = Ps2FpsCounter::logsLines(s_windowHidden, std::getenv("PS2X_FPS_LOG"));
++            if (s_fpsLines)
+                 std::cout << "[fps] " << Ps2FpsCounter::title("tick " + std::to_string(m_eeScheduler->currentVSyncTick()), s_fps.fps()) << std::endl;
+         }
+ 
+diff --git a/ps2xTest/src/ps2_fps_counter_tests.cpp b/ps2xTest/src/ps2_fps_counter_tests.cpp
+index f95ac27..1e76072 100644
+--- a/ps2xTest/src/ps2_fps_counter_tests.cpp
++++ b/ps2xTest/src/ps2_fps_counter_tests.cpp
+@@ -1,5 +1,6 @@
+ #include "MiniTest.h"
+ #include "runtime/ps2_fps_counter.h"
++#include "runtime/ps2_platform_defaults.h"
+ 
+ #include <cmath>
+ #include <string>
+@@ -28,5 +29,28 @@ void register_ps2_fps_counter_tests()
+             t.Equals(Ps2FpsCounter::title("Outbreak", 59.94), std::string("Outbreak | 59.9 fps"), "one decimal");
+             t.Equals(Ps2FpsCounter::title("Outbreak", 27.0), std::string("Outbreak | 27.0 fps"), "trailing zero kept");
+         });
++
++        tc.Run("[fps] lines: hidden window, Android, or PS2X_FPS_LOG=1", [](TestCase &t)
++        {
++            t.IsTrue(Ps2FpsCounter::logsLines(true, nullptr), "a hidden window logs, as before");
++            t.IsTrue(Ps2FpsCounter::logsLines(false, "1"), "PS2X_FPS_LOG=1 logs with a visible window");
++            t.IsTrue(Ps2FpsCounter::logsLines(true, "0"), "PS2X_FPS_LOG=0 does not silence a hidden window");
++#if defined(__ANDROID__)
++            t.IsTrue(Ps2FpsCounter::logsLines(false, nullptr), "Android always logs (logcat; no title bar)");
++#else
++            t.IsFalse(Ps2FpsCounter::logsLines(false, nullptr), "a visible desktop window shows the rate in its title only");
++            t.IsFalse(Ps2FpsCounter::logsLines(false, "yes"), "only the value 1 forces it");
++#endif
++        });
++
++        tc.Run("PS2X_GS default: Android picks the external Vulkan GS, the desktop the CPU GS", [](TestCase &t)
++        {
++#if defined(__ANDROID__)
++            t.Equals(std::string(ps2platform::defaultGsMode(true)), std::string("pcsx2-vk"), "Android with the external GS");
++#else
++            t.Equals(std::string(ps2platform::defaultGsMode(true)), std::string("cpu"), "desktop default unchanged");
++#endif
++            t.Equals(std::string(ps2platform::defaultGsMode(false)), std::string("cpu"), "no external GS in the build: cpu");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

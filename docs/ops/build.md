@@ -20,6 +20,8 @@ The everyday commands. Detail per topic is in the other `docs/ops/` files.
 | Engine-only boot | `bash tools/ob.sh boot --no-diag --hidden --secs N --tag T` | No plugin, as a play build; speed from the `[fps]` log lines |
 | Live pad boot | `bash tools/ob.sh boot --pad ob_pad --secs 900 --tag T` + `python tools/ob/pad.py <cmd>` | Hidden; driven over a named pipe, one command at a time (`boot.md` "Live pad") |
 | Visible boot | `PS2X_GS=pcsx2-vk bash tools/ob.sh boot --tag visible` | Opens a window: needs the developer's "proceed" each time |
+| Boot or gate from the disc image | `OB_GAME="$PWD/ps2_emu/roms/Biohazard - Outbreak (English v2.1).iso" PS2X_GS=pcsx2-sw bash tools/ob.sh gate` | `OB_GAME` = what boot/gate run: the ISO, an extracted folder, or the boot ELF (default `game_files/SLPM_654.28`, as before). Recompile still reads `game_files/` (`OB_RUN`). Patch 0043 |
+| Android APK | `bash tools/ob.sh android` (or one step: `shaderc`, `configure`, `build`, `package`, `verify`) | arm64 `.so` + `C:\ob\android-apk\outbreak-modern.apk`; never touches a device. `docs/ops/android.md` |
 
 From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob.sh boot --tag visible`
 (make sure `bash` is Git Bash, not WSL).
@@ -56,6 +58,16 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   `VsyncQueueSize`); readback and snapshot wait for the ring to drain (`docs/ops/gs.md` "GS thread"). Every 1800
   vsyncs stderr has a `[pcsx2-gs] gs thread:` stats line (sync waits, queue-ahead stalls, ring full). Only with
   `PS2X_GS=pcsx2-sw|pcsx2-vk`. A performance switch, not a diagnostic.
+- Game data (patch 0043): the runner takes an ISO 9660 disc image (read in place through one buffered handle; the
+  boot ELF is SYSTEM.CNF's `BOOT2` inside it; `sceCdSearchFile` answers with the image's real LSNs), an extracted
+  folder (boot ELF from its `SYSTEM.CNF`), or the boot ELF itself (the original form). Memory cards (`mc0`) and
+  `host:` sit beside the image, or in the folder. stdout `[game] <image|folder|elf> <path> boot=... serial=...`.
+- `outbreak.ini` (engine, patch 0043): start-up settings beside the exe, or `PS2X_SETTINGS=<path>`; read once;
+  keys `game` (image, folder or ELF; the command-line argument wins), `textures` (PCSX2 layout
+  `<root>/<serial>/replacements`, recorded and logged only), `mods` (reserved). A bad line is logged once as
+  `[settings] line N: ...`. Example and format: `native/outbreak.ini.example`. `ob.sh` stages none and passes the game
+  on the command line.
+- `PS2X_FPS_LOG=1` (engine, patch 0044): `[fps]` lines with a visible window too (always on Android: logcat).
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 
 ## Host profiling: `OB_PROFILE=1` build and `tools/hostprof`
@@ -152,5 +164,7 @@ Where the host CPU time goes (GS, microVU, runtime, generated game code), under 
 - Graphics: PCSX2's GS, in-process, pinned v2.9.134; the CPU GS is a fallback (`gs.md`, 2026-10-22).
 - Runner configured with `-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF` (ON halves boot speed).
 - Game data never enters git. Nothing is pushed without the developer's OK.
+- Game data model (developer, 2026-10-24): the runner accepts a copy of the game (disc image or extracted folder),
+  optionally a root folder for the 4K textures and a root folder for mods (`outbreak.ini`, patch 0043).
 - Standing OK for work under `C:\ob` and hidden scripted boots; PCSX2 launches, visible windows and the Odin need
   a "proceed" each time.

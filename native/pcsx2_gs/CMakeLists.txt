@@ -2,8 +2,15 @@
 # Source lists are read at configure time from PCSX2's own CMakeLists text (never hand-copied),
 # then trimmed by the explicit exclusion list below. Host-side symbols come from stubs/*.cpp.
 # Single ISA (isa_native, /arch:AVX2), USE_VULKAN only: no DX11/DX12/OpenGL/Metal sources or defines.
-cmake_minimum_required(VERSION 3.24)
-project(ob_pcsx2_gs C CXX ASM_MASM)
+# Android arm64 (NDK clang, Stage A1): PCSX2's ARCH_ARM64 lists (SW JIT on vixl, GSVector*_arm64.h), the Linux
+# common files minus LnxMisc.cpp (X11/D-Bus; stubs/android/ has its other functions), Vulkan through
+# VK_KHR_android_surface (upstream/pcsx2/0001), presenting into the NativeActivity's ANativeWindow.
+cmake_minimum_required(VERSION 3.22)
+if(ANDROID)
+    project(ob_pcsx2_gs C CXX)
+else()
+    project(ob_pcsx2_gs C CXX ASM_MASM)
+endif()
 
 set(OB_PCSX2 "C:/ob/pcsx2" CACHE PATH "PCSX2 v2.9.134 source tree")
 set(OB_PCSX2_DEPS "C:/ob/pcsx2-deps" CACHE PATH "zstd + shaderc install prefix")
@@ -37,9 +44,13 @@ endfunction()
 set(PC "${P}/pcsx2/CMakeLists.txt")
 ob_extract(gs_shared   "${PC}" "set(pcsx2GSSources\n")
 ob_extract(gs_unshared "${PC}" "set(pcsx2GSSourcesUnshared")
-ob_extract(gs_x86      "${PC}" "if(ARCH_X86)\n\tlist(APPEND pcsx2GSSourcesUnshared")
+if(ANDROID)
+    ob_extract(gs_arch "${PC}" "elseif(ARCH_ARM64)\n\tlist(APPEND pcsx2GSSourcesUnshared")
+else()
+    ob_extract(gs_arch "${PC}" "if(ARCH_X86)\n\tlist(APPEND pcsx2GSSourcesUnshared")
+endif()
 ob_extract(gs_vulkan   "${PC}" "if(USE_VULKAN)\n\tlist(APPEND pcsx2GSSources")
-set(gs_all ${gs_shared} ${gs_unshared} ${gs_x86} ${gs_vulkan})
+set(gs_all ${gs_shared} ${gs_unshared} ${gs_arch} ${gs_vulkan})
 list(REMOVE_ITEM gs_all
     GS/GSCapture.cpp                              # FFmpeg video/audio capture; stubbed (stubs/gs_stubs.cpp)
     GS/GSDump.cpp                                 # GS dump writer (zstd/xz); stubbed
@@ -53,10 +64,17 @@ list(TRANSFORM gs_all PREPEND "${P}/pcsx2/")
 # ---- common (common/CMakeLists.txt) ----
 set(CC "${P}/common/CMakeLists.txt")
 ob_extract(common_base "${CC}" "add_library(common)\n\ntarget_sources(common PRIVATE")
-ob_extract(common_x86  "${CC}" "if(ARCH_X86)\n\ttarget_sources(common PRIVATE")
-ob_extract(common_win  "${CC}" "if(WIN32)\n\ttarget_sources(common PRIVATE")
-ob_extract(common_asm  "${CC}" "enable_language(ASM_MASM)\n\t\ttarget_sources(common PRIVATE")
-set(common_all ${common_base} ${common_x86} ${common_win} ${common_asm})
+if(ANDROID)
+    # The Linux branch (FastJmp.cpp's inline asm covers arm64). LnxMisc.cpp needs X11 and D-Bus.
+    ob_extract(common_lnx "${CC}" "else()\n\ttarget_sources(common PRIVATE")
+    list(REMOVE_ITEM common_lnx Linux/LnxMisc.cpp)
+    set(common_all ${common_base} ${common_lnx})
+else()
+    ob_extract(common_x86  "${CC}" "if(ARCH_X86)\n\ttarget_sources(common PRIVATE")
+    ob_extract(common_win  "${CC}" "if(WIN32)\n\ttarget_sources(common PRIVATE")
+    ob_extract(common_asm  "${CC}" "enable_language(ASM_MASM)\n\t\ttarget_sources(common PRIVATE")
+    set(common_all ${common_base} ${common_x86} ${common_win} ${common_asm})
+endif()
 list(REMOVE_ITEM common_all
     PrecompiledHeader.cpp                         # HEADER_FILE_ONLY upstream
     Image.cpp                                     # libpng/libjpeg/libwebp; RGBA8Image I/O stubbed
@@ -92,6 +110,13 @@ foreach(l gs_all common_all imgui_src fmt_src)
 endforeach()
 
 file(GLOB ob_stubs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/stubs/*.cpp")
+if(ANDROID)
+    file(GLOB ob_stubs_android CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/stubs/android/*.cpp")
+    list(APPEND ob_stubs ${ob_stubs_android})
+    # vixl: the arm64 assembler behind the SW renderer's JIT (GSDrawScanlineCodeGenerator.arm64.cpp).
+    add_subdirectory("${P}/3rdparty/vixl" "${CMAKE_BINARY_DIR}/vixl" EXCLUDE_FROM_ALL)
+    target_compile_options(vixl PRIVATE -w)
+endif()
 
 add_library(ob_pcsx2_gs STATIC ${gs_all} ${common_all} ${imgui_src} ${fmt_src} ${ob_stubs})
 # include/ first: its GS/Renderers/DX11|DX12 headers shadow PCSX2's D3D headers (reasons in each shim).
@@ -102,32 +127,49 @@ target_include_directories(ob_pcsx2_gs PUBLIC
     "${P}/3rdparty/winwil/include" "${P}/3rdparty/xbyak" "${P}/3rdparty/vulkan/include"
     "${OB_PCSX2_DEPS}/include")
 target_include_directories(ob_pcsx2_gs PRIVATE "${P}/3rdparty/imgui/src")
-# PCSX2_DEFS (BuildParameters.cmake, Release, x86, WIN32) + pcsx2/CMakeLists WIN32 block; single ISA.
-target_compile_definitions(ob_pcsx2_gs PUBLIC
-    _M_X86=1 __SSE4_1__=1 ENABLE_VULKAN
-    _ITERATOR_DEBUG_LEVEL=0 _HAS_EXCEPTIONS=0
-    _CRT_NONSTDC_NO_WARNINGS _CRT_SECURE_NO_WARNINGS CRT_SECURE_NO_DEPRECATE _SCL_SECURE_NO_WARNINGS
-    _UNICODE UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN WIL_SUPPRESS_EXCEPTIONS
-    XBYAK_NO_EXCEPTION FMT_EXCEPTIONS=0
-    IMGUI_ENABLE_STB_TRUETYPE) # no FreeType: stubs/ui_stubs.cpp routes the font loader to stb_truetype
-target_compile_options(ob_pcsx2_gs PUBLIC
-    "$<$<COMPILE_LANGUAGE:C,CXX>:/arch:AVX2>" "$<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>"
-    "$<$<COMPILE_LANGUAGE:CXX>:/Zc:externConstexpr;/Zc:__cplusplus;/permissive-;/Zc:preprocessor>"
-    "$<$<COMPILE_LANGUAGE:C,CXX>:/fp:contract;/GS-;/W0>")
-# OneCore: VirtualAlloc2/MapViewOfFile3 (GS.cpp GSAllocateWrappedMemory), as pcsx2/CMakeLists.txt links it.
-target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo winmm pathcch dwmapi OneCore)
+if(ANDROID)
+    # PCSX2_DEFS for a POSIX arm64 build (BuildParameters.cmake: __POSIX__, -march=armv8.1-a for the atomics),
+    # PCSX2's -fno-exceptions/-fvisibility=hidden; the Android shims (shm_open) force-included where needed.
+    target_include_directories(ob_pcsx2_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/stubs/android"
+        "${CMAKE_ANDROID_NDK}/sources/android/native_app_glue")
+    target_compile_definitions(ob_pcsx2_gs PUBLIC
+        __POSIX__ ENABLE_VULKAN FMT_EXCEPTIONS=0
+        IMGUI_ENABLE_STB_TRUETYPE)
+    target_compile_options(ob_pcsx2_gs PUBLIC
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-march=armv8.1-a>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility=hidden>" "$<$<COMPILE_LANGUAGE:C,CXX>:-w>")
+    # LnxHostSys.cpp and GS.cpp (GSAllocateWrappedMemory) call shm_open/shm_unlink.
+    target_compile_options(ob_pcsx2_gs PRIVATE
+        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/stubs/android/ob_android_compat.h")
+    target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo vixl android log dl)
+else()
+    # PCSX2_DEFS (BuildParameters.cmake, Release, x86, WIN32) + pcsx2/CMakeLists WIN32 block; single ISA.
+    target_compile_definitions(ob_pcsx2_gs PUBLIC
+        _M_X86=1 __SSE4_1__=1 ENABLE_VULKAN
+        _ITERATOR_DEBUG_LEVEL=0 _HAS_EXCEPTIONS=0
+        _CRT_NONSTDC_NO_WARNINGS _CRT_SECURE_NO_WARNINGS CRT_SECURE_NO_DEPRECATE _SCL_SECURE_NO_WARNINGS
+        _UNICODE UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN WIL_SUPPRESS_EXCEPTIONS
+        XBYAK_NO_EXCEPTION FMT_EXCEPTIONS=0
+        IMGUI_ENABLE_STB_TRUETYPE) # no FreeType: stubs/ui_stubs.cpp routes the font loader to stb_truetype
+    target_compile_options(ob_pcsx2_gs PUBLIC
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/arch:AVX2>" "$<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>"
+        "$<$<COMPILE_LANGUAGE:CXX>:/Zc:externConstexpr;/Zc:__cplusplus;/permissive-;/Zc:preprocessor>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/fp:contract;/GS-;/W0>")
+    # OneCore: VirtualAlloc2/MapViewOfFile3 (GS.cpp GSAllocateWrappedMemory), as pcsx2/CMakeLists.txt links it.
+    target_link_libraries(ob_pcsx2_gs PUBLIC cpuinfo winmm pathcch dwmapi OneCore)
 
-add_executable(ob_pcsx2_gs_smoke smoke/main.cpp)
-target_link_libraries(ob_pcsx2_gs_smoke PRIVATE ob_pcsx2_gs)
+    add_executable(ob_pcsx2_gs_smoke smoke/main.cpp)
+    target_link_libraries(ob_pcsx2_gs_smoke PRIVATE ob_pcsx2_gs)
 
-# GS thread tests (ob.sh test): the command ring alone (header-only, no PCSX2), and the adapter (pcsx2_side.cpp over
-# ob_pcsx2_gs, SW renderer) end to end through the ring. Both run from this build dir (resources/ staged by ob.sh pcsx2-gs).
-add_executable(ob_gs_ring_tests tests/gs_ring_tests.cpp)
-target_include_directories(ob_gs_ring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
-target_compile_options(ob_gs_ring_tests PRIVATE /EHsc) # <chrono>/<thread>; this directory strips /EHsc for PCSX2
-add_executable(ob_pcsx2_gs_adapter_tests tests/adapter_tests.cpp adapter/pcsx2_side.cpp)
-target_include_directories(ob_pcsx2_gs_adapter_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
-target_link_libraries(ob_pcsx2_gs_adapter_tests PRIVATE ob_pcsx2_gs)
+    # GS thread tests (ob.sh test): the command ring alone (header-only, no PCSX2), and the adapter (pcsx2_side.cpp over
+    # ob_pcsx2_gs, SW renderer) end to end through the ring. Both run from this build dir (resources/ staged by ob.sh pcsx2-gs).
+    add_executable(ob_gs_ring_tests tests/gs_ring_tests.cpp)
+    target_include_directories(ob_gs_ring_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
+    target_compile_options(ob_gs_ring_tests PRIVATE /EHsc) # <chrono>/<thread>; this directory strips /EHsc for PCSX2
+    add_executable(ob_pcsx2_gs_adapter_tests tests/adapter_tests.cpp adapter/pcsx2_side.cpp)
+    target_include_directories(ob_pcsx2_gs_adapter_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
+    target_link_libraries(ob_pcsx2_gs_adapter_tests PRIVATE ob_pcsx2_gs)
+endif()
 
 # Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
 # PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
@@ -136,8 +178,17 @@ if(TARGET ps2_runtime)
     add_library(ob_pcsx2_gs_adapter STATIC adapter/pcsx2_side.cpp)
     target_include_directories(ob_pcsx2_gs_adapter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
     target_link_libraries(ob_pcsx2_gs_adapter PUBLIC ob_pcsx2_gs)
+    if(ANDROID)
+        # pcsx2_side.cpp: the activity's window and assets (android_app via raylib), raylib's EGL surface release.
+        target_include_directories(ob_pcsx2_gs_adapter PRIVATE "${CMAKE_ANDROID_NDK}/sources/android/native_app_glue")
+        target_link_libraries(ob_pcsx2_gs_adapter PUBLIC EGL android)
+    endif()
 
     add_library(ps2x_external_gs STATIC adapter/hook.cpp)
-    target_compile_options(ps2x_external_gs PRIVATE /EHsc) # this directory strips /EHsc for PCSX2 (above)
+    if(MSVC)
+        target_compile_options(ps2x_external_gs PRIVATE /EHsc) # this directory strips /EHsc for PCSX2 (above)
+    else()
+        target_compile_options(ps2x_external_gs PRIVATE -fexceptions) # after ob_pcsx2_gs's -fno-exceptions
+    endif()
     target_link_libraries(ps2x_external_gs PRIVATE ps2_runtime ob_pcsx2_gs_adapter)
 endif()
