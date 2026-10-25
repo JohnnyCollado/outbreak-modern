@@ -150,6 +150,17 @@ cmd_test() {
     else
         echo "pcsx2_gs: 0/0 (build failed: $OB_LOGS/ob-pcsx2-gs-tests-build.log)"; red=1
     fi
+    # PCSX2's SPU2 behind ob_spu2_bridge.h (native/pcsx2_spu2/tests): mixing rate, key-on output, DMA event, a restarted
+    # IOP cycle count. Same build dir (z.dll and friends staged there).
+    log="$OB_LOGS/ob-test-pcsx2_spu2.log"
+    if vc cmake --build "$gsb" --target ob_pcsx2_spu2_tests > "$OB_LOGS/ob-pcsx2-spu2-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./pcsx2_spu2/ob_pcsx2_spu2_tests.exe) > "$log" 2>&1
+        r=$(grep -o 'pcsx2_spu2: [0-9]*/[0-9]*' "$log" | tail -1)
+        echo "${r:-pcsx2_spu2: 0/0 (no result: $log)}"
+        if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
+    else
+        echo "pcsx2_spu2: 0/0 (build failed: $OB_LOGS/ob-pcsx2-spu2-tests-build.log)"; red=1
+    fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
 }

@@ -1,0 +1,207 @@
+From 9cbd463861cd261b2bf300744facb0cf756bf1cf Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 12:18:05 -0400
+Subject: [PATCH 58/58] IOP kernel: ready queue per priority in readiness
+ order; the running thread is not preempted by an equal-priority thread at a
+ slice end
+
+---
+ ps2xIOP/src/emulator/core/iop_kernel.cpp | 48 ++++++++++++++++++++-
+ ps2xIOP/src/emulator/core/iop_kernel.h   |  8 ++++
+ ps2xIOP/tests/iop_import_tests.cpp       | 54 +++++++++++++++++++++++-
+ 3 files changed, 108 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.cpp b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+index 90c6dce..ece5ee2 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.cpp
++++ b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+@@ -34,6 +34,8 @@ namespace ps2x::iop::detail
+         m_nextEventFlagId = 1;
+         m_nextMessageBoxId = 1;
+         m_currentThread = nullptr;
++        m_headThreadId = -1;
++        m_readySeq = 0;
+     }
+ 
+     bool IopKernel::dispatchThreadImport(uint16_t ordinal, IopCpuState &cpu, uint64_t currentCycle)
+@@ -145,6 +147,10 @@ namespace ps2x::iop::detail
+                 return true;
+             }
+             it->second.priority = std::clamp<uint32_t>(cpu.gpr[5], 1u, 126u);
++            queueNewlyReady();
++            it->second.readySeq = ++m_readySeq; // to the tail of its new priority's queue
++            if (m_headThreadId == it->second.id)
++                m_headThreadId = -1;
+             setV0(0);
+             return true;
+         }
+@@ -860,19 +866,29 @@ namespace ps2x::iop::detail
+                 thread.state = IopThreadState::Ready;
+         }
+ 
++        // IOP thread manager scheduling: the highest priority runs; within a priority, ready threads queue in the order
++        // they became ready, and the thread that was running keeps the head of its queue until it blocks or rotates
++        // (RotateThreadReadyQueue). An equal-priority thread never takes over at the end of a slice: choosing the lowest
++        // id instead let one preempt another mid-update (Resident Evil Outbreak's sound mixer, between its left and right
++        // channel bookkeeping).
++        queueNewlyReady();
+         IopThread *next = nullptr;
+         for (auto &[id, thread] : m_threads)
+         {
+             if (thread.state != IopThreadState::Ready)
+                 continue;
+             if (next == nullptr || thread.priority < next->priority ||
+-                (thread.priority == next->priority && thread.id < next->id))
++                (thread.priority == next->priority && thread.readySeq < next->readySeq))
+                 next = &thread;
+         }
+         if (next == nullptr)
+             return nullptr;
++        if (const auto head = m_threads.find(m_headThreadId); head != m_threads.end() &&
++            head->second.state == IopThreadState::Ready && head->second.priority == next->priority)
++            next = &head->second;
+ 
+         m_currentThread = next;
++        m_headThreadId = next->id;
+         next->state = IopThreadState::Running;
+         next->cpu.stopped = false;
+         next->cpu.yielded = false;
+@@ -895,11 +911,41 @@ namespace ps2x::iop::detail
+         if (thread.cpu.pc == returnSentinel || thread.cpu.stopped)
+             thread.state = IopThreadState::Dormant;
+         else if (thread.state == IopThreadState::Running)
++        {
+             thread.state = IopThreadState::Ready;
++            if (thread.cpu.yielded)
++            {
++                // Still ready after giving up the CPU itself (RotateThreadReadyQueue): to the tail of its queue, behind
++                // the threads that became ready during its slice.
++                queueNewlyReady();
++                thread.readySeq = ++m_readySeq;
++                m_headThreadId = -1;
++            }
++        }
++        if (thread.state != IopThreadState::Ready)
++        {
++            thread.queued = false;
++            if (m_headThreadId == thread.id)
++                m_headThreadId = -1;
++        }
+         m_currentThread = nullptr;
+         cleanupDeadThreads();
+     }
+ 
++    void IopKernel::queueNewlyReady()
++    {
++        for (auto &[id, thread] : m_threads)
++        {
++            if (thread.state != IopThreadState::Ready)
++                thread.queued = false;
++            else if (!thread.queued)
++            {
++                thread.queued = true;
++                thread.readySeq = ++m_readySeq;
++            }
++        }
++    }
++
+     void IopKernel::cleanupDeadThreads()
+     {
+         for (auto thread = m_threads.begin(); thread != m_threads.end();)
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.h b/ps2xIOP/src/emulator/core/iop_kernel.h
+index 32aed59..2983ef3 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.h
++++ b/ps2xIOP/src/emulator/core/iop_kernel.h
+@@ -43,6 +43,10 @@ namespace ps2x::iop::detail
+         uint32_t waitMode = 0;
+         uint32_t waitResultAddress = 0;
+         int wakeupCount = 0;
++        // Ready queue (patch 0058): the order in which the thread joined the ready threads of its priority, and whether it
++        // is in that queue now.
++        uint64_t readySeq = 0;
++        bool queued = false;
+     };
+ 
+     class IopKernel
+@@ -115,5 +119,9 @@ namespace ps2x::iop::detail
+         uint32_t m_nextEventFlagId = 1;
+         uint32_t m_nextMessageBoxId = 1;
+         IopThread *m_currentThread = nullptr;
++        // The thread that ran last keeps the head of its priority's ready queue (patch 0058); -1 = none.
++        int m_headThreadId = -1;
++        uint64_t m_readySeq = 0;
++        void queueNewlyReady(); // gives threads that became ready since the last call their place in the ready queue
+     };
+ }
+diff --git a/ps2xIOP/tests/iop_import_tests.cpp b/ps2xIOP/tests/iop_import_tests.cpp
+index 18a653d..b6f13ad 100644
+--- a/ps2xIOP/tests/iop_import_tests.cpp
++++ b/ps2xIOP/tests/iop_import_tests.cpp
+@@ -427,11 +427,63 @@ namespace
+                expect(executor.lastGp == 0x89AB0u, "timer callback lost the registering module GP") &&
+                expect(timrman.nextEventCycle(1000u) == 300u, "timer callback return did not rearm compare");
+     }
++
++    // Thread scheduling (patch 0058): within a priority, the running thread keeps the CPU at the end of a slice even
++    // when a lower-id thread of the same priority has become ready; it gives way when it rotates itself, and ready
++    // threads then run in the order they became ready.
++    bool testThreadReadyQueue()
++    {
++        IopMemory memory;
++        IopKernel kernel(memory);
++        kernel.reset();
++        const auto create = [&](uint32_t priority)
++        {
++            memory.write32(0x3000u, 0u);
++            memory.write32(0x3004u, 0u);
++            memory.write32(0x3008u, 0x4000u);
++            memory.write32(0x300Cu, 0x400u);
++            memory.write32(0x3010u, priority);
++            IopCpuState cpu{};
++            cpu.gpr[4] = 0x3000u;
++            (void)kernel.dispatchThreadImport(4u, cpu, 0u);
++            return static_cast<int>(cpu.gpr[2]);
++        };
++        const auto start = [&](int id)
++        {
++            IopCpuState cpu{};
++            cpu.gpr[4] = static_cast<uint32_t>(id);
++            (void)kernel.dispatchThreadImport(6u, cpu, 0u);
++        };
++        constexpr uint32_t kSentinel = 0x1FFFFF00u;
++        const int b = create(32u); // the lower id
++        const int a = create(32u);
++        start(a);
++        IopThread *running = kernel.beginNextReady(0u);
++        if (!expect(running != nullptr && running->id == a, "the only ready thread did not run"))
++            return false;
++        start(b); // becomes ready while a runs
++        kernel.endTimeslice(*running, kSentinel); // a's slice ends, a still ready
++        running = kernel.beginNextReady(0u);
++        if (!expect(running != nullptr && running->id == a,
++                    "an equal-priority thread took over the running thread at the end of its slice"))
++            return false;
++        const int c = create(32u);
++        start(c);
++        (void)kernel.dispatchThreadImport(16u, running->cpu, 0u); // a: RotateThreadReadyQueue
++        kernel.endTimeslice(*running, kSentinel);
++        running = kernel.beginNextReady(0u);
++        if (!expect(running != nullptr && running->id == b, "after a rotated, the next ready thread (b) did not run"))
++            return false;
++        (void)kernel.dispatchThreadImport(16u, running->cpu, 0u); // b rotates: c became ready before a re-queued
++        kernel.endTimeslice(*running, kSentinel);
++        running = kernel.beginNextReady(0u);
++        return expect(running != nullptr && running->id == c, "ready threads did not run in the order they became ready");
++    }
+ }
+ 
+ int main()
+ {
+-    if (!testMessageBox() || !testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
++    if (!testMessageBox() || !testThreadReadyQueue() || !testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
+         !testTimrmanPeriodicCallback())
+         return 1;
+     std::cout << "ps2xIOP import tests passed\n";
+-- 
+2.46.2.windows.1
+

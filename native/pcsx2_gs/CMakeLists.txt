@@ -211,6 +211,9 @@ else()
     target_include_directories(ob_gpu_driver_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/adapter")
 endif()
 
+# PCSX2's SPU2 (sound), on ob_pcsx2_gs: native/pcsx2_spu2.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_spu2" "${CMAKE_BINARY_DIR}/pcsx2_spu2")
+
 # Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
 # PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
 # and links ob_pcsx2_gs_adapter PRIVATE so PCSX2's PUBLIC defines/options never reach ps2_runtime.
@@ -241,4 +244,7 @@ if(TARGET ps2_runtime)
         target_compile_options(ps2x_external_gs PRIVATE -fexceptions) # after ob_pcsx2_gs's -fno-exceptions
     endif()
     target_link_libraries(ps2x_external_gs PRIVATE ps2_runtime ob_pcsx2_gs_adapter)
+    # The external SPU2 (PS2Recomp 0056): PCSX2's SPU2 behind native/pcsx2_spu2/adapter/ob_spu2_bridge.h.
+    target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_spu2/adapter")
+    target_link_libraries(ps2x_external_gs PRIVATE ob_pcsx2_spu2)
 endif()

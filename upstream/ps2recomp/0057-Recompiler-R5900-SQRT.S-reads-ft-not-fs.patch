@@ -1,0 +1,60 @@
+From dacdcf9bac5214a0be379a320f4106d34efb04ca Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 12:18:04 -0400
+Subject: [PATCH 57/58] Recompiler: R5900 SQRT.S reads ft, not fs
+
+---
+ ps2xRecomp/src/lib/fpu_translator.cpp |  4 +++-
+ ps2xTest/src/code_generator_tests.cpp | 21 +++++++++++++++++++++
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xRecomp/src/lib/fpu_translator.cpp b/ps2xRecomp/src/lib/fpu_translator.cpp
+index 435db3a..ba55e9a 100644
+--- a/ps2xRecomp/src/lib/fpu_translator.cpp
++++ b/ps2xRecomp/src/lib/fpu_translator.cpp
+@@ -58,7 +58,9 @@ namespace ps2recomp
+                                    "ctx->f[{}] = FPU_DIV_S(ctx->f[{}], ctx->f[{}]); }}",
+                                    ft, fd, fs, ft);
+             case COP1_S_SQRT:
+-                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, fs);
++                // The R5900's SQRT.S fd, ft reads ft (bits 20-16), not fs as on the R4000 (EE Core Instruction
++                // Set Manual, SQRT.S; PCSX2 FPU.cpp SQRT_S: _FdValf_ = sqrt(fabs(_FtValf_))).
++                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, ft);
+             case COP1_S_ABS:
+                 return fmt::format("ctx->f[{}] = FPU_ABS_S(ctx->f[{}]);", fd, fs);
+             case COP1_S_MOV:
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 492e624..5909d58 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -322,6 +322,27 @@ void register_code_generator_tests()
+                  "MULT should not write rd when rd is zero");
+     });
+ 
++    tc.Run("R5900 SQRT.S reads ft, not fs", [](TestCase &t) {
++        CodeGenerator gen({}, {});
++
++        // sqrt.s $f20, $f22 (0x46160504): fmt S, ft 22, fs 0, fd 20. Resident Evil Outbreak's ADX filter setup
++        // (0x12626C) takes sqrt(2) this way; reading fs gave sqrt(f0) and unstable decoder coefficients.
++        Instruction sqrt{};
++        sqrt.opcode = OPCODE_COP1;
++        sqrt.raw = 0x46160504u;
++        sqrt.rs = COP1_S;
++        sqrt.rt = 22;
++        sqrt.rd = 0;
++        sqrt.sa = 20;
++        sqrt.function = COP1_S_SQRT;
++
++        std::string generated = gen.translateInstruction(sqrt);
++        printGeneratedCode("R5900 SQRT.S reads ft, not fs", generated);
++
++        t.IsTrue(generated.find("ctx->f[20] = FPU_SQRT_S(ctx->f[22]);") != std::string::npos,
++                 "SQRT.S must take the square root of ft: " + generated);
++    });
++
+     tc.Run("R5900 MMI MULT1 writes rd when rd is non-zero", [](TestCase &t) {
+         CodeGenerator gen({}, {});
+ 
+-- 
+2.46.2.windows.1
+

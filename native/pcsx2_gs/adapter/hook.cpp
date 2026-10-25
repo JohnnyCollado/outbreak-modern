@@ -1,11 +1,13 @@
-// hook: the PS2Recomp half of the runner's external GS. Implements PS2ExternalGS (runtime/gs/gs_external.h)
+// hook: the PS2Recomp half of the runner's external GS and SPU2. Implements PS2ExternalGS (runtime/gs/gs_external.h)
 // over the plain-types bridge (ob_gs_bridge.h); PCSX2 itself lives behind pcsx2_side.cpp.
 #include "runtime/gs/gs_external.h"
 #include "runtime/ps2_game_source.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_pnach.h"
+#include "runtime/ps2_spu2_external.h"
 
 #include "ob_gs_bridge.h"
+#include "ob_spu2_bridge.h"
 
 #include <cstring>
 #include <string>
@@ -66,4 +68,42 @@ PS2ExternalGS* ps2CreateExternalGS(const char* mode)
 	// outbreak.ini textures + the game's serial (0052): PCSX2 texture replacement, <textures>/<serial>/replacements.
 	ob_gs_set_textures(ps2game::activeSettings().textures.string().c_str(), ps2game::activeGameSerial().c_str());
 	return new Pcsx2ExternalGS();
+}
+
+// ---- External SPU2 (PS2Recomp patch 0056): PCSX2's SPU2 (native/pcsx2_spu2) as the IOP's Spu2Device ----
+namespace
+{
+	class Pcsx2Spu2 final : public ps2x::iop::Spu2Device
+	{
+	public:
+		~Pcsx2Spu2() override { ob_spu2_close(); }
+		uint16_t read16(uint32_t phys, uint64_t cycle) override { return ob_spu2_read(phys, cycle); }
+		void write16(uint32_t phys, uint16_t value, uint64_t cycle) override { ob_spu2_write(phys, value, cycle); }
+		void dma(uint32_t core, uint32_t madr, uint32_t halfwords, bool toSpu2, uint64_t cycle) override
+		{
+			ob_spu2_dma(core, madr, halfwords, toSpu2, cycle);
+		}
+		void advance(uint64_t cycle) override { ob_spu2_advance(cycle); }
+		uint64_t nextEventCycle() override { return ob_spu2_next_event(); }
+		uint32_t takeEvents() override { return ob_spu2_take_events(); } // OB_SPU2_EV_* = Spu2Device::Event bits
+	};
+	static_assert(OB_SPU2_EV_IRQ == ps2x::iop::Spu2Device::EventIrq && OB_SPU2_EV_DMA4 == ps2x::iop::Spu2Device::EventDma4 &&
+		OB_SPU2_EV_DMA7 == ps2x::iop::Spu2Device::EventDma7);
+} // namespace
+
+ps2x::iop::Spu2Device* ps2CreateExternalSpu2(uint8_t* iopRam, uint32_t ramSize)
+{
+	if (!ob_spu2_open(iopRam, ramSize, 0))
+		return nullptr;
+	return new Pcsx2Spu2();
+}
+
+void ps2ExternalSpu2Pull(float* frames, uint32_t count)
+{
+	ob_spu2_pull(frames, count);
+}
+
+uint32_t ps2ExternalSpu2SampleRate()
+{
+	return ob_spu2_sample_rate();
 }
