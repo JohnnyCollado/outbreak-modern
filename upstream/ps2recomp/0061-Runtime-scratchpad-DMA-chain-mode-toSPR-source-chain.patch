@@ -1,0 +1,201 @@
+From a7498bd5b2a5b04e877cdd68d01061c64c0e0a9e Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 16:10:05 -0400
+Subject: [PATCH 61/61] Runtime: scratchpad DMA chain mode (toSPR source chain,
+ fromSPR destination chain)
+
+tryProcessScratchpadDma handled normal mode only. Chain mode as PCSX2's SPR.cpp: toSPR (channel 9) reads tags at
+TADR (REFE, CNT, NEXT, REF, REFS, END; TTE also copies each tag) and moves data into the scratchpad at SADR; fromSPR
+(channel 8) reads each tag from the scratchpad at SADR and sends the data after it to the tag's ADDR (CNTS/CNT go on,
+END ends). A tag IRQ with CHCR.TIE ends either; MADR, TADR, SADR, QWC and CHCR (last tag's upper half, STR clear) are
+written back, D_STAT 8/9 set and the cause queued. Resident Evil Outbreak's movies (libmpeg motion compensation) fetch
+reference blocks this way; without it every P/B frame was empty.
+
+Test: PS2Memory "scratchpad DMA chain mode: toSPR source chain and fromSPR destination chain".
+---
+ ps2xRuntime/src/lib/ps2_memory.cpp | 114 +++++++++++++++++++++++++++++
+ ps2xTest/src/ps2_memory_tests.cpp  |  44 +++++++++++
+ 2 files changed, 158 insertions(+)
+
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index b10a497..361f3e6 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1781,6 +1781,120 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+         return false;
+ 
+     const uint32_t mode = (chcr >> 2u) & 0x3u;
++    if (mode == 1u)
++    {
++        // Chain mode (PCSX2 SPR.cpp dmaSPR1 / _dmaSPR0). toSPR is a source chain: tags in memory at TADR (REFE, CNT,
++        // NEXT, REF, REFS, END as the other source channels; TTE also copies each tag), data into the scratchpad at
++        // SADR. fromSPR is a destination chain: each tag sits in the scratchpad at SADR, its ADDR is where the data
++        // after it goes (CNTS, CNT go on; END ends). A tag IRQ with CHCR.TIE ends either. Resident Evil Outbreak's
++        // movies (libmpeg motion compensation) fetch reference blocks this way.
++        auto hostPtr = [this](uint32_t address, uint32_t bytes) -> uint8_t *
++        {
++            if (address & 0x80000000u)
++                return (((address & 0x3FF0u) + bytes) <= PS2_SCRATCHPAD_SIZE) ? m_scratchpad + (address & 0x3FF0u) : nullptr;
++            const uint32_t physical = address & 0x1FFFFFF0u;
++            return (physical < PS2_RAM_SIZE && bytes <= PS2_RAM_SIZE - physical) ? m_rdram + physical : nullptr;
++        };
++        const bool fromScratchpad = channelBase == kSprFromChannel;
++        const bool tte = (chcr & 0x40u) != 0u, tie = (chcr & 0x80u) != 0u;
++        uint32_t madr = m_ioRegisters[channelBase + 0x10u];
++        uint32_t tadr = m_ioRegisters[channelBase + 0x30u];
++        uint32_t sadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
++        uint32_t lastTagUpper = 0u;
++        auto sprCopy = [this, &sadr](uint8_t *ram, uint32_t bytes, bool toRam)
++        {
++            for (uint32_t done = 0u; done < bytes;)
++            {
++                const uint32_t chunk = std::min(bytes - done, PS2_SCRATCHPAD_SIZE - sadr);
++                if (toRam)
++                    std::memcpy(ram + done, m_scratchpad + sadr, chunk);
++                else
++                    std::memcpy(m_scratchpad + sadr, ram + done, chunk);
++                done += chunk;
++                sadr = (sadr + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
++            }
++        };
++        for (uint32_t guard = 0u; guard < 0x10000u; ++guard)
++        {
++            uint64_t tag = 0u;
++            uint32_t tagAddr = 0u;
++            if (fromScratchpad)
++            {
++                std::memcpy(&tag, m_scratchpad + sadr, sizeof(tag));
++                sadr = (sadr + 16u) & (PS2_SCRATCHPAD_SIZE - 1u);
++            }
++            else
++            {
++                const uint8_t *tagPtr = hostPtr(tadr, 16u);
++                if (!tagPtr)
++                    break;
++                std::memcpy(&tag, tagPtr, sizeof(tag));
++                tagAddr = tadr;
++                if (tte)
++                    sprCopy(const_cast<uint8_t *>(tagPtr), 16u, false);
++            }
++            const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu);
++            const uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7u);
++            const bool irq = ((tag >> 31) & 1u) != 0u;
++            lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
++            madr = static_cast<uint32_t>(tag >> 32);
++            bool end = false;
++            if (fromScratchpad)
++            {
++                end = id == 7u; // END; CNTS (0) and CNT (1) go on
++            }
++            else
++            {
++                switch (id)
++                {
++                case 0u: // REFE
++                    tadr += 16u;
++                    end = true;
++                    break;
++                case 1u: // CNT: data after the tag, the next tag after the data
++                    madr = tagAddr + 16u;
++                    break;
++                case 2u: // NEXT: data after the tag, the next tag at ADDR
++                    tadr = madr;
++                    madr = tagAddr + 16u;
++                    break;
++                case 3u: // REF
++                case 4u: // REFS
++                    tadr += 16u;
++                    break;
++                case 7u: // END
++                    madr = tagAddr + 16u;
++                    end = true;
++                    break;
++                default:
++                    end = true;
++                    break;
++                }
++            }
++            const uint32_t bytes = qwc * 16u;
++            if (bytes != 0u)
++            {
++                uint8_t *ram = hostPtr(madr, bytes);
++                if (!ram)
++                    break;
++                sprCopy(ram, bytes, fromScratchpad);
++                if (fromScratchpad && !(madr & 0x80000000u))
++                    markModified(madr & 0x1FFFFFF0u, bytes);
++                madr += bytes;
++            }
++            if (!fromScratchpad && id == 1u)
++                tadr = madr;
++            if (end || (tie && irq))
++                break;
++        }
++        m_ioRegisters[channelBase + 0x10u] = madr;
++        m_ioRegisters[channelBase + 0x20u] = 0u;
++        m_ioRegisters[channelBase + 0x30u] = tadr;
++        m_ioRegisters[channelBase + 0x80u] = sadr;
++        m_ioRegisters[channelBase] = ((chcr & 0xFFFFu) | (lastTagUpper << 16u)) & ~0x100u;
++        completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
++        return true;
++    }
+     if (mode != 0u)
+         return false;
+ 
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 602f4cb..3da0a04 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2628,5 +2628,49 @@ void register_ps2_memory_tests()
+             ps2x::setIpuDevice(nullptr);
+         });
+ 
++        tc.Run("scratchpad DMA chain mode: toSPR source chain and fromSPR destination chain", [](TestCase &t)
++        {
++            // Patch 0061: Resident Evil Outbreak's movies (libmpeg motion compensation) fetch reference blocks into
++            // the scratchpad with toSPR chains; normal mode alone left those P/B frames empty.
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            auto quad = [](uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return _mm_set_epi32(static_cast<int>(d), static_cast<int>(c), static_cast<int>(b), static_cast<int>(a)); };
++            auto tag = [&](uint32_t qwc, uint32_t id, uint32_t addr) { return quad(qwc | (id << 28), addr, 0u, 0u); };
++            auto word = [&](uint32_t address) { return mem.read32(address); };
++            mem.consumeCompletedDmacCauses();
++
++            // toSPR: CNT (1 qword after it) -> REF (1 qword at 0x3000) -> END (1 qword after it), into SADR 0x100.
++            mem.write128(0x2000u, tag(1u, 1u, 0u));
++            mem.write128(0x2010u, quad(0xA0u, 0xA1u, 0xA2u, 0xA3u));
++            mem.write128(0x2020u, tag(1u, 3u, 0x3000u));
++            mem.write128(0x2030u, tag(1u, 7u, 0u));
++            mem.write128(0x2040u, quad(0xC0u, 0xC1u, 0xC2u, 0xC3u));
++            mem.write128(0x3000u, quad(0xB0u, 0xB1u, 0xB2u, 0xB3u));
++            mem.write32(0x1000D430u, 0x2000u);  // D9_TADR
++            mem.write32(0x1000D480u, 0x100u);   // D9_SADR
++            mem.write32(0x1000D420u, 0u);       // D9_QWC
++            mem.write32(0x1000D400u, 0x105u);   // D9_CHCR: chain, start
++            t.IsTrue(word(0x70000100u) == 0xA0u && word(0x70000110u) == 0xB0u && word(0x70000120u) == 0xC0u &&
++                         word(0x7000012Cu) == 0xC3u,
++                     "toSPR chain: CNT, REF and END data land in order at SADR");
++            t.Equals(mem.readIORegister(0x1000D400u) & 0x100u, 0u, "toSPR chain ends (STR clear)");
++            t.Equals(mem.readIORegister(0x1000D430u), 0x2030u, "toSPR TADR stays at the END tag");
++            t.Equals(mem.readIORegister(0x1000D480u), 0x130u, "toSPR SADR advanced by 3 quadwords");
++
++            // fromSPR: tags in the scratchpad at 0x200: CNT (1 qword to 0x5000) -> END (1 qword to 0x6000).
++            mem.write128(0x70000200u, tag(1u, 1u, 0x5000u));
++            mem.write128(0x70000210u, quad(0xD0u, 0xD1u, 0xD2u, 0xD3u));
++            mem.write128(0x70000220u, tag(1u, 7u, 0x6000u));
++            mem.write128(0x70000230u, quad(0xE0u, 0xE1u, 0xE2u, 0xE3u));
++            mem.write32(0x1000D080u, 0x200u);   // D8_SADR
++            mem.write32(0x1000D020u, 0u);       // D8_QWC
++            mem.write32(0x1000D000u, 0x104u);   // D8_CHCR: chain, start
++            t.IsTrue(word(0x5000u) == 0xD0u && word(0x500Cu) == 0xD3u && word(0x6000u) == 0xE0u && word(0x600Cu) == 0xE3u,
++                     "fromSPR chain: each tag's data goes to its ADDR");
++            t.Equals(mem.readIORegister(0x1000D000u) & 0x100u, 0u, "fromSPR chain ends (STR clear)");
++            t.Equals(mem.readIORegister(0x1000E010u) & 0x300u, 0x300u, "D_STAT bits 8 and 9 are set");
++            const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
++            t.IsTrue(causes.size() == 2u && causes[0] == 9u && causes[1] == 8u, "DMAC causes 9 then 8 are queued");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

@@ -4,7 +4,7 @@
 # recomp-cycle.sh, ovl-cycle.sh, build-runner.bat, boot-frames-26.ps1).
 #
 #   tools/ob.sh tools                        configure + build the tools tree ($OB_T)
-#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu tests: "<suite>: <pass>/<total>"
+#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu/gs/spu2/ipu tests: "<suite>: <pass>/<total>"
 #   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
 #                                            (OB_PROFILE=1: host libraries with debug info, copy in $OB_ROOT/r-profile)
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
@@ -161,6 +161,17 @@ cmd_test() {
     else
         echo "pcsx2_spu2: 0/0 (build failed: $OB_LOGS/ob-pcsx2-spu2-tests-build.log)"; red=1
     fi
+    # PCSX2's IPU behind ob_ipu_bridge.h (native/pcsx2_ipu/tests): registers, DMA channel 4 into the FIFO, a DMAC
+    # suspend, and a hand-built intra macroblock decoded by BDEC out through channel 3. Same build dir.
+    log="$OB_LOGS/ob-test-pcsx2_ipu.log"
+    if vc cmake --build "$gsb" --target ob_pcsx2_ipu_tests > "$OB_LOGS/ob-pcsx2-ipu-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./pcsx2_ipu/ob_pcsx2_ipu_tests.exe) > "$log" 2>&1
+        r=$(grep -o 'pcsx2_ipu: [0-9]*/[0-9]*' "$log" | tail -1)
+        echo "${r:-pcsx2_ipu: 0/0 (no result: $log)}"
+        if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
+    else
+        echo "pcsx2_ipu: 0/0 (build failed: $OB_LOGS/ob-pcsx2-ipu-tests-build.log)"; red=1
+    fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
 }
@@ -170,8 +181,13 @@ cmd_recompile() {
     # Main ELF (recomp-cycle.sh).
     cd "$OB_WORK" || return 1
     "$OB_T/ps2xAnalyzer/ps2_analyzer.exe" SLPM_654.28 analyzed.toml > analyzer.log 2>&1 || { echo "analyzer failed"; return 1; }
-    sed -e 's|^ghidra_output = ""|ghidra_output = "main-functions.csv"|' analyzed.toml > decomp.toml
+    # Sony's libmpeg/libipu run as recompiled game code on the external IPU (movies plan, step 1), not as PS2Recomp's
+    # MPEG/IPU HLE stubs: Sofdec feeds libmpeg through its no-data callback, which the HLE never calls, and the HLE's
+    # sceIpuInit uses another game's addresses (reports/2026-10-24-m5-sound.md entries 8-10).
+    sed -e 's|^ghidra_output = ""|ghidra_output = "main-functions.csv"|' \
+        -e '/^ *"_\{0,1\}sce\(Mpeg\|Ipu\)[A-Za-z0-9_]*@0x[0-9A-Fa-f]*",\{0,1\}$/d' analyzed.toml > decomp.toml
     grep -c "instructions = \[" decomp.toml | sed 's/^/instruction patch blocks: /'
+    grep -c '"_\{0,1\}sce\(Mpeg\|Ipu\)' decomp.toml | sed 's/^/libmpeg\/libipu stubs left in config: /'
     rm -rf output
     "$OB_T/ps2xRecomp/ps2_recomp.exe" decomp.toml > recomp.log 2>&1 || { echo "recomp failed"; return 1; }
     e=$(grep -c '\[error\]' recomp.log)

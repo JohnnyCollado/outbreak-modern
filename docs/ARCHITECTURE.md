@@ -33,6 +33,8 @@ ps2EntryRunner.exe at run time
   IOP ............ interpreter running the game's own IRX modules; runs in batches at its next event (patch 0042), one-compare checks per instruction (0049)
   SPU2 (sound) ... PCSX2 2.9.134 SPU2 in-process (native/pcsx2_spu2; PS2X_SPU2=pcsx2|off, patch 0056), out through
                    a raylib float audio stream; the IOP runs the game's own sound modules (reports/2026-10-24-m5-sound.md)
+  IPU (movies) ... PCSX2 2.9.134 IPU in-process (native/pcsx2_ipu; PS2X_IPU=pcsx2|off, patch 0060) with DMA 3/4;
+                   Sony's libmpeg/libipu run as game code (ob.sh recompile drops their stubs); 0059, 0061 needed too
   window/input ... raylib window and pad (bindings: input.ini, patches 0038/0040); PCSX2 Vulkan draws into a child window;
                    title = frame counter
   disc ........... cdrom0: = the ISO 9660 image (ps2x/iop/iso9660.h: real LSNs, buffered reads) or the folder;

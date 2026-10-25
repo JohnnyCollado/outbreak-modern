@@ -1,0 +1,161 @@
+From 01b8d3774efb31a893e932ce80ea5a7cde9235a1 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 16:09:23 -0400
+Subject: [PATCH 59/61] EE kernel: thread syscalls return the thread id on
+ success (RotateThreadReadyQueue: the priority)
+
+Start/Terminate/Suspend/Resume/Wakeup/iWakeup/ReleaseWait/iReleaseWait returned KE_OK (0) on success; the EE
+kernel returns the thread id, and RotateThreadReadyQueue the priority argument (Play!'s HLE kernel, PS2OS.cpp).
+CRI ADX wakes its idle thread only when ResumeThread returns that thread's id, so the thread stayed asleep and
+Resident Evil Outbreak's Sofdec movies never decoded. Error codes are unchanged.
+
+Test: ps2_runtime_kernel_tests "thread syscalls return the thread id (Rotate: the priority) on success".
+---
+ .../src/lib/Kernel/Syscalls/Thread.cpp        | 36 ++++++++++++-------
+ ps2xTest/src/ps2_runtime_kernel_tests.cpp     | 32 +++++++++++++++++
+ 2 files changed, 55 insertions(+), 13 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+index fbb9746..f8f99f0 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+@@ -124,8 +124,10 @@ namespace ps2_syscalls
+                                   bool interruptSafe)
+         {
+             EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-            const int result = ee.rotateReadyQueue(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+-            setReturnS32(ctx, result);
++            const int priority = static_cast<int>(getRegU32(ctx, 4));
++            const int result = ee.rotateReadyQueue(priority, interruptSafe);
++            // On success the EE kernel returns the priority argument as passed.
++            setReturnS32(ctx, result == KE_OK ? priority : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+@@ -135,8 +137,9 @@ namespace ps2_syscalls
+                               bool interruptSafe)
+         {
+             EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-            const int result = ee.wakeupThread(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+-            setReturnS32(ctx, result);
++            const int id = static_cast<int>(getRegU32(ctx, 4));
++            const int result = ee.wakeupThread(id, interruptSafe);
++            setReturnS32(ctx, result == KE_OK ? id : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+@@ -146,8 +149,9 @@ namespace ps2_syscalls
+                              bool interruptSafe)
+         {
+             EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-            const int result = ee.releaseWait(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+-            setReturnS32(ctx, result);
++            const int id = static_cast<int>(getRegU32(ctx, 4));
++            const int result = ee.releaseWait(id, interruptSafe);
++            setReturnS32(ctx, result == KE_OK ? id : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+     }
+@@ -284,7 +288,7 @@ namespace ps2_syscalls
+             target->ownsStack = true;
+         }
+         const int result = ee.startThread(id, arg, *ctx, false);
+-        setReturnS32(ctx, result);
++        setReturnS32(ctx, result == KE_OK ? id : result);
+         ee.transferIfRequested(false);
+     }
+ 
+@@ -303,28 +307,34 @@ namespace ps2_syscalls
+     void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         EeScheduler &ee = scheduler(rdram, ctx, runtime);
++        const int id = static_cast<int>(getRegU32(ctx, 4));
+         uint32_t ownedStack = 0;
+-        const int result = ee.terminateThread(static_cast<int>(getRegU32(ctx, 4)), ownedStack, false);
++        const int result = ee.terminateThread(id, ownedStack, false);
+         if (ownedStack != 0u)
+         {
+             runtime->guestFree(ownedStack);
+         }
+-        setReturnS32(ctx, result);
++        setReturnS32(ctx, result == KE_OK ? id : result);
+     }
+ 
++    // Suspend, Resume, Start, Terminate, Wakeup and ReleaseWait return the thread id on success, as the EE
++    // kernel does (Play!'s HLE kernel, PS2OS.cpp). CRI ADX wakes its idle thread only when ResumeThread
++    // returns that thread's id; KE_OK (0) left the thread asleep and Sofdec movies never decoding.
+     void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-        const int result = ee.suspendThread(static_cast<int>(getRegU32(ctx, 4)), false);
+-        setReturnS32(ctx, result);
++        const int id = static_cast<int>(getRegU32(ctx, 4));
++        const int result = ee.suspendThread(id, false);
++        setReturnS32(ctx, result == KE_OK ? id : result);
+         ee.transferIfRequested(false);
+     }
+ 
+     void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         EeScheduler &ee = scheduler(rdram, ctx, runtime);
+-        const int result = ee.resumeThread(static_cast<int>(getRegU32(ctx, 4)), false);
+-        setReturnS32(ctx, result);
++        const int id = static_cast<int>(getRegU32(ctx, 4));
++        const int result = ee.resumeThread(id, false);
++        setReturnS32(ctx, result == KE_OK ? id : result);
+         ee.transferIfRequested(false);
+     }
+ 
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index f498228..2c171b6 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -27,6 +27,8 @@ namespace
+     constexpr int KE_UNKNOWN_THID = -407;
+     constexpr int KE_UNKNOWN_SEMID = -408;
+     constexpr int KE_DORMANT = -413;
++    constexpr int KE_NOT_SUSPEND = -415;
++    constexpr int KE_NOT_WAIT = -416;
+     constexpr int KE_SEMA_ZERO = -419;
+     constexpr int KE_SEMA_OVF = -420;
+     constexpr int KE_WAIT_DELETE = -425;
+@@ -644,6 +646,36 @@ void register_ps2_runtime_kernel_tests()
+             t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_PRIORITY, "errors are still returned as error codes");
+         });
+ 
++        tc.Run("thread syscalls return the thread id (Rotate: the priority) on success", [](TestCase &t)
++        {
++            // The EE kernel returns the thread id from Start/Suspend/Resume/Wakeup/Terminate on success (Play!'s
++            // HLE kernel, PS2OS.cpp). CRI ADX wakes its idle thread only if ResumeThread returned that id:
++            // KE_OK (0) left Outbreak's ADX idle thread asleep and Sofdec movies never decoding.
++            TestEnv env;
++            EeScheduler &ee = env.runtime.eeScheduler();
++            ee.reset(env.rdram.data(), env.ctx);
++            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
++            env.runtime.registerFunction(K_SCHED_HIGH, schedulerMainExit);
++            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u, 0u, 20, 0u});
++            const auto call = [&](void (*syscall)(uint8_t *, R5900Context *, PS2Runtime *), uint32_t a0)
++            {
++                setRegU32(env.ctx, 4, a0);
++                setRegU32(env.ctx, 5, 0u);
++                syscall(env.rdram.data(), &env.ctx, &env.runtime);
++                return getRegS32(env.ctx, 2);
++            };
++            const uint32_t uid = static_cast<uint32_t>(id);
++            t.Equals(call(StartThread, uid), id, "StartThread must return the thread id");
++            t.Equals(call(SuspendThread, uid), id, "SuspendThread must return the thread id");
++            t.Equals(call(ResumeThread, uid), id, "ResumeThread must return the thread id");
++            t.Equals(call(ResumeThread, uid), KE_NOT_SUSPEND, "ResumeThread errors are still error codes");
++            t.Equals(call(WakeupThread, uid), id, "WakeupThread must return the thread id");
++            t.Equals(call(iWakeupThread, uid), id, "iWakeupThread must return the thread id");
++            t.Equals(call(RotateThreadReadyQueue, 20u), 20, "RotateThreadReadyQueue must return the priority");
++            t.Equals(call(ReleaseWaitThread, uid), KE_NOT_WAIT, "ReleaseWaitThread errors are still error codes");
++            t.Equals(call(TerminateThread, uid), id, "TerminateThread must return the thread id");
++        });
++
+         tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)
+         {
+             TestEnv env;
+-- 
+2.46.2.windows.1
+

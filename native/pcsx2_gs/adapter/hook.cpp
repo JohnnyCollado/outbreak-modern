@@ -5,9 +5,11 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_pnach.h"
 #include "runtime/ps2_spu2_external.h"
+#include "runtime/ps2_ipu_external.h"
 
 #include "ob_gs_bridge.h"
 #include "ob_spu2_bridge.h"
+#include "ob_ipu_bridge.h"
 
 #include <cstring>
 #include <string>
@@ -106,4 +108,33 @@ void ps2ExternalSpu2Pull(float* frames, uint32_t count)
 uint32_t ps2ExternalSpu2SampleRate()
 {
 	return ob_spu2_sample_rate();
+}
+
+// ---- IPU (PS2Recomp patch 0060): PCSX2's IPU behind native/pcsx2_ipu/adapter/ob_ipu_bridge.h ----
+namespace
+{
+	class Pcsx2Ipu final : public ps2x::IpuDevice
+	{
+	public:
+		~Pcsx2Ipu() override { ob_ipu_close(); }
+		uint32_t read32(uint32_t address, uint64_t cycle) override { return ob_ipu_read32(address, cycle); }
+		void write32(uint32_t address, uint32_t value, uint64_t cycle) override { ob_ipu_write32(address, value, cycle); }
+		void fifoRead(uint32_t quad[4], uint64_t cycle) override { ob_ipu_fifo_read(quad, cycle); }
+		void fifoWrite(const uint32_t quad[4], uint64_t cycle) override { ob_ipu_fifo_write(quad, cycle); }
+		uint32_t dmaRead(uint32_t address) override { return ob_ipu_dma_read(address); }
+		void dmaWrite(uint32_t address, uint32_t value, uint64_t cycle) override { ob_ipu_dma_write(address, value, cycle); }
+		void dmacState(bool enabled, bool suspended, uint64_t cycle) override { ob_ipu_dmac_state(enabled, suspended, cycle); }
+		void advance(uint64_t cycle) override { ob_ipu_advance(cycle); }
+		uint64_t nextEvent() override { return ob_ipu_next_event(); }
+		uint32_t takeEvents() override { return ob_ipu_take_events(); } // OB_IPU_EV_* = IpuDevice::Event bits
+	};
+	static_assert(OB_IPU_EV_INTC == ps2x::IpuDevice::EventIntc && OB_IPU_EV_DMA3 == ps2x::IpuDevice::EventDma3 &&
+		OB_IPU_EV_DMA4 == ps2x::IpuDevice::EventDma4);
+} // namespace
+
+ps2x::IpuDevice* ps2CreateExternalIpu(uint8_t* rdram, uint32_t ramSize, uint8_t* scratchpad, uint32_t scratchpadSize)
+{
+	if (!ob_ipu_open(rdram, ramSize, scratchpad, scratchpadSize, 0))
+		return nullptr;
+	return new Pcsx2Ipu();
 }

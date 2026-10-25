@@ -1,0 +1,536 @@
+From 7a21a783cc888c745337ac2ed7026fbecefa467e Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 16:10:05 -0400
+Subject: [PATCH 60/61] Runtime: optional external IPU (MPEG-2 decoder) with
+ DMA channels 3/4; PS2X_IPU=pcsx2|off from the external library
+
+ps2_ipu_external.h: ps2x::IpuDevice, setIpuDevice, ps2CreateExternalIpu (PS2X_EXTERNAL_GS). When one is installed,
+PS2Memory routes the IPU registers (CMD/CTRL writes; 64-bit halves, BP and TOP read-only), the FIFOs (IPU_in
+assembled from four word writes, IPU_out pulled on the first word; read128 too) and the channel 3/4 registers to it,
+reads IPU registers through it in read64 (libipu reads IPU_CMD/IPU_TOP with ld), and mirrors D_CTRL.DMAE and the
+D_ENABLEW suspend bit. advanceEeTimers advances it on the EE cycle count and returns its INTC cause 8 (bit 8) and the
+end of channel 3/4 (D_STAT 3/4 set, causes queued; bit 31); cyclesUntilNextEeTimerInterrupt includes its next event;
+EeScheduler::processPendingEvents dispatches cause 8 and drains the queued DMAC handlers. Created after memory init.
+No header seen by generated code changes. Resident Evil Outbreak's movies run Sony's libmpeg/libipu on it.
+
+Test: PS2Memory "an external IPU gets its registers, FIFOs, channels 3/4 and DMAC state, and its events raise
+interrupts" (fake device).
+---
+ .../include/runtime/ps2_ipu_external.h        |  47 ++++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp    |  10 ++
+ ps2xRuntime/src/lib/ps2_memory.cpp            | 158 +++++++++++++++++-
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  27 +++
+ ps2xTest/src/ps2_memory_tests.cpp             | 123 ++++++++++++++
+ 5 files changed, 364 insertions(+), 1 deletion(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_ipu_external.h
+
+diff --git a/ps2xRuntime/include/runtime/ps2_ipu_external.h b/ps2xRuntime/include/runtime/ps2_ipu_external.h
+new file mode 100644
+index 0000000..b76a73a
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_ipu_external.h
+@@ -0,0 +1,47 @@
++#ifndef PS2_IPU_EXTERNAL_H
++#define PS2_IPU_EXTERNAL_H
++
++#include <cstdint>
++
++// Optional external IPU (the EE's MPEG-2 decoder) with its DMA channels 3 (fromIPU) and 4 (toIPU), from the same
++// external library as the GS (PS2X_EXTERNAL_GS_DIR). PS2X_IPU = pcsx2 (the default when built) | off. When one is
++// installed, PS2Memory hands it every access to the IPU registers (0x10002000-0x1000203F), the FIFOs (0x10007000 out,
++// 0x10007010 in; 128-bit, or as four 32-bit words) and the channel 3/4 registers (0x1000B000-0x1000B0FF,
++// 0x1000B400-0x1000B4FF), tells it D_CTRL.DMAE and the D_ENABLEW suspend bit, advances it with the EE cycle count
++// (PS2Memory::advanceEeTimers) and raises what it reports: INTC cause 8 and D_STAT 3/4 with their DMAC handlers.
++// Without one, those addresses stay plain register storage (no decoding, channel starts ignored).
++namespace ps2x
++{
++    class IpuDevice
++    {
++    public:
++        enum : uint32_t
++        {
++            EventIntc = 1, // INTC cause 8 (IPU)
++            EventDma3 = 2, // channel 3 finished: D_STAT bit 3
++            EventDma4 = 4, // channel 4 finished: D_STAT bit 4
++        };
++
++        virtual ~IpuDevice() = default;
++        virtual uint32_t read32(uint32_t address, uint64_t cycle) = 0;
++        virtual void write32(uint32_t address, uint32_t value, uint64_t cycle) = 0;
++        virtual void fifoRead(uint32_t quad[4], uint64_t cycle) = 0;
++        virtual void fifoWrite(const uint32_t quad[4], uint64_t cycle) = 0;
++        virtual uint32_t dmaRead(uint32_t address) = 0;
++        virtual void dmaWrite(uint32_t address, uint32_t value, uint64_t cycle) = 0;
++        virtual void dmacState(bool enabled, bool suspended, uint64_t cycle) = 0;
++        virtual void advance(uint64_t cycle) = 0;
++        virtual uint64_t nextEvent() = 0; // UINT64_MAX: none
++        virtual uint32_t takeEvents() = 0; // Event* bits since the last call
++    };
++
++    // Installs (or with null removes) the device PS2Memory routes to; the caller keeps ownership.
++    void setIpuDevice(IpuDevice *device);
++    IpuDevice *ipuDevice();
++}
++
++#ifdef PS2X_EXTERNAL_GS
++ps2x::IpuDevice *ps2CreateExternalIpu(uint8_t *rdram, uint32_t ramSize, uint8_t *scratchpad, uint32_t scratchpadSize); // null = failure
++#endif
++
++#endif
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 4e88ede..ff19f9a 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1777,6 +1777,16 @@ void EeScheduler::processPendingEvents()
+             dispatchIrq(false, 9u + timer);
+         }
+     }
++    // The external IPU (ps2_ipu_external.h) reports through advanceEeTimers too: bit 8 = INTC cause 8, bit 31 = its
++    // DMA channel 3/4 ended (D_STAT set, causes queued), whose DMAC handlers no guest store drains on its own.
++    if ((timerInterrupts & (1u << 8)) != 0u)
++    {
++        dispatchIrq(false, 8u);
++    }
++    if ((timerInterrupts & (1u << 31)) != 0u)
++    {
++        m_runtime.drainCompletedDmacHandlers(m_rdram);
++    }
+     std::deque<EeEvent> pending;
+     {
+         std::lock_guard lock(m_eventMutex);
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 09108be..b10a497 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -12,9 +12,40 @@
+ #include <vector>
+ 
+ #include "runtime/ps2_vu1_external.h"
++#include "runtime/ps2_ipu_external.h"
+ 
+ namespace
+ {
++    // External IPU (ps2_ipu_external.h). File-local so ps2_memory.h (seen by generated code) is unchanged. Its clock is
++    // the EE cycle count advanceEeTimers accumulates; the next event is cached after every call into the device.
++    struct ExternalIpu
++    {
++        ps2x::IpuDevice *device = nullptr;
++        uint64_t cycle = 0u;
++        uint64_t nextEvent = std::numeric_limits<uint64_t>::max();
++        uint32_t fifoIn[4] = {};  // 0x10007010-0x1000701C written as words: the quadword goes in with the last
++        uint32_t fifoOut[4] = {}; // 0x10007000 read as words: the first read pulls the quadword
++        bool fifoOutValid = false;
++    };
++
++    ExternalIpu &externalIpu()
++    {
++        static ExternalIpu ipu;
++        return ipu;
++    }
++
++    void refreshIpuNextEvent()
++    {
++        ExternalIpu &ipu = externalIpu();
++        ipu.nextEvent = ipu.device ? ipu.device->nextEvent() : std::numeric_limits<uint64_t>::max();
++    }
++
++    bool isIpuAddress(uint32_t address)
++    {
++        return (address >= 0x10002000u && address < 0x10002040u) || (address >= 0x10007000u && address < 0x10007020u) ||
++               (address >= 0x1000B000u && address < 0x1000B100u) || (address >= 0x1000B400u && address < 0x1000B500u);
++    }
++
+     // VU1 memories an external VU1 backend handed PS2Memory (ps2_vu1_external.h vu1Memory): the backend
+     // owns them, so PS2Memory never delete[]s them. File-local so ps2_memory.h (seen by generated code) is unchanged.
+     std::vector<const uint8_t *> &externalVu1Buffers()
+@@ -457,12 +488,55 @@ void PS2Memory::resetEeTimers() noexcept
+     m_eeTimers = {};
+ }
+ 
++void ps2x::setIpuDevice(IpuDevice *device)
++{
++    ExternalIpu &ipu = externalIpu();
++    ipu.device = device;
++    ipu.fifoOutValid = false;
++    if (device)
++        device->dmacState(true, false, ipu.cycle);
++    refreshIpuNextEvent();
++}
++
++ps2x::IpuDevice *ps2x::ipuDevice()
++{
++    return externalIpu().device;
++}
++
+ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+ {
+     if (eeCycles == 0u)
+     {
+         return 0u;
+     }
++    uint32_t ipuInterrupt = 0u;
++    ExternalIpu &ipu = externalIpu();
++    ipu.cycle += eeCycles;
++    if (ipu.device && ipu.cycle >= ipu.nextEvent)
++    {
++        // Events the IPU reports: INTC cause 8 (returned with the timer causes) and the end of channel 3/4, which
++        // sets D_STAT 3/4 (CIS as the GIF path does) and queues the channel's DMAC handlers.
++        ipu.device->advance(ipu.cycle);
++        refreshIpuNextEvent();
++        const uint32_t events = ipu.device->takeEvents();
++        if (events & ps2x::IpuDevice::EventIntc)
++            ipuInterrupt = 1u << 8;
++        for (const uint32_t channel : {3u, 4u})
++        {
++            if ((events & (channel == 3u ? ps2x::IpuDevice::EventDma3 : ps2x::IpuDevice::EventDma4)) == 0u)
++                continue;
++            constexpr uint32_t kDStat = 0x1000E010u;
++            uint32_t dstat = m_ioRegisters.count(kDStat) ? m_ioRegisters[kDStat] : 0u;
++            dstat |= 1u << channel;
++            if (((dstat & 0x3FFu) & ((dstat >> 16u) & 0x3FFu)) != 0u)
++                dstat |= 1u << 31u;
++            else
++                dstat &= ~(1u << 31u);
++            m_ioRegisters[kDStat] = dstat;
++            queueCompletedDmacCause(channel);
++            ipuInterrupt |= 1u << 31; // tells the scheduler to drain the queued DMAC handlers
++        }
++    }
+ 
+     constexpr uint32_t kGifStat = 0x10003020u;
+     constexpr uint32_t kGifFqcMask = 0x1F000000u;
+@@ -530,12 +604,17 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+             interruptMask |= 1u << index;
+         }
+     }
+-    return interruptMask;
++    return interruptMask | ipuInterrupt;
+ }
+ 
+ uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+ {
+     uint64_t nearest = std::numeric_limits<uint64_t>::max();
++    // The external IPU's next event counts as a timer deadline, so an idle EE (every thread waiting on its DMAC
++    // handler) still reaches it.
++    const ExternalIpu &ipu = externalIpu();
++    if (ipu.device && ipu.nextEvent != std::numeric_limits<uint64_t>::max())
++        nearest = ipu.nextEvent > ipu.cycle ? ipu.nextEvent - ipu.cycle : 1u;
+     for (const EeTimer &timer : m_eeTimers)
+     {
+         if ((timer.mode & kEeTimerModeCue) == 0u)
+@@ -876,6 +955,9 @@ uint64_t PS2Memory::read64(uint32_t address)
+     // to avoid any side-effects from read32 handlers.
+     if (isIoRegister(address))
+     {
++        // The external IPU's registers read through it (libipu reads IPU_CMD and IPU_TOP with ld).
++        if (externalIpu().device && isIpuAddress(address))
++            return static_cast<uint64_t>(readIORegister(address)) | (static_cast<uint64_t>(readIORegister(address + 4u)) << 32);
+         uint32_t lo = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
+         uint32_t hi = m_ioRegisters.count(address + 4) ? m_ioRegisters[address + 4] : 0u;
+         return static_cast<uint64_t>(lo) | (static_cast<uint64_t>(hi) << 32);
+@@ -911,6 +993,15 @@ __m128i PS2Memory::read128(uint32_t address)
+         return _mm_loadu_si128(reinterpret_cast<const __m128i *>(vuMem + vuOffset));
+     }
+ 
++    if (ExternalIpu &ipu = externalIpu(); ipu.device && physAddr == 0x10007000u)
++    {
++        // IPU_out: one quadword (ps2_ipu_external.h).
++        alignas(16) uint32_t quad[4] = {};
++        ipu.device->fifoRead(quad, ipu.cycle);
++        refreshIpuNextEvent();
++        return _mm_load_si128(reinterpret_cast<const __m128i *>(quad));
++    }
++
+     // 128-bit reads are primarily for quad-word loads in the EE, which are only valid for RAM areas
+     // Return zeroes for unsupported areas
+     return _mm_setzero_si128();
+@@ -1179,6 +1270,41 @@ void PS2Memory::write128(uint32_t address, __m128i value)
+ 
+ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+ {
++    if (ExternalIpu &ipu = externalIpu(); ipu.device)
++    {
++        // External IPU (ps2_ipu_external.h): its registers, FIFOs and channels 3/4 go to it; the DMAC master enable
++        // and suspend are mirrored to it and then stored as usual.
++        if (isIpuAddress(address))
++        {
++            if (address >= 0x10007000u && address < 0x10007020u)
++            {
++                if (address >= 0x10007010u)
++                {
++                    ipu.fifoIn[(address >> 2) & 3u] = value;
++                    if ((address & 0xFu) == 0xCu)
++                        ipu.device->fifoWrite(ipu.fifoIn, ipu.cycle);
++                }
++            }
++            else if (address < 0x10002040u)
++            {
++                if ((address & 0xFu) == 0u) // CMD, CTRL (the 64-bit halves, BP and TOP are read-only)
++                    ipu.device->write32(address, value, ipu.cycle);
++            }
++            else
++            {
++                ipu.device->dmaWrite(address, value, ipu.cycle);
++            }
++            refreshIpuNextEvent();
++            return true;
++        }
++        if (address == 0x1000E000u || address == 0x1000F590u)
++        {
++            const uint32_t dctrl = address == 0x1000E000u ? value : (m_ioRegisters.count(0x1000E000u) ? m_ioRegisters[0x1000E000u] : 1u);
++            const uint32_t enablew = address == 0x1000F590u ? value : (m_ioRegisters.count(0x1000F590u) ? m_ioRegisters[0x1000F590u] : 0u);
++            ipu.device->dmacState((dctrl & 1u) != 0u, (enablew & 0x10000u) != 0u, ipu.cycle);
++            refreshIpuNextEvent();
++        }
++    }
+     size_t timerIndex = 0u;
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+@@ -2366,6 +2492,36 @@ int PS2Memory::pollDmaRegisters()
+ 
+ uint32_t PS2Memory::readIORegister(uint32_t address)
+ {
++    if (ExternalIpu &ipu = externalIpu(); ipu.device && isIpuAddress(address))
++    {
++        uint32_t value = 0u;
++        if (address >= 0x10007000u && address < 0x10007020u)
++        {
++            if (address < 0x10007010u)
++            {
++                // IPU_out read as words: the first word pulls one quadword, the next three return the rest.
++                const uint32_t word = (address >> 2) & 3u;
++                if (word == 0u || !ipu.fifoOutValid)
++                {
++                    ipu.device->fifoRead(ipu.fifoOut, ipu.cycle);
++                    ipu.fifoOutValid = true;
++                }
++                value = ipu.fifoOut[word];
++                if (word == 3u)
++                    ipu.fifoOutValid = false;
++            }
++        }
++        else if (address < 0x10002040u)
++        {
++            value = ipu.device->read32(address, ipu.cycle);
++        }
++        else
++        {
++            value = ipu.device->dmaRead(address);
++        }
++        refreshIpuNextEvent();
++        return value;
++    }
+     size_t timerIndex = 0u;
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 6b84320..a11f7a6 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -8,6 +8,7 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_spu2_external.h"
++#include "runtime/ps2_ipu_external.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_fps_counter.h"
+ #include "runtime/ps2_game_source.h"
+@@ -55,6 +56,7 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
+ #ifdef PS2X_EXTERNAL_GS
+ static AudioStream s_spu2Stream{}; // the external SPU2's output (patch 0056)
+ static ps2x::iop::Spu2Device *s_externalSpu2 = nullptr; // from the external library (patch 0056); null = none
++static ps2x::IpuDevice *s_externalIpu = nullptr; // from the external library (patch 0060); null = none
+ #endif
+ #if defined(PLATFORM_VITA)
+ static constexpr int HOST_WINDOW_WIDTH = 960;
+@@ -630,6 +632,12 @@ PS2Runtime::~PS2Runtime()
+             delete s_externalSpu2;
+             s_externalSpu2 = nullptr;
+         }
++        if (s_externalIpu)
++        {
++            ps2x::setIpuDevice(nullptr);
++            delete s_externalIpu;
++            s_externalIpu = nullptr;
++        }
+ #endif
+         m_iopSubsystem.reset();
+         m_iopHost.reset();
+@@ -1036,6 +1044,25 @@ bool PS2Runtime::initialize(const char *title)
+             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
+             return false;
+         }
++
++        // PS2X_IPU selects the IPU (patch 0060): unset or "pcsx2" = the external library's (PCSX2's) on EE RAM and
++        // the scratchpad, installed for PS2Memory's IPU/FIFO/DMA 3-4 addresses; "off" = none (plain registers,
++        // channel 3/4 starts ignored). One that cannot start leaves it off with one log line.
++#ifdef PS2X_EXTERNAL_GS
++        {
++            const char *ipuEnv = std::getenv("PS2X_IPU");
++            const std::string ipuMode = (ipuEnv && *ipuEnv) ? ipuEnv : "pcsx2";
++            if (ipuMode == "pcsx2" && !s_externalIpu)
++            {
++                s_externalIpu = ps2CreateExternalIpu(m_memory.getRDRAM(), PS2_RAM_SIZE, m_memory.getScratchpad(),
++                                                     PS2_SCRATCHPAD_SIZE);
++                ps2x::setIpuDevice(s_externalIpu);
++                std::cout << "[ipu] " << (s_externalIpu ? "pcsx2" : "pcsx2 failed to start: off") << std::endl;
++            }
++            else if (ipuMode != "pcsx2")
++                std::cout << "[ipu] off" << (ipuMode == "off" ? "" : " (unknown PS2X_IPU, pcsx2|off)") << std::endl;
++        }
++#endif
+ #if defined(PLATFORM_VITA)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 37a9c42..602f4cb 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -6,15 +6,76 @@
+ #include "ps2_runtime_macros.h"
+ #include "Stubs/DMA.h"
+ #include "Stubs/GS.h"
++#include "runtime/ps2_ipu_external.h"
+ 
+ #include <algorithm>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstring>
++#include <string>
+ #include <vector>
+ 
+ namespace
+ {
++    // Records what PS2Memory hands an external IPU (patch 0060) and reports the events a test asks for.
++    class FakeIpu final : public ps2x::IpuDevice
++    {
++    public:
++        std::vector<std::string> log;
++        uint32_t quadIn[4] = {};
++        bool dmacEnabled = false, dmacSuspended = true;
++        uint64_t lastCycle = 0u, next = UINT64_MAX, nowCycle = 0u; // nowCycle: the clock at the last DMAC update
++        uint32_t pending = 0u;
++
++        uint32_t read32(uint32_t address, uint64_t cycle) override
++        {
++            lastCycle = cycle;
++            log.push_back("r" + std::to_string(address & 0xFFFFu));
++            return 0xC0DE0000u | (address & 0xFFu);
++        }
++        void write32(uint32_t address, uint32_t value, uint64_t cycle) override
++        {
++            lastCycle = cycle;
++            log.push_back("w" + std::to_string(address & 0xFFFFu) + "=" + std::to_string(value));
++        }
++        void fifoRead(uint32_t quad[4], uint64_t) override
++        {
++            for (uint32_t i = 0; i < 4; ++i)
++                quad[i] = 0x11110000u + i;
++            log.push_back("fifo-out");
++        }
++        void fifoWrite(const uint32_t quad[4], uint64_t) override
++        {
++            std::memcpy(quadIn, quad, sizeof(quadIn));
++            log.push_back("fifo-in");
++        }
++        uint32_t dmaRead(uint32_t address) override { return 0xD0000000u | (address & 0xFFFFu); }
++        void dmaWrite(uint32_t address, uint32_t value, uint64_t) override
++        {
++            log.push_back("d" + std::to_string(address & 0xFFFFu) + "=" + std::to_string(value));
++        }
++        void dmacState(bool enabled, bool suspended, uint64_t cycle) override
++        {
++            nowCycle = cycle;
++            dmacEnabled = enabled;
++            dmacSuspended = suspended;
++        }
++        void advance(uint64_t cycle) override
++        {
++            lastCycle = cycle;
++            if (cycle >= next)
++                next = UINT64_MAX;
++        }
++        uint64_t nextEvent() override { return next; }
++        uint32_t takeEvents() override
++        {
++            const uint32_t e = next == UINT64_MAX ? pending : 0u;
++            if (e)
++                pending = 0u;
++            return e;
++        }
++    };
++
+     uint32_t makeVifCmd(uint8_t opcode, uint8_t num, uint16_t imm)
+     {
+         return (static_cast<uint32_t>(opcode) << 24) |
+@@ -2505,5 +2566,67 @@ void register_ps2_memory_tests()
+             t.IsTrue(threwRead32, "unaligned read32 should throw");
+             t.IsTrue(threwWrite64, "unaligned write64 should throw");
+         });
++
++        tc.Run("an external IPU gets its registers, FIFOs, channels 3/4 and DMAC state, and its events raise interrupts", [](TestCase &t)
++        {
++            // Patch 0060: Resident Evil Outbreak's movies run Sony's libmpeg/libipu on the IPU, fed and drained by
++            // DMA channels 4 and 3; without an IPU the channel starts were ignored and no picture was decoded.
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            FakeIpu ipu;
++            ps2x::setIpuDevice(&ipu);
++            t.IsTrue(ipu.dmacEnabled && !ipu.dmacSuspended, "installing the IPU tells it the DMAC runs");
++            if (!ipu.dmacEnabled)
++            {
++                // Not installed: the accesses below would take the old register/DMA paths instead.
++                ps2x::setIpuDevice(nullptr);
++                return;
++            }
++
++            mem.write32(0x10002010u, 0x40000000u); // IPU_CTRL reset
++            mem.write64(0x10002000u, 0x2C010000ull); // IPU_CMD as a 64-bit store: the high half is not a command
++            t.Equals(mem.read32(0x10002010u), 0xC0DE0010u, "IPU_CTRL reads come from the IPU");
++            t.Equals(mem.read64(0x10002000u), 0xC0DE0004C0DE0000ull, "64-bit IPU_CMD reads (libipu's ld) come from the IPU");
++            const bool regs = ipu.log.size() >= 5 && ipu.log[0] == "w8208=1073741824" && ipu.log[1] == "w8192=738263040" &&
++                              ipu.log[2] == "r8208" && ipu.log[3] == "r8192" && ipu.log[4] == "r8196";
++            t.IsTrue(regs, "IPU_CTRL and IPU_CMD writes reach the IPU once each, then the reads, in order");
++
++            alignas(16) uint32_t quad[4] = {1u, 2u, 3u, 4u};
++            mem.write128(0x10007010u, _mm_load_si128(reinterpret_cast<const __m128i *>(quad)));
++            t.IsTrue(ipu.quadIn[0] == 1u && ipu.quadIn[3] == 4u && ipu.log.back() == "fifo-in",
++                     "a 128-bit store to IPU_in is one quadword into the IPU");
++            alignas(16) uint32_t out[4] = {};
++            _mm_store_si128(reinterpret_cast<__m128i *>(out), mem.read128(0x10007000u));
++            t.IsTrue(out[0] == 0x11110000u && out[3] == 0x11110003u, "a 128-bit load from IPU_out is one quadword from the IPU");
++
++            mem.write32(0x1000B410u, 0x1000u);  // D4_MADR
++            mem.write32(0x1000B400u, 0x101u);   // D4_CHCR: start
++            mem.write32(0x1000B000u, 0x100u);   // D3_CHCR: start
++            t.IsTrue(ipu.log.back() == "d45056=256" && ipu.log[ipu.log.size() - 2] == "d46080=257",
++                     "channel 3/4 register writes, starts included, reach the IPU");
++            t.Equals(mem.read32(0x1000B420u), 0xD000B420u, "channel 4 reads come from the IPU");
++            mem.write32(0x1000F590u, 0x10000u); // D_ENABLEW: suspend
++            t.IsTrue(ipu.dmacSuspended, "a DMAC suspend is mirrored to the IPU");
++            mem.write32(0x1000F590u, 0u);
++            mem.write32(0x1000E000u, 0u);       // D_CTRL: DMAE off
++            t.IsTrue(!ipu.dmacEnabled && !ipu.dmacSuspended, "resume and DMAE are mirrored to the IPU");
++            mem.write32(0x1000E000u, 1u);
++
++            mem.consumeCompletedDmacCauses();
++            ipu.next = ipu.nowCycle + 5000u; // the IPU clock is the EE cycles PS2Memory has counted so far
++            ipu.pending = ps2x::IpuDevice::EventIntc | ps2x::IpuDevice::EventDma3 | ps2x::IpuDevice::EventDma4;
++            mem.write32(0x10002010u, 0u); // any IPU access refreshes the next event
++            t.IsTrue(mem.cyclesUntilNextEeTimerInterrupt() <= 5000u, "the IPU's next event bounds the idle wait");
++            uint32_t raised = mem.advanceEeTimers(1000u);
++            t.Equals(raised & ((1u << 8) | (1u << 31)), 0u, "nothing is raised before the IPU's event");
++            raised = mem.advanceEeTimers(4000u);
++            t.Equals(raised & (1u << 8), 1u << 8, "the IPU interrupt comes back as INTC cause 8");
++            t.Equals(raised & (1u << 31), 1u << 31, "a channel 3/4 end asks for its DMAC handlers");
++            t.Equals(mem.readIORegister(0x1000E010u) & 0x18u, 0x18u, "D_STAT bits 3 and 4 are set");
++            const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
++            t.IsTrue(causes.size() == 2u && causes[0] == 3u && causes[1] == 4u, "DMAC causes 3 and 4 are queued");
++            ps2x::setIpuDevice(nullptr);
++        });
++
+     });
+ }
+-- 
+2.46.2.windows.1
+
