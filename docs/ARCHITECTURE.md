@@ -35,10 +35,13 @@ ps2EntryRunner.exe at run time
                    a raylib float audio stream; the IOP runs the game's own sound modules (reports/2026-10-24-m5-sound.md)
   IPU (movies) ... PCSX2 2.9.134 IPU in-process (native/pcsx2_ipu; PS2X_IPU=pcsx2|off, patch 0060) with DMA 3/4;
                    Sony's libmpeg/libipu run as game code (ob.sh recompile drops their stubs); 0059, 0061 needed too
+  SIO2 (cards) ... PCSX2 2.9.134 SIO2 + memory cards in-process (native/pcsx2_sio2; PS2X_SIO2=pcsx2|off, patch 0071)
+                   with DMA 11/12; PCSX2 .ps2 card files in outbreak.ini saves (0072); the game's own libmc2/libdbc
+                   (0073 keeps sceDbcInit) and disc modules sio2man/mc2_s1 (reports/2026-10-26-memory-cards.md)
   window/input ... raylib window and pad (bindings: input.ini, patches 0038/0040); PCSX2 Vulkan draws into a child window;
                    title = frame counter
   disc ........... cdrom0: = the ISO 9660 image (ps2x/iop/iso9660.h: real LSNs, buffered reads) or the folder;
-                   settings outbreak.ini (game, textures, mods; patch 0043)
+                   settings outbreak.ini (game, textures, mods; patch 0043; saves, 0072)
   Android ........ arm64 .so in an APK (NativeActivity, no Java); PCSX2 Vulkan on the ANativeWindow; VU1 interpreter
                    (docs/ops/android.md)
   diagnostics .... optional plugin ob_diag.dll (native/ob_diag) on the hook API runtime/ps2_diag_hooks.h

@@ -4,14 +4,14 @@
 ; Read once at start-up. One "key = value" per line; a line starting with ';' or '#' is a comment (so a path
 ; may contain both). Keys are case-insensitive. A value may be in double quotes. A relative path is relative
 ; to this file's folder. A bad line is logged once as "[settings] line N: ..." and ignored; the runner logs
-; "[settings] from <path> (N bad line(s)): game=... textures=... mods=... upscale=... window=...".
+; "[settings] from <path> (N bad line(s)): game=... textures=... mods=... saves=... upscale=... window=...".
 
 ; game: your copy of the game. One of
 ;   - the disc image (ISO 9660, .iso), read in place: nothing is extracted or loaded whole;
 ;   - a folder with the disc's files copied out (the boot file comes from its SYSTEM.CNF);
 ;   - the boot ELF inside such a folder (SLPM_654.28), as before.
 ; A path on the command line wins over this. Android: when game is not set, the one .iso in the app's files
-; dir is used. Memory cards (mc0) live beside the image, or in the folder.
+; dir is used.
 game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 
 ; textures: optional root of texture packs in PCSX2's layout, <root>\<serial>\replacements
@@ -20,6 +20,16 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 ; a relative root such as "textures = textures" is the app's files folder).
 ; The start-up log line "[pcsx2-gs] open ... replacements=found" confirms the pack was seen.
 ; textures = D:\Games\PS2\textures
+
+; saves: the folder that holds your memory cards (patch 0072), PCSX2's own .ps2 card files: Mcd001.ps2 is the
+; card in slot 1, Mcd002.ps2 (only if you put one there) the card in slot 2. The same files PCSX2 keeps in its
+; memcards folder, so a card can be copied between PCSX2 and the runner either way (8 MB cards; close PCSX2 first:
+; a card in use by one cannot be opened by the other). A missing Mcd001.ps2 is created blank; the game then
+; offers to format it, as with a new card on a PS2. Saves reach the file as soon as the game writes them.
+; Default: a "memcards" folder beside ps2EntryRunner.exe (Windows), or in the app's files dir on Android
+; (/sdcard/Android/data/com.outbreakmodern.app/files/memcards). The log shows the folder used:
+; "[sio2] pcsx2 memory cards in <folder> (settings|default)". PS2X_SAVES=<folder> wins over this.
+; saves = D:\Games\PS2\saves
 
 ; mods: optional root for mods. Today: PCSX2 .pnach patch files in <root>\<serial>\ (here
 ; <root>\SLPM-65428\*.pnach), memory writes only (patch 0050). Code patches are skipped with a log line: the

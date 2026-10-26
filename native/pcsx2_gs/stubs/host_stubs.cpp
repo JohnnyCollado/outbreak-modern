@@ -121,3 +121,7 @@ u8* SysMemory::GetCodePtr(size_t offset)
 		"ob_pcsx2_gs: only the SWrec code range exists");
 	return s_swrec + (offset - HostMemoryMap::SWrecOffset);
 }
+
+// TRANSLATE_SV/TRANSLATE_FS (Host.h): untranslated. Used by the SPU2's AudioStream names and the memory-card
+// messages (native/pcsx2_spu2, native/pcsx2_sio2).
+const char* Host::TranslateToCString(const std::string_view, const std::string_view msg) { return msg.data(); }

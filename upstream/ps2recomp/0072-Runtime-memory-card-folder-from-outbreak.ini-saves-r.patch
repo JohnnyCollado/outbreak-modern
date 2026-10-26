@@ -1,0 +1,191 @@
+From a652bb9df6b84011fde79cf14058d71bb7f2e71a Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:50:47 -0400
+Subject: [PATCH 72/73] Runtime: memory card folder from outbreak.ini saves
+ (relative to the settings file), PS2X_SAVES wins and uses the cards as found
+ (an empty folder = no card), default <settings folder>/memcards with a
+ missing slot 1 card created
+
+---
+ ps2xRuntime/include/runtime/ps2_game_source.h |  8 +++++
+ .../include/runtime/ps2_sio2_external.h       |  7 ++--
+ ps2xRuntime/src/lib/ps2_game_source.cpp       | 32 ++++++++++++++++++-
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 15 ++++++---
+ ps2xTest/src/ps2_game_source_tests.cpp        | 24 ++++++++++++++
+ 5 files changed, 77 insertions(+), 9 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index 653a1b3..5671b92 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -51,6 +51,7 @@ namespace ps2game
+         std::filesystem::path game;     // empty = not set
+         std::filesystem::path textures; // empty = not set
+         std::filesystem::path mods;     // empty = not set
++        std::filesystem::path saves;    // memory card folder; empty = not set (<settings folder>/memcards)
+         std::string gpuDriver;          // gpu_driver as written; empty = not set (system)
+         std::string gsSelfRead;         // gs_self_read: auto|copy|barrier|fetch (lower case); empty = not set (auto)
+         std::string vu1;                // vu1: "mvu" or "interp" (lower case); empty = not set (platform default)
+@@ -81,6 +82,13 @@ namespace ps2game
+     // <textures>/<serial>/replacements (PCSX2's texture replacement layout); empty when textures is not set.
+     std::filesystem::path textureReplacementDirectory(std::string_view serial);
+ 
++    // The memory card folder (patch 0072): PS2X_SAVES when set (scripted runs), else the settings file's saves, else
++    // <settings folder>/memcards (Windows: beside the exe; Android: the activity's external files dir). source says
++    // which ("PS2X_SAVES", "settings" or "default"). The pure form takes the three inputs; the other reads them.
++    std::filesystem::path memoryCardDirectory(const char *env, const Settings &settings,
++                                              const std::filesystem::path &settingsDir, const char **source = nullptr);
++    std::filesystem::path memoryCardDirectory(const char **source = nullptr);
++
+     struct GameSource
+     {
+         enum class Kind
+diff --git a/ps2xRuntime/include/runtime/ps2_sio2_external.h b/ps2xRuntime/include/runtime/ps2_sio2_external.h
+index 4b9e169..1ee66ad 100644
+--- a/ps2xRuntime/include/runtime/ps2_sio2_external.h
++++ b/ps2xRuntime/include/runtime/ps2_sio2_external.h
+@@ -8,10 +8,11 @@
+ // Optional external SIO2 (pads' and memory cards' serial interface) with memory cards, from the same external
+ // library as the GS (PS2X_EXTERNAL_GS_DIR). PS2X_SIO2 = pcsx2 (the default when built) | off. Started in
+ // PS2Runtime::initialize and installed as the IOP's Sio2Device (ps2x/iop/iop_sio2.h). The cards are PCSX2 .ps2 files
+-// in cardFolder: Mcd001.ps2 in slot 1 (created when missing, unformatted, as PCSX2 does) and Mcd002.ps2 in slot 2 when
+-// it exists. Writes reach the files before the call that made them returns (the runner ends with _Exit).
++// in cardFolder: Mcd001.ps2 in slot 1 and Mcd002.ps2 in slot 2, each when the file exists; createSlot1 makes a missing
++// Mcd001.ps2 (unformatted, as PCSX2 does; patch 0072: not for PS2X_SAVES, where an empty folder is "no card").
++// Writes reach the files before the call that made them returns (the runner ends with _Exit).
+ #ifdef PS2X_EXTERNAL_GS
+-ps2x::iop::Sio2Device *ps2CreateExternalSio2(const std::string &cardFolder); // null = failure
++ps2x::iop::Sio2Device *ps2CreateExternalSio2(const std::string &cardFolder, bool createSlot1); // null = failure
+ #endif
+ 
+ #endif
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index a09ea4a..365ca87 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -210,9 +210,11 @@ namespace ps2game
+                 target = &settings.textures;
+             else if (key == "mods")
+                 target = &settings.mods;
++            else if (key == "saves")
++                target = &settings.saves;
+             else
+             {
+-                bad("unknown key '" + key + "' (game, textures, mods, gpu_driver, gs_self_read, vu1, upscale, scaling, window)");
++                bad("unknown key '" + key + "' (game, textures, mods, saves, gpu_driver, gs_self_read, vu1, upscale, scaling, window)");
+                 continue;
+             }
+             if (value.empty())
+@@ -295,6 +297,7 @@ namespace ps2game
+                   << (settings.game.empty() ? "-" : settings.game.string())
+                   << " textures=" << (settings.textures.empty() ? "-" : settings.textures.string())
+                   << " mods=" << (settings.mods.empty() ? "-" : settings.mods.string())
++                  << " saves=" << (settings.saves.empty() ? "-" : settings.saves.string())
+                   << " gpu_driver=" << (settings.gpuDriver.empty() ? "system" : settings.gpuDriver)
+                   << " gs_self_read=" << (settings.gsSelfRead.empty() ? "auto" : settings.gsSelfRead)
+                   << " vu1=" << (settings.vu1.empty() ? "-" : settings.vu1)
+@@ -329,6 +332,33 @@ namespace ps2game
+         return settings.textures / std::string(serial) / "replacements";
+     }
+ 
++    std::filesystem::path memoryCardDirectory(const char *env, const Settings &settings,
++                                              const std::filesystem::path &settingsDir, const char **source)
++    {
++        const char *from = "default";
++        std::filesystem::path dir;
++        if (env && *env)
++        {
++            from = "PS2X_SAVES";
++            dir = std::filesystem::u8path(env).lexically_normal();
++        }
++        else if (!settings.saves.empty())
++        {
++            from = "settings";
++            dir = settings.saves;
++        }
++        else if (!settingsDir.empty())
++            dir = settingsDir / "memcards";
++        if (source)
++            *source = from;
++        return dir;
++    }
++
++    std::filesystem::path memoryCardDirectory(const char **source)
++    {
++        return memoryCardDirectory(std::getenv("PS2X_SAVES"), activeSettings(), settingsDirectory(), source);
++    }
++
+     const char *gameSourceKindName(GameSource::Kind kind)
+     {
+         switch (kind)
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f7d41af..ceb7b0f 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -987,18 +987,23 @@ bool PS2Runtime::initialize(const char *title)
+     }
+     {
+         // PS2X_SIO2 selects the pad/memory-card serial interface (patch 0071): unset or "pcsx2" = the external
+-        // library's SIO2 with PCSX2 .ps2 memory cards in <settings folder>/memcards, installed as the IOP's
+-        // Sio2Device; "off" = none (SIO2 registers as plain storage: the game's own card driver finds no card).
++        // library's SIO2 with PCSX2 .ps2 memory cards in the memory card folder (PS2X_SAVES, else outbreak.ini saves,
++        // else <settings folder>/memcards; patch 0072), installed as the IOP's Sio2Device; "off" = none (SIO2
++        // registers as plain storage: the game's own card driver finds no card). A missing slot 1 card is created,
++        // except in a PS2X_SAVES folder (scripted runs): there the cards are used as found, so empty = no card.
+ #ifdef PS2X_EXTERNAL_GS
+         const char *sio2Env = std::getenv("PS2X_SIO2");
+         const std::string sio2Mode = (sio2Env && *sio2Env) ? sio2Env : "pcsx2";
+         if (sio2Mode == "pcsx2")
+         {
+-            const std::filesystem::path cards = ps2game::settingsDirectory() / "memcards";
+-            ps2x::iop::Sio2Device *sio2 = ps2CreateExternalSio2(cards.string());
++            const char *from = "default";
++            const std::filesystem::path cards = ps2game::memoryCardDirectory(&from);
++            ps2x::iop::Sio2Device *sio2 = ps2CreateExternalSio2(cards.string(), std::string(from) != "PS2X_SAVES");
+             ps2x::iop::setSio2Device(sio2);
+             s_externalSio2 = sio2;
+-            std::cout << "[sio2] " << (sio2 ? "pcsx2 memory cards in " + cards.string() : std::string("pcsx2 failed to start: off"))
++            std::cout << "[sio2] "
++                      << (sio2 ? "pcsx2 memory cards in " + cards.string() + " (" + from + ")"
++                               : "pcsx2 failed to start (memory card folder '" + cards.string() + "'): off")
+                       << std::endl;
+         }
+         else
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index d76612a..c21d194 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -338,6 +338,30 @@ void register_ps2_game_source_tests()
+             t.IsTrue(ps2game::textureReplacementDirectory("SLPM-65428").empty(), "no textures root, no directory");
+         });
+ 
++        tc.Run("settings: saves picks the memory card folder; PS2X_SAVES wins; default <settings folder>/memcards", [](TestCase &t)
++        {
++            const std::filesystem::path base = std::filesystem::path("C:/games");
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("SAVES = \"my saves/Outbreak\"\n", base, s, messages);
++            t.Equals(messages.size(), size_t{0}, "saves is a known key");
++            t.IsTrue(s.saves == (base / "my saves/Outbreak").lexically_normal(),
++                     "relative to the settings folder: " + s.saves.string());
++            const char *from = nullptr;
++            t.IsTrue(ps2game::memoryCardDirectory(nullptr, s, base, &from) == s.saves && std::string(from) == "settings",
++                     "the settings file's saves");
++            t.IsTrue(ps2game::memoryCardDirectory("D:/run/cards", s, base, &from) ==
++                             std::filesystem::path("D:/run/cards").lexically_normal() &&
++                         std::string(from) == "PS2X_SAVES",
++                     "PS2X_SAVES wins over the file");
++            t.IsTrue(ps2game::memoryCardDirectory("", ps2game::Settings{}, base, &from) == base / "memcards" &&
++                         std::string(from) == "default",
++                     "unset: <settings folder>/memcards");
++            ps2game::Settings cleared;
++            ps2game::parseSettingsIni("saves = D:/cards\nsaves =\n", base, cleared, messages);
++            t.IsTrue(cleared.saves.empty(), "an empty value clears it");
++        });
++
+         tc.Run("settings: gpu_driver recorded as a name; ignored off Android with one note", [](TestCase &t)
+         {
+             ps2game::Settings s;
+-- 
+2.46.2.windows.1
+

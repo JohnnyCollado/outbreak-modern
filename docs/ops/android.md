@@ -45,7 +45,8 @@ in the NDK sysroot for API 29 (or be one of ours), every undefined dynamic symbo
   calls the runner's `main()`. stdout/stderr go to logcat, tag `ps2x` (`main.cpp`).
 - Settings and game: `/sdcard/Android/data/com.outbreakmodern.app/files/` (the activity's external files dir).
   `outbreak.ini` there is read if present (`native/outbreak.ini.example`); without a `game` key the one `.iso` in that
-  folder is the game (patch 0043). Memory cards: `files/mc0`.
+  folder is the game (patch 0043). Memory cards: PCSX2 `.ps2` files in `files/memcards` (`Mcd001.ps2` made when
+  missing; `outbreak.ini` `saves = <folder>` picks another; patches 0071-0072). Not yet built or run on the Odin.
 - Graphics: no environment on a device, so with no `PS2X_GS` an Android build with the external GS runs PCSX2's
   Vulkan renderer (`pcsx2-vk`, patch 0044; desktop default stays `cpu`). VU1: ARMSX2's ARM64 microVU (patch 0048:
   `PS2X_VU1` unset = `mvu` on Android; `outbreak.ini` `vu1 = mvu|interp`, the variable wins). logcat shows

@@ -215,6 +215,8 @@ endif()
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_spu2" "${CMAKE_BINARY_DIR}/pcsx2_spu2")
 # PCSX2's IPU (movies), on ob_pcsx2_gs: native/pcsx2_ipu.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_ipu" "${CMAKE_BINARY_DIR}/pcsx2_ipu")
+# PCSX2's SIO2 and PS2 memory cards, on ob_pcsx2_gs: native/pcsx2_sio2.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_sio2" "${CMAKE_BINARY_DIR}/pcsx2_sio2")
 
 # Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
 # PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
@@ -252,4 +254,7 @@ if(TARGET ps2_runtime)
     # The external IPU (PS2Recomp 0060): PCSX2's IPU behind native/pcsx2_ipu/adapter/ob_ipu_bridge.h.
     target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_ipu/adapter")
     target_link_libraries(ps2x_external_gs PRIVATE ob_pcsx2_ipu)
+    # The external SIO2 + memory cards (PS2Recomp 0071): PCSX2's SIO2 behind native/pcsx2_sio2/adapter/ob_sio2_bridge.h.
+    target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_sio2/adapter")
+    target_link_libraries(ps2x_external_gs PRIVATE ob_pcsx2_sio2)
 endif()

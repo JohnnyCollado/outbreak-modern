@@ -1,0 +1,563 @@
+From 237c92c5c704b5c309c287f30c4f5571ec460cc2 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:48:31 -0400
+Subject: [PATCH 71/73] IOP: optional external SIO2 device (registers, DMA
+ 11/12, SIO2 interrupt), dmacman slice DMA on channels 11/12 and SecrAuthCard
+ through it; runtime: PS2X_SIO2=pcsx2|off from the external library, memory
+ cards in <settings folder>/memcards
+
+---
+ ps2xIOP/include/ps2x/iop/iop_sio2.h           |  42 ++++++
+ ps2xIOP/src/emulator/core/iop_memory.cpp      |  77 ++++++++++
+ ps2xIOP/src/emulator/core/iop_memory.h        |   8 +
+ ps2xIOP/src/emulator/iop_emulator.cpp         |  38 +++++
+ ps2xIOP/tests/iop_emulator_tests.cpp          | 138 ++++++++++++++++++
+ .../include/runtime/ps2_sio2_external.h       |  17 +++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  28 ++++
+ 7 files changed, 348 insertions(+)
+ create mode 100644 ps2xIOP/include/ps2x/iop/iop_sio2.h
+ create mode 100644 ps2xRuntime/include/runtime/ps2_sio2_external.h
+
+diff --git a/ps2xIOP/include/ps2x/iop/iop_sio2.h b/ps2xIOP/include/ps2x/iop/iop_sio2.h
+new file mode 100644
+index 0000000..1ad1b13
+--- /dev/null
++++ b/ps2xIOP/include/ps2x/iop/iop_sio2.h
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include <cstdint>
++
++namespace ps2x::iop
++{
++    // Optional external SIO2 (the serial interface of the pads and memory cards). Unset (the default), SIO2 registers
++    // are plain storage and nothing answers on the ports. Set, the IOP hands it every access to the SIO2 registers
++    // (0x1F808200..0x1F8082FF: the 32-bit registers, byte-wide DATAIN 0x1F808260 and FIFO 0x1F808264) and the
++    // transfers on DMA channels 11 (SIO2 in) and 12 (SIO2 out), and asks it for the SIO2 interrupt (INTC line 17),
++    // as PCSX2's IopHwRead.cpp / IopHwWrite.cpp, IopDma.cpp psxDma11/psxDma12 and Sio2.cpp Sio2::Interrupt do.
++    // The card authentication secrman does for the card driver (SecrAuthCard) is answered by the device too.
++    // All calls come from the thread running the IOP.
++    class Sio2Device
++    {
++    public:
++        virtual ~Sio2Device() = default;
++        virtual uint32_t read32(uint32_t phys) = 0;
++        virtual void write32(uint32_t phys, uint32_t value) = 0;
++        virtual uint8_t read8(uint32_t phys) = 0;               // 0x1F808264: the next byte out of the FIFO
++        virtual void write8(uint32_t phys, uint8_t value) = 0;  // 0x1F808260: a command byte in
++        // A transfer started on channel 11 (CHCR 0x01000201, IOP RAM to SIO2) or 12 (CHCR 0x41000200, SIO2 to IOP
++        // RAM): bcr = block size in words (low 16 bits) and block count (high 16), as psxDma11/psxDma12. The device
++        // moves the bytes now and returns the IOP cycles until the channel's DMA interrupt (PSX_INT delay), or
++        // kSio2DmaIgnored for a CHCR it does not take (psxDma11/12 return without a transfer).
++        virtual uint32_t dma(uint32_t channel, uint8_t *iopRam, uint32_t ramSize, uint32_t madr, uint32_t bcr,
++                             uint32_t chcr) = 0;
++        [[nodiscard]] virtual bool takeInterrupt() = 0; // the SIO2 raised INTC line 17 since the last call
++        // SecrAuthCard(port, slot, cnum) (secrman ordinal 6): 1 when a card answers there, as the real secrman's
++        // MagicGate exchange with PCSX2's MemoryCardProtocol (AuthXor/AuthF3/AuthF7) always ends.
++        [[nodiscard]] virtual bool authCard(uint32_t port, uint32_t slot) = 0;
++    };
++
++    constexpr uint32_t kSio2DmaIgnored = 0xFFFFFFFFu;
++    constexpr uint32_t kSio2DeviceBase = 0x1F808200u;
++    constexpr uint32_t kSio2DeviceEnd = 0x1F808300u;
++    constexpr uint32_t kSio2DataIn = 0x1F808260u;
++    constexpr uint32_t kSio2Fifo = 0x1F808264u;
++
++    void setSio2Device(Sio2Device *device); // startup and tests; null = none
++    [[nodiscard]] Sio2Device *sio2Device();
++}
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index dba1442..cb03efa 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -8,6 +8,7 @@ namespace ps2x::iop
+     namespace
+     {
+         Spu2Device *g_spu2Device = nullptr;
++        Sio2Device *g_sio2Device = nullptr;
+     }
+ 
+     void setSpu2Device(Spu2Device *device)
+@@ -19,6 +20,16 @@ namespace ps2x::iop
+     {
+         return g_spu2Device;
+     }
++
++    void setSio2Device(Sio2Device *device)
++    {
++        g_sio2Device = device;
++    }
++
++    Sio2Device *sio2Device()
++    {
++        return g_sio2Device;
++    }
+ }
+ 
+ namespace ps2x::iop::detail
+@@ -31,6 +42,9 @@ namespace ps2x::iop::detail
+         constexpr uint64_t kSpu2CyclesPerStreamedByte = 192u; // 36,864,000 Hz / 192,000 bytes per second
+         constexpr int kDmaSpu0Irq = 0x24;
+         constexpr int kDmaSpu1Irq = 0x28;
++        constexpr uint32_t kDmaSio2InChcr = 0x1F801548u;  // channel 11
++        constexpr uint32_t kDmaSio2OutChcr = 0x1F801558u; // channel 12
++        constexpr int kSio2Irq = 17;                       // INTC line 17 (PCSX2 Sio2::Interrupt)
+ 
+         uint32_t alignUp(uint32_t value, uint32_t alignment)
+         {
+@@ -67,6 +81,9 @@ namespace ps2x::iop::detail
+             return m_scratch[phys - ScratchBase];
+         if (Spu2Device *spu2 = spu2At(phys))
+             return static_cast<uint8_t>(spu2->read16(phys & ~1u, now()) >> ((phys & 1u) * 8u));
++        if (Sio2Device *sio2 = sio2At(phys))
++            return phys == kSio2Fifo ? sio2->read8(phys)
++                                     : static_cast<uint8_t>(sio2->read32(phys & ~3u) >> ((phys & 3u) * 8u));
+         const uint32_t value = readHardware32(phys & ~3u);
+         return static_cast<uint8_t>(value >> ((phys & 3u) * 8u));
+     }
+@@ -82,6 +99,8 @@ namespace ps2x::iop::detail
+         }
+         if (Spu2Device *spu2 = spu2At(phys); spu2 && (phys & 1u) == 0u)
+             return spu2->read16(phys, now());
++        if (Sio2Device *sio2 = sio2At(phys); sio2 && (phys & 1u) == 0u && phys != kSio2Fifo)
++            return static_cast<uint16_t>(sio2->read32(phys & ~3u) >> ((phys & 2u) * 8u));
+         return static_cast<uint16_t>(read8(address) | (static_cast<uint16_t>(read8(address + 1u)) << 8u));
+     }
+ 
+@@ -102,6 +121,8 @@ namespace ps2x::iop::detail
+         }
+         if (Spu2Device *spu2 = spu2At(phys); spu2 && (phys & 3u) == 0u) // two halfwords, as PCSX2's iopMemRead32
+             return spu2->read16(phys, now()) | (static_cast<uint32_t>(spu2->read16(phys + 2u, now())) << 16u);
++        if (Sio2Device *sio2 = sio2At(phys); sio2 && (phys & 3u) == 0u)
++            return sio2->read32(phys);
+         if ((phys & 3u) == 0u && isHardwareAddress(phys))
+             return readHardware32(phys);
+ 
+@@ -132,6 +153,17 @@ namespace ps2x::iop::detail
+             spu2->write16(half, static_cast<uint16_t>((current & ~(0xFFu << shift)) | (static_cast<uint32_t>(value) << shift)), now());
+             return;
+         }
++        if (Sio2Device *sio2 = sio2At(phys))
++        {
++            if (phys == kSio2DataIn)
++                sio2->write8(phys, value);
++            else
++            {
++                const uint32_t shift = (phys & 3u) * 8u;
++                writeSio2(*sio2, phys & ~3u, (sio2->read32(phys & ~3u) & ~(0xFFu << shift)) | (static_cast<uint32_t>(value) << shift));
++            }
++            return;
++        }
+         const uint32_t aligned = phys & ~3u;
+         uint32_t current = readHardware32(aligned);
+         const uint32_t shift = (phys & 3u) * 8u;
+@@ -153,6 +185,12 @@ namespace ps2x::iop::detail
+             spu2->write16(phys, value, now());
+             return;
+         }
++        if (Sio2Device *sio2 = sio2At(phys); sio2 && (phys & 1u) == 0u && phys != kSio2DataIn)
++        {
++            const uint32_t shift = (phys & 2u) * 8u;
++            writeSio2(*sio2, phys & ~3u, (sio2->read32(phys & ~3u) & ~(0xFFFFu << shift)) | (static_cast<uint32_t>(value) << shift));
++            return;
++        }
+         write8(address, static_cast<uint8_t>(value));
+         write8(address + 1u, static_cast<uint8_t>(value >> 8u));
+     }
+@@ -177,6 +215,11 @@ namespace ps2x::iop::detail
+             spu2->write16(phys + 2u, static_cast<uint16_t>(value >> 16u), now());
+             return;
+         }
++        if (Sio2Device *sio2 = sio2At(phys); sio2 && (phys & 3u) == 0u)
++        {
++            writeSio2(*sio2, phys, value);
++            return;
++        }
+         if ((phys & 3u) == 0u)
+         {
+             writeHardware32(phys, value);
+@@ -285,6 +328,12 @@ namespace ps2x::iop::detail
+         }
+ 
+         m_hardware[address] = value;
++        if ((address == kDmaSio2InChcr || address == kDmaSio2OutChcr) && (value & kDmaStart) != 0u)
++        {
++            if (Sio2Device *sio2 = sio2Device())
++                startSio2Dma(*sio2, address, value);
++            return;
++        }
+         if ((address != kDmaSpu0Chcr && address != kDmaSpu1Chcr) || (value & kDmaStart) == 0u)
+             return;
+ 
+@@ -341,6 +390,34 @@ namespace ps2x::iop::detail
+         };
+     }
+ 
++    void IopMemory::writeSio2(Sio2Device &sio2, uint32_t phys, uint32_t value)
++    {
++        sio2.write32(phys, value);
++        // PCSX2 raises INTC line 17 inside the CTRL write that starts a transfer (Sio2::SetCtrl -> Interrupt):
++        // dispatched with the DMA interrupts, at once.
++        if (sio2.takeInterrupt())
++            m_dmaStart = DmaStart{kSio2Irq, 0u, 0u, 0u};
++    }
++
++    void IopMemory::startSio2Dma(Sio2Device &sio2, uint32_t chcrAddress, uint32_t chcr)
++    {
++        // PCSX2 IopDma.cpp psxDma11/psxDma12: the bytes move at the CHCR write; MADR ends past them and the
++        // channel interrupt (32 + channel, as intrman numbers it) follows PSX_INT's delay. A CHCR the SIO2 does not
++        // take (another direction or mode) stays busy with no interrupt, as there.
++        const uint32_t channelBase = chcrAddress - 8u; // MADR
++        const uint32_t channel = chcrAddress == kDmaSio2InChcr ? 11u : 12u;
++        const uint32_t madr = readHardware32(channelBase) & (RamSize - 1u);
++        const uint32_t bcr = readHardware32(channelBase + 4u);
++        const uint32_t bytes = (bcr >> 16u) * (bcr & 0xFFFFu) * 4u;
++        const uint32_t delay = sio2.dma(channel, m_ram.data(), RamSize, madr, bcr, chcr);
++        if (delay == kSio2DmaIgnored)
++            return;
++        m_hardware[chcrAddress] = chcr & ~kDmaStart;
++        if (channel == 12u)
++            markOwned(madr, std::min<uint32_t>(bytes, RamSize - madr));
++        m_dmaStart = DmaStart{static_cast<int>(0x20u + channel), delay, channelBase, madr + bytes};
++    }
++
+     void IopMemory::completeDma(const DmaStart &dma)
+     {
+         if (dma.channelBase != 0u)
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index 392c441..278d723 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -9,6 +9,7 @@
+ #include <unordered_map>
+ #include <vector>
+ 
++#include "ps2x/iop/iop_sio2.h"
+ #include "ps2x/iop/iop_spu2.h"
+ 
+ namespace ps2x::iop::detail
+@@ -102,6 +103,13 @@ namespace ps2x::iop::detail
+         {
+             return phys >= kSpu2DeviceBase && phys < kSpu2DeviceEnd ? spu2Device() : nullptr;
+         }
++        // The external Sio2Device when one is set and phys is one of its registers, else null (patch 0071).
++        [[nodiscard]] static Sio2Device *sio2At(uint32_t phys) noexcept
++        {
++            return phys >= kSio2DeviceBase && phys < kSio2DeviceEnd ? sio2Device() : nullptr;
++        }
++        void writeSio2(Sio2Device &sio2, uint32_t phys, uint32_t value);
++        void startSio2Dma(Sio2Device &sio2, uint32_t chcrAddress, uint32_t chcr);
+ 
+         std::vector<uint8_t> m_ram;
+         std::vector<uint8_t> m_owned;
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 068c7f1..a51f619 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -290,6 +290,9 @@ namespace ps2x::iop::detail
+         ImportDisposition dispatchImport(const IopImportCall &call, CpuState &cpu)
+         {
+             const uint32_t a0 = cpu.gpr[4];
++            const uint32_t a1 = cpu.gpr[5];
++            const uint32_t a2 = cpu.gpr[6];
++            const uint32_t a3 = cpu.gpr[7];
+             auto setV0 = [&](uint32_t value)
+             {
+                 cpu.gpr[2] = value;
+@@ -360,6 +363,20 @@ namespace ps2x::iop::detail
+                     secrMcDevIdHandler = {a0, cpu.gpr[28]};
+                     setV0(0);
+                     return ImportDisposition::Handled;
++                case 6: // SecrAuthCard(port, slot, cnum): 1 = authenticated (patch 0071, external SIO2 only)
++                    if (Sio2Device *sio2 = sio2Device())
++                    {
++                        setV0(sio2->authCard(a0, a1) ? 1u : 0u);
++                        return ImportDisposition::Handled;
++                    }
++                    break;
++                case 7: // SecrResetAuthCard(port, slot, cnum)
++                    if (sio2Device())
++                    {
++                        setV0(0);
++                        return ImportDisposition::Handled;
++                    }
++                    break;
+                 default:
+                     break;
+                 }
+@@ -384,6 +401,27 @@ namespace ps2x::iop::detail
+                 return ImportDisposition::Handled;
+             if (iequals(call.library, "dmacman"))
+             {
++                // sio2man programs the SIO2 channels 11/12 through sceSetSliceDMA / sceStartDMA (ps2sdk
++                // iop/system/dmacman: MADR, BCR = count << 16 | size, CHCR = dir | 0x200 (| 0x40000000 when dir is
++                // 0); start = CHCR | 0x01000000). With an external SIO2 (patch 0071) they reach the registers;
++                // everything else stays a no-op returning 0, as before.
++                const bool sio2Channel = sio2Device() && (a0 == 11u || a0 == 12u);
++                const uint32_t channelBase = 0x1F801500u + (a0 - 7u) * 0x10u;
++                if (sio2Channel && call.ordinal == 28u) // sceSetSliceDMA(chan, addr, size, count, dir)
++                {
++                    const uint32_t dir = memory.read32(cpu.gpr[29] + 16u);
++                    write32(channelBase, a1 & 0x00FFFFFFu);
++                    write32(channelBase + 4u, (a3 << 16u) | (a2 & 0xFFFFu));
++                    write32(channelBase + 8u, (dir & 1u) | 0x200u | (dir == 0u ? 0x40000000u : 0u));
++                    setV0(1);
++                    return ImportDisposition::Handled;
++                }
++                if (sio2Channel && call.ordinal == 32u) // sceStartDMA(chan)
++                {
++                    write32(channelBase + 8u, memory.read32(channelBase + 8u) | 0x01000000u);
++                    setV0(1);
++                    return ImportDisposition::Handled;
++                }
+                 setV0(0);
+                 return ImportDisposition::Handled;
+             }
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 3de4033..3501015 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -1,5 +1,7 @@
+ #include "ps2x/iop/iop_spu2.h"
+ #include <unordered_map>
++#include <utility>
++#include <vector>
+ #include "ps2x/iop/iop_subsystem.h"
+ #include "emulator/services/iop_module_loader.h"
+ #include "emulator/core/iop_memory.h"
+@@ -505,6 +507,65 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset + 0x40u, importTable, sizeof(importTable));
+     }
+ 
++    // Start function: sceSetSliceDMA(11, 0x2000, 4, 1, 1), sceStartDMA(11), then returns
++    // SecrAuthCard(2, 0, 0) | sceSetSliceDMA's result << 4 (patch 0071).
++    void writeSio2DriverIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00012000u;
++        constexpr uint32_t dmacTableAddress = loadAddress + 0x80u;
++        constexpr uint32_t sliceStub = dmacTableAddress + 20u;
++        constexpr uint32_t startStub = sliceStub + 8u;
++        constexpr uint32_t secrTableAddress = loadAddress + 0xC0u;
++        constexpr uint32_t authStub = secrTableAddress + 20u;
++
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x100u; program.memsz = 0x100u; program.flags = 7u; program.align = 4u;
++
++        const uint32_t code[] = {
++            0x27BDFFE0u, 0xAFBF001Cu,                         // addiu sp,-32; sw ra,28(sp)
++            0x3404000Bu, 0x34052000u, 0x34060004u, 0x34070001u, // a0 = 11, a1 = 0x2000, a2 = 4, a3 = 1
++            0x34080001u, 0xAFA80010u,                         // dir = 1 at 16(sp)
++            0x0C000000u | ((sliceStub >> 2u) & 0x03FFFFFFu), 0x00000000u,
++            0xAFA20014u,                                      // sw v0,20(sp)
++            0x3404000Bu,
++            0x0C000000u | ((startStub >> 2u) & 0x03FFFFFFu), 0x00000000u,
++            0x34040002u, 0x00002825u,                         // a0 = 2, a1 = 0
++            0x0C000000u | ((authStub >> 2u) & 0x03FFFFFFu), 0x00003025u, // a2 = 0 (delay slot)
++            0x8FA90014u, 0x00000000u,                        // lw t1,20(sp) + its load delay slot
++            0x00094900u, 0x00491025u,                         // v0 |= slice result << 4
++            0x8FBF001Cu, 0x27BD0020u, 0x03E00008u, 0x00000000u,
++        };
++        const uint32_t dmacImports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x63616D64u, 0x006E616Du, // "dmacman"
++            0x03E00008u, 0x2400001Cu, // 28 sceSetSliceDMA
++            0x03E00008u, 0x24000020u, // 32 sceStartDMA
++            0u, 0u,
++        };
++        const uint32_t secrImports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x72636573u, 0x006E616Du, // "secrman"
++            0x03E00008u, 0x24000006u, // 6 SecrAuthCard
++            0u, 0u,
++        };
++
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
++        std::memcpy(host.guest.data() + address + codeOffset + 0x80u, dmacImports, sizeof(dmacImports));
++        std::memcpy(host.guest.data() + address + codeOffset + 0xC0u, secrImports, sizeof(secrImports));
++    }
++
+     void writeVblankSchedulingIrx(TestHost &host, uint32_t address)
+     {
+         constexpr uint32_t codeOffset = 0x100u;
+@@ -1260,6 +1321,83 @@ int main()
+         if (!expect(fake.advances > 0u, "the emulator must run the external SPU2 at its event cycles")) return 1;
+     }
+ 
++    {
++        // External SIO2 device (patch 0071): SIO2 register accesses and DMA 11/12 go to it, its interrupt is
++        // queued as INTC line 17, and sio2man's dmacman slice DMA and sio2d's SecrAuthCard reach it.
++        struct FakeSio2 final : ps2x::iop::Sio2Device
++        {
++            std::unordered_map<uint32_t, uint32_t> regs;
++            std::vector<uint8_t> bytesIn;
++            uint32_t dmaChannel = 0u, dmaMadr = 0u, dmaBcr = 0u, dmaChcr = 0u, dmaCount = 0u;
++            bool irq = false;
++            uint32_t authPort = 99u;
++            uint32_t read32(uint32_t phys) override { return regs[phys]; }
++            void write32(uint32_t phys, uint32_t value) override
++            {
++                regs[phys] = value;
++                if (phys == 0x1F808268u && (value & 1u) != 0u)
++                    irq = true;
++            }
++            uint8_t read8(uint32_t) override { return 0xABu; }
++            void write8(uint32_t, uint8_t value) override { bytesIn.push_back(value); }
++            uint32_t dma(uint32_t channel, uint8_t *ram, uint32_t, uint32_t madr, uint32_t bcr, uint32_t chcr) override
++            {
++                ++dmaCount;
++                dmaChannel = channel;
++                dmaMadr = madr;
++                dmaBcr = bcr;
++                dmaChcr = chcr;
++                if (channel == 12u)
++                    ram[madr] = 0x5Au;
++                return 7u;
++            }
++            bool takeInterrupt() override { return std::exchange(irq, false); }
++            bool authCard(uint32_t port, uint32_t) override
++            {
++                authPort = port;
++                return true;
++            }
++        } fake;
++
++        ps2x::iop::setSio2Device(&fake);
++        ps2x::iop::detail::IopMemory memory;
++        memory.write32(0x1F808200u, 0x00040641u);
++        memory.write8(0x1F808260u, 0x81u);
++        const uint8_t fifo = memory.read8(0x1F808264u);
++        const uint32_t queue = memory.read32(0x1F808200u);
++        memory.write32(0x1F808268u, 0x0Cu);
++        const bool noIrqYet = !memory.takeDmaStart().has_value();
++        memory.write32(0x1F808268u, 0x0Du);
++        const auto irq = memory.takeDmaStart();
++        memory.write32(0x1F801550u, 0x3000u);             // channel 12 MADR
++        memory.write32(0x1F801554u, (2u << 16) | 0x20u);  // BCR: 2 blocks of 32 words
++        memory.write32(0x1F801558u, 0x41000200u);         // CHCR: start, SIO2 to RAM
++        const auto dma12 = memory.takeDmaStart();
++        const uint32_t chcrAfter = memory.read32(0x1F801558u);
++        ps2x::iop::setSio2Device(nullptr);
++        if (!expect(fake.regs[0x1F808200u] == 0x00040641u && queue == 0x00040641u && fake.bytesIn.size() == 1u &&
++                        fake.bytesIn[0] == 0x81u && fifo == 0xABu,
++                    "SIO2 register, DATAIN and FIFO accesses must reach the external device")) return 1;
++        if (!expect(noIrqYet && irq.has_value() && irq->irq == 17 && irq->delayCycles == 0u,
++                    "a SIO2 interrupt must be queued as INTC line 17 at once")) return 1;
++        if (!expect(fake.dmaChannel == 12u && fake.dmaMadr == 0x3000u && fake.dmaBcr == ((2u << 16) | 0x20u) &&
++                        fake.dmaChcr == 0x41000200u && memory.read8(0x3000u) == 0x5Au,
++                    "a DMA 12 start must hand the device its RAM address, BCR and CHCR")) return 1;
++        if (!expect(dma12.has_value() && dma12->irq == 0x2C && dma12->delayCycles == 7u &&
++                        dma12->endAddress == 0x3000u + 256u && (chcrAfter & 0x01000000u) == 0u,
++                    "a DMA 12 transfer must end with the channel 12 interrupt after the device's delay")) return 1;
++
++        ps2x::iop::setSio2Device(&fake);
++        writeSio2DriverIrx(host, 0x500u);
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x500u);
++        ps2x::iop::setSio2Device(nullptr);
++        if (!expect(driver.handled && driver.startResult == 0x11 && fake.authPort == 2u,
++                    "SecrAuthCard must ask the external SIO2 and sceSetSliceDMA must succeed on channel 11")) return 1;
++        if (!expect(fake.dmaChannel == 11u && fake.dmaMadr == 0x2000u && fake.dmaBcr == ((1u << 16) | 4u) &&
++                        fake.dmaChcr == 0x01000201u,
++                    "sceSetSliceDMA + sceStartDMA must start DMA 11 with ps2sdk's MADR/BCR/CHCR")) return 1;
++    }
++
+     iop.reset();
+     writeVblankSchedulingIrx(host, 0x100u);
+     const ModuleLoadResult vblankModule = iop.loadModuleBuffer(0x100u);
+diff --git a/ps2xRuntime/include/runtime/ps2_sio2_external.h b/ps2xRuntime/include/runtime/ps2_sio2_external.h
+new file mode 100644
+index 0000000..4b9e169
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_sio2_external.h
+@@ -0,0 +1,17 @@
++#ifndef PS2_SIO2_EXTERNAL_H
++#define PS2_SIO2_EXTERNAL_H
++
++#include <string>
++
++#include "ps2x/iop/iop_sio2.h"
++
++// Optional external SIO2 (pads' and memory cards' serial interface) with memory cards, from the same external
++// library as the GS (PS2X_EXTERNAL_GS_DIR). PS2X_SIO2 = pcsx2 (the default when built) | off. Started in
++// PS2Runtime::initialize and installed as the IOP's Sio2Device (ps2x/iop/iop_sio2.h). The cards are PCSX2 .ps2 files
++// in cardFolder: Mcd001.ps2 in slot 1 (created when missing, unformatted, as PCSX2 does) and Mcd002.ps2 in slot 2 when
++// it exists. Writes reach the files before the call that made them returns (the runner ends with _Exit).
++#ifdef PS2X_EXTERNAL_GS
++ps2x::iop::Sio2Device *ps2CreateExternalSio2(const std::string &cardFolder); // null = failure
++#endif
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index a11f7a6..f7d41af 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -8,6 +8,7 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_spu2_external.h"
++#include "runtime/ps2_sio2_external.h"
+ #include "runtime/ps2_ipu_external.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_fps_counter.h"
+@@ -56,6 +57,7 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
+ #ifdef PS2X_EXTERNAL_GS
+ static AudioStream s_spu2Stream{}; // the external SPU2's output (patch 0056)
+ static ps2x::iop::Spu2Device *s_externalSpu2 = nullptr; // from the external library (patch 0056); null = none
++static ps2x::iop::Sio2Device *s_externalSio2 = nullptr; // from the external library (patch 0071); null = none
+ static ps2x::IpuDevice *s_externalIpu = nullptr; // from the external library (patch 0060); null = none
+ #endif
+ #if defined(PLATFORM_VITA)
+@@ -638,6 +640,12 @@ PS2Runtime::~PS2Runtime()
+             delete s_externalIpu;
+             s_externalIpu = nullptr;
+         }
++        if (s_externalSio2)
++        {
++            ps2x::iop::setSio2Device(nullptr);
++            delete s_externalSio2;
++            s_externalSio2 = nullptr;
++        }
+ #endif
+         m_iopSubsystem.reset();
+         m_iopHost.reset();
+@@ -975,6 +983,26 @@ bool PS2Runtime::initialize(const char *title)
+         }
+         else
+             std::cout << "[spu2] off" << (spu2Mode == "off" ? "" : " (unknown PS2X_SPU2, pcsx2|off)") << std::endl;
++#endif
++    }
++    {
++        // PS2X_SIO2 selects the pad/memory-card serial interface (patch 0071): unset or "pcsx2" = the external
++        // library's SIO2 with PCSX2 .ps2 memory cards in <settings folder>/memcards, installed as the IOP's
++        // Sio2Device; "off" = none (SIO2 registers as plain storage: the game's own card driver finds no card).
++#ifdef PS2X_EXTERNAL_GS
++        const char *sio2Env = std::getenv("PS2X_SIO2");
++        const std::string sio2Mode = (sio2Env && *sio2Env) ? sio2Env : "pcsx2";
++        if (sio2Mode == "pcsx2")
++        {
++            const std::filesystem::path cards = ps2game::settingsDirectory() / "memcards";
++            ps2x::iop::Sio2Device *sio2 = ps2CreateExternalSio2(cards.string());
++            ps2x::iop::setSio2Device(sio2);
++            s_externalSio2 = sio2;
++            std::cout << "[sio2] " << (sio2 ? "pcsx2 memory cards in " + cards.string() : std::string("pcsx2 failed to start: off"))
++                      << std::endl;
++        }
++        else
++            std::cout << "[sio2] off" << (sio2Mode == "off" ? "" : " (unknown PS2X_SIO2, pcsx2|off)") << std::endl;
+ #endif
+     }
+     {
+-- 
+2.46.2.windows.1
+

@@ -1,4 +1,4 @@
-// hook: the PS2Recomp half of the runner's external GS and SPU2. Implements PS2ExternalGS (runtime/gs/gs_external.h)
+// hook: the PS2Recomp half of the runner's external GS, SPU2, IPU and SIO2. Implements PS2ExternalGS (runtime/gs/gs_external.h)
 // over the plain-types bridge (ob_gs_bridge.h); PCSX2 itself lives behind pcsx2_side.cpp.
 #include "runtime/gs/gs_external.h"
 #include "runtime/ps2_game_source.h"
@@ -6,10 +6,12 @@
 #include "runtime/ps2_pnach.h"
 #include "runtime/ps2_spu2_external.h"
 #include "runtime/ps2_ipu_external.h"
+#include "runtime/ps2_sio2_external.h"
 
 #include "ob_gs_bridge.h"
 #include "ob_spu2_bridge.h"
 #include "ob_ipu_bridge.h"
+#include "ob_sio2_bridge.h"
 
 #include <cstring>
 #include <string>
@@ -137,4 +139,33 @@ ps2x::IpuDevice* ps2CreateExternalIpu(uint8_t* rdram, uint32_t ramSize, uint8_t*
 	if (!ob_ipu_open(rdram, ramSize, scratchpad, scratchpadSize, 0))
 		return nullptr;
 	return new Pcsx2Ipu();
+}
+
+// ---- SIO2 + memory cards (PS2Recomp patch 0071): PCSX2's SIO2 behind native/pcsx2_sio2/adapter/ob_sio2_bridge.h ----
+namespace
+{
+	class Pcsx2Sio2 final : public ps2x::iop::Sio2Device
+	{
+	public:
+		~Pcsx2Sio2() override { ob_sio2_close(); }
+		uint32_t read32(uint32_t phys) override { return ob_sio2_read32(phys); }
+		void write32(uint32_t phys, uint32_t value) override { ob_sio2_write32(phys, value); }
+		uint8_t read8(uint32_t phys) override { return ob_sio2_read8(phys); }
+		void write8(uint32_t phys, uint8_t value) override { ob_sio2_write8(phys, value); }
+		uint32_t dma(uint32_t channel, uint8_t* iopRam, uint32_t ramSize, uint32_t madr, uint32_t bcr, uint32_t chcr) override
+		{
+			return ob_sio2_dma(channel, iopRam, ramSize, madr, bcr, chcr);
+		}
+		bool takeInterrupt() override { return ob_sio2_take_interrupt(); }
+		// The card driver numbers the card slots after the two pad ports (sio2man ports 2/3); bit 0 is the slot.
+		bool authCard(uint32_t port, uint32_t) override { return ob_sio2_card_present(port & 1u); }
+	};
+	static_assert(OB_SIO2_DMA_IGNORED == ps2x::iop::kSio2DmaIgnored);
+} // namespace
+
+ps2x::iop::Sio2Device* ps2CreateExternalSio2(const std::string& cardFolder, bool createSlot1)
+{
+	if (!ob_sio2_open(cardFolder.c_str(), createSlot1))
+		return nullptr;
+	return new Pcsx2Sio2();
 }

@@ -4,7 +4,7 @@
 # recomp-cycle.sh, ovl-cycle.sh, build-runner.bat, boot-frames-26.ps1).
 #
 #   tools/ob.sh tools                        configure + build the tools tree ($OB_T)
-#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu/gs/spu2/ipu tests: "<suite>: <pass>/<total>"
+#   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu/gs/spu2/ipu/sio2 tests: "<suite>: <pass>/<total>"
 #   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
 #                                            (OB_PROFILE=1: host libraries with debug info, copy in $OB_ROOT/r-profile)
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
@@ -58,8 +58,10 @@ vc() { MSYS_NO_PATHCONV=1 cmd /c "${VC//\//\\}" "$@"; }
 
 cmd_tools() {
     local log="$OB_LOGS/ob-tools.log"
+    # Only the analyzer and the recompiler: building every target also built an unused second runner here (345 steps,
+    # ~18 min after a recompiler header change; reports/2026-10-26-memory-cards.md). ob.sh test builds its own targets.
     { vc cmake -S "$OB_SRC" -B "$OB_T" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_STUDIO=OFF -DPS2X_ENABLE_FFMPEG=OFF &&
-      vc cmake --build "$OB_T" -j $JOBS; } > "$log" 2>&1
+      vc cmake --build "$OB_T" -j $JOBS --target ps2_analyzer ps2_recomp; } > "$log" 2>&1
     local rc=$?
     tail -5 "$log"; echo "tools build exit $rc ($log)"; return $rc
 }
@@ -172,6 +174,17 @@ cmd_test() {
     else
         echo "pcsx2_ipu: 0/0 (build failed: $OB_LOGS/ob-pcsx2-ipu-tests-build.log)"; red=1
     fi
+    # PCSX2's SIO2 + memory cards behind ob_sio2_bridge.h (native/pcsx2_sio2/tests): a new PCSX2-size card, probe,
+    # sector write (in the file at once) and read-back over DATAIN/FIFO and DMA 11/12, the SIO2 interrupt. Same dir.
+    log="$OB_LOGS/ob-test-pcsx2_sio2.log"
+    if vc cmake --build "$gsb" --target ob_pcsx2_sio2_tests > "$OB_LOGS/ob-pcsx2-sio2-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./pcsx2_sio2/ob_pcsx2_sio2_tests.exe) > "$log" 2>&1
+        r=$(grep -o 'pcsx2_sio2: [0-9]*/[0-9]*' "$log" | tail -1)
+        echo "${r:-pcsx2_sio2: 0/0 (no result: $log)}"
+        if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
+    else
+        echo "pcsx2_sio2: 0/0 (build failed: $OB_LOGS/ob-pcsx2-sio2-tests-build.log)"; red=1
+    fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
 }
@@ -184,16 +197,25 @@ cmd_recompile() {
     # Sony's libmpeg/libipu run as recompiled game code on the external IPU (movies plan, step 1), not as PS2Recomp's
     # MPEG/IPU HLE stubs: Sofdec feeds libmpeg through its no-data callback, which the HLE never calls, and the HLE's
     # sceIpuInit uses another game's addresses (reports/2026-10-24-m5-sound.md entries 8-10).
+    # Likewise libdbc's sceDbcInit/sceDbcEnd (memory cards, reports/2026-10-26-memory-cards.md): libmc2 talks to the
+    # disc's mc2_s1 through recompiled libdbc sockets over the RPC client sceDbcInit binds to dbcman; PS2Recomp's
+    # libpad2 HLE no-ops them (patch 0016), which leaves that client unbound. main-functions.csv names them, so
+    # dropping them from the stubs list is not enough (the runtime stub's name matches): [general] recompile keeps
+    # the game's code (patch 0073). The pads stay on the scePad2 HLE.
     sed -e 's|^ghidra_output = ""|ghidra_output = "main-functions.csv"|' \
-        -e '/^ *"_\{0,1\}sce\(Mpeg\|Ipu\)[A-Za-z0-9_]*@0x[0-9A-Fa-f]*",\{0,1\}$/d' analyzed.toml > decomp.toml
+        -e '/^ *"_\{0,1\}sce\(Mpeg\|Ipu\)[A-Za-z0-9_]*@0x[0-9A-Fa-f]*",\{0,1\}$/d' \
+        -e '/^ *"sceDbc\(Init\|End\)@0x[0-9A-Fa-f]*",\{0,1\}$/d' \
+        -e '/^\[general\]$/a recompile = ["sceDbcInit", "sceDbcEnd"]' analyzed.toml > decomp.toml
     grep -c "instructions = \[" decomp.toml | sed 's/^/instruction patch blocks: /'
     grep -c '"_\{0,1\}sce\(Mpeg\|Ipu\)' decomp.toml | sed 's/^/libmpeg\/libipu stubs left in config: /'
+    grep -c '"sceDbc\(Init\|End\)@' decomp.toml | sed 's/^/sceDbcInit\/End stubs left in config: /'
     rm -rf output
     "$OB_T/ps2xRecomp/ps2_recomp.exe" decomp.toml > recomp.log 2>&1 || { echo "recomp failed"; return 1; }
     e=$(grep -c '\[error\]' recomp.log)
     echo "main: errors=$e warnings=$(grep -c '\[warn' recomp.log) files=$(ls output | wc -l)"
     [ "$e" = 0 ] || bad=1
     grep -c "scePad2\|sceDbc" decomp.toml | sed 's/^/pad2 stubs in config: /'
+    cat output/sceDbc*_0x*.cpp 2>/dev/null | grep -c 'ps2_stubs::sceDbc\(Init\|End\)(' | sed 's/^/sceDbcInit\/End calls into runtime stubs: /'
     # Generated files reach the runner tree after the overlays, content-compared (tools/ob/sync_changed.py):
     # an identical file keeps its mtime, so ninja rebuilds only what changed.
     local w; w=$(cygpath -w "$OB_WORK/output")
@@ -263,6 +285,16 @@ cmd_recompile() {
     [ $bad = 0 ] || { echo "recompile errors > 0"; return 1; }
 }
 
+# fresh_saves <tag>: scripted and live-pad boots get their own empty memory card folder, $OB_ROOT/saves-run/<tag>
+# (patch 0072 PS2X_SAVES; the runner makes a blank Mcd001.ps2 there), so they repeat and never touch the developer's
+# cards. PS2X_SAVES set by the caller wins (e.g. a run that loads a prepared card).
+fresh_saves() {
+    [ -n "${PS2X_SAVES:-}" ] && { echo "boot: memory cards in PS2X_SAVES=$PS2X_SAVES"; return 0; }
+    local d="$OB_ROOT/saves-run/$1"
+    rm -rf "$d"; mkdir -p "$d"
+    export PS2X_SAVES; PS2X_SAVES=$(cygpath -w "$d")
+}
+
 cmd_boot() {
     local secs=200 tag=latest script= diag=1 pad=
     while [ $# -gt 0 ]; do
@@ -300,6 +332,7 @@ cmd_boot() {
         if [ -z "${PS2X_SETTINGS:-}" ]; then
             export PS2X_SETTINGS; PS2X_SETTINGS=$(cygpath -w "$REPO/gate/defaults.ini")
         fi
+        fresh_saves "$tag"
     fi
     if [ -n "$pad" ]; then
         # Live pad: hidden window, the plugin owns pad port 0 and serves \\.\pipe\<name>; shots (one frame each)
@@ -308,6 +341,7 @@ cmd_boot() {
         frames="$OB_ROOT/frames-$tag"; rm -rf "$frames"; mkdir -p "$frames"
         export PS2X_PAD_PIPE="$pad" PS2X_PAD_SHOTS; PS2X_PAD_SHOTS=$(cygpath -w "$frames")
         export PS2X_HIDDEN=1
+        fresh_saves "$tag"
     fi
     # Input bindings (patch 0038): nothing is staged; the runner reads input.ini only if one sits beside the exe
     # (example: native/input.ini.example) or PS2X_INPUT_INI names one.

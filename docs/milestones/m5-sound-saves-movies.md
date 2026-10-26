@@ -33,7 +33,9 @@ in-game sound on M4
    makes.
 5. **Saves.** One file per memory-card save, behind the same "start, then poll" interface.
    Choose a format: raw save files, or a PCSX2-compatible memory card image (to move saves
-   between ARMSX2 and the native port). Not decided.
+   between ARMSX2 and the native port). Decided 2026-10-26 (developer): PCSX2 `.ps2` card images through
+   PCSX2's own SIO2 code; the game's libmc2 runs unchanged (patches 0071-0073,
+   `reports/2026-10-26-memory-cards.md`).
 6. **Movies.** Sofdec: MPEG-1/2 video plus ADX audio (port map, Movies). Decode with FFmpeg into
    a texture. The game also uses the IPU (`ipu.c`). Whether that's only for movies is
    **unknown**.

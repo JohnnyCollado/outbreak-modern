@@ -1,0 +1,174 @@
+From 0a73b5f18d0ef9eebf6422f20d822ccea6afa571 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:58:19 -0400
+Subject: [PATCH 73/73] Recompiler: [general] recompile names functions
+ translated from the game even when the runtime has a stub of that name
+
+---
+ ps2xRecomp/include/ps2recomp/ps2_recompiler.h |  2 +
+ ps2xRecomp/include/ps2recomp/types.h          |  3 ++
+ ps2xRecomp/src/lib/config_manager.cpp         |  6 +++
+ ps2xRecomp/src/lib/ps2_recompiler.cpp         | 19 +++++++
+ ps2xTest/src/ps2_recompiler_tests.cpp         | 51 +++++++++++++++++++
+ 5 files changed, 81 insertions(+)
+
+diff --git a/ps2xRecomp/include/ps2recomp/ps2_recompiler.h b/ps2xRecomp/include/ps2recomp/ps2_recompiler.h
+index dd62275..a463cd9 100644
+--- a/ps2xRecomp/include/ps2recomp/ps2_recompiler.h
++++ b/ps2xRecomp/include/ps2recomp/ps2_recompiler.h
+@@ -69,6 +69,8 @@ namespace ps2recomp
+         std::unordered_set<uint32_t> m_skipFunctionStarts;
+         std::unordered_set<std::string> m_stubFunctions;
+         std::unordered_set<uint32_t> m_stubFunctionStarts;
++        std::unordered_set<std::string> m_recompileFunctions;     // config recompile: no name-based stub
++        std::unordered_set<uint32_t> m_recompileFunctionStarts;
+         std::unordered_map<uint32_t, std::string> m_stubHandlerBindingsByStart;
+         std::unordered_set<uint32_t> m_entryPointHintStarts;
+         std::unordered_set<uint32_t> m_correctnessCriticalFunctionStarts;
+diff --git a/ps2xRecomp/include/ps2recomp/types.h b/ps2xRecomp/include/ps2recomp/types.h
+index 7d63d97..a7fc30f 100644
+--- a/ps2xRecomp/include/ps2recomp/types.h
++++ b/ps2xRecomp/include/ps2recomp/types.h
+@@ -191,6 +191,9 @@ namespace ps2recomp
+         std::vector<std::string> skipFunctions;
+         std::unordered_map<uint32_t, std::string> patches;
+         std::vector<std::string> stubImplementations;
++        // Functions translated from the game even though the runtime has a stub of that name ("name" or
++        // "name@0xADDR"); a function in stubImplementations is still stubbed.
++        std::vector<std::string> recompileFunctions;
+         std::vector<std::string> entryPointHints;
+         std::unordered_map<uint32_t, uint32_t> mmioByInstructionAddress;
+         std::vector<JumpTable> jumpTables;
+diff --git a/ps2xRecomp/src/lib/config_manager.cpp b/ps2xRecomp/src/lib/config_manager.cpp
+index df83f5b..b371b1d 100644
+--- a/ps2xRecomp/src/lib/config_manager.cpp
++++ b/ps2xRecomp/src/lib/config_manager.cpp
+@@ -108,6 +108,10 @@ namespace ps2recomp
+             {
+                 config.skipFunctions = toml::find<std::vector<std::string>>(general, "skip");
+             }
++            if (general.contains("recompile") && general.at("recompile").is_array())
++            {
++                config.recompileFunctions = toml::find<std::vector<std::string>>(general, "recompile");
++            }
+             else if (data.contains("skip") && data.at("skip").is_array())
+             {
+                 config.skipFunctions = toml::find<std::vector<std::string>>(data, "skip");
+@@ -306,6 +310,8 @@ namespace ps2recomp
+         general["patch_cache"] = config.patchCache;
+         general["skip"] = config.skipFunctions;
+         general["stubs"] = config.stubImplementations;
++        if (!config.recompileFunctions.empty())
++            general["recompile"] = config.recompileFunctions;
+         general["entry_points"] = config.entryPointHints;
+         data["general"] = general;
+ 
+diff --git a/ps2xRecomp/src/lib/ps2_recompiler.cpp b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+index 740af3f..90c6508 100644
+--- a/ps2xRecomp/src/lib/ps2_recompiler.cpp
++++ b/ps2xRecomp/src/lib/ps2_recompiler.cpp
+@@ -854,6 +854,8 @@ namespace ps2recomp
+             m_skipFunctionStarts.clear();
+             m_stubFunctions.clear();
+             m_stubFunctionStarts.clear();
++            m_recompileFunctions.clear();
++            m_recompileFunctionStarts.clear();
+             m_stubHandlerBindingsByStart.clear();
+             m_entryPointHintStarts.clear();
+             m_correctnessCriticalFunctionStarts.clear();
+@@ -870,6 +872,18 @@ namespace ps2recomp
+                     m_skipFunctionStarts.insert(*selector.start);
+                 }
+             }
++            for (const auto &name : m_config.recompileFunctions)
++            {
++                const FunctionSelector selector = parseFunctionSelector(name);
++                if (!selector.name.empty())
++                {
++                    m_recompileFunctions.insert(selector.name);
++                }
++                if (selector.start.has_value())
++                {
++                    m_recompileFunctionStarts.insert(*selector.start);
++                }
++            }
+             for (const auto &name : m_config.stubImplementations)
+             {
+                 const FunctionSelector selector = parseFunctionSelector(name);
+@@ -2244,6 +2258,11 @@ namespace ps2recomp
+         {
+             return true;
+         }
++        // config recompile: the game's own code even where the runtime has a stub of the name (patch 0073).
++        if (m_recompileFunctionStarts.contains(function.start) || m_recompileFunctions.contains(function.name))
++        {
++            return false;
++        }
+         return ps2_runtime_calls::isStubName(function.name);
+     }
+ 
+diff --git a/ps2xTest/src/ps2_recompiler_tests.cpp b/ps2xTest/src/ps2_recompiler_tests.cpp
+index 62e9ec2..9f6dbca 100644
+--- a/ps2xTest/src/ps2_recompiler_tests.cpp
++++ b/ps2xTest/src/ps2_recompiler_tests.cpp
+@@ -1555,6 +1555,57 @@ void register_ps2_recompiler_tests()
+             std::filesystem::remove_all(tempRoot, removeError);
+         });
+ 
++        // A game function that shares a runtime stub's name (Resident Evil Outbreak's libdbc sceDbcInit, which its
++        // libmc2 needs for real) is stubbed by name; [general] recompile keeps the game's code (patch 0073).
++        tc.Run("recompile config keeps a game function that has a runtime stub's name", [](TestCase &t) {
++            const std::string uniqueSuffix =
++                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
++            const std::filesystem::path tempRoot =
++                std::filesystem::temp_directory_path() / ("ps2recomp-recompile-" + uniqueSuffix);
++            const std::filesystem::path elfPath = tempRoot / "game.elf";
++            const std::filesystem::path mapPath = tempRoot / "functions.csv";
++            std::filesystem::create_directories(tempRoot);
++            const bool elfWritten = writeMinimalMipsElfWithJalFallbackTarget(elfPath);
++            {
++                std::ofstream map(mapPath);
++                map << "name,start,end,size\n";
++                map << "sceDbcInit,0x00100000,0x00100010,0x10\n";
++                map << "FUN_00100010,0x00100010,0x00100018,0x8\n";
++            }
++            auto readFile = [](const std::filesystem::path &path) {
++                std::ifstream file(path);
++                return std::string{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
++            };
++            auto generate = [&](const std::string &extra, const std::filesystem::path &outputPath) {
++                const std::filesystem::path configPath = outputPath.string() + ".toml";
++                bool ok = writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
++                {
++                    std::ofstream config(configPath, std::ios::app);
++                    config << "ghidra_output = \"" << mapPath.generic_string() << "\"\n" << extra;
++                    ok = ok && static_cast<bool>(config);
++                }
++                PS2Recompiler recompiler(configPath.string());
++                ok = ok && recompiler.initialize() && recompiler.recompile();
++                if (ok)
++                    recompiler.generateOutput();
++                return ok ? readFile(outputPath / "sceDbcInit_0x100000.cpp") : std::string{};
++            };
++            t.IsTrue(elfWritten, "test ELF should be generated");
++            const std::string byName = generate("", tempRoot / "out-default");
++            const std::string kept = generate("recompile = [\"sceDbcInit\"]\n", tempRoot / "out-recompile");
++            const std::string keptByAddress = generate("recompile = [\"sceDbcInit@0x00100000\"]\n", tempRoot / "out-address");
++            t.IsTrue(byName.find("ps2_stubs::sceDbcInit(") != std::string::npos,
++                     "without recompile the runtime stub's name wins");
++            t.IsTrue(!kept.empty() && kept.find("ps2_stubs::sceDbcInit(") == std::string::npos &&
++                         kept.find("0x100010") != std::string::npos,
++                     "with recompile the game's own code (its call to 0x100010) is generated");
++            t.IsTrue(!keptByAddress.empty() && keptByAddress.find("ps2_stubs::sceDbcInit(") == std::string::npos,
++                     "recompile also takes name@address");
++
++            std::error_code removeError;
++            std::filesystem::remove_all(tempRoot, removeError);
++        });
++
+         tc.Run("configured entry hint synthesizes an omitted standalone function", [](TestCase &t) {
+             const std::string uniqueSuffix =
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+-- 
+2.46.2.windows.1
+

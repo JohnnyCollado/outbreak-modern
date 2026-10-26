@@ -10,6 +10,9 @@ Source: R0-003 (8), phase 1.1 T2/T4 (`docs/history/`). The everyday commands are
   pruning stale `.cpp` (used by `ob.sh recompile`): identical files keep their mtime, so ninja skips them.
 - `PY tools/mwo3_to_elf.py` — wraps overlay `PROG/*.BIN` (MWo3) as ELFs for the recompiler (used by `ob.sh recompile`).
   Test: tools/test_mwo3_to_elf.py.
+- `PY -I tools/ob/mcd.py blank|format|info <card.ps2>` — PCSX2 `.ps2` memory cards: a new unformatted card (as PCSX2
+  makes), a new empty formatted card (mymcplus' layout, PCSX2's ECC), or whether a card is formatted and its saves
+  (root folders and their files). Never overwrites a file. Used for the memory card checks (patches 0071-0076).
 - `PY tools/q_scan.py` — read-only VU0 Q-register check. Test: tools/test_q_scan.py.
 - `bash tools/recomp_cycle.sh` — Linux/xvfb form of the recompile + boot cycle (not run on Windows).
 - `gate/boot.script` — scripted hidden boot to character select, six captures (grammar: `native/ob_diag/src/input_script.h`, was the patch 0020 header,

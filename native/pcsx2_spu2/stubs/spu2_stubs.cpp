@@ -23,9 +23,6 @@ void GSCapture::DeliverAudioPacket(const float*) {}
 std::vector<std::pair<std::string, std::string>> AudioStream::GetCubebDriverNames() { return {}; }
 std::vector<AudioStream::DeviceInfo> AudioStream::GetCubebOutputDevices(const char*) { return {}; }
 
-// AudioStream's display names (settings UI): untranslated.
-const char* Host::TranslateToCString(const std::string_view, const std::string_view msg) { return msg.data(); }
-
 // SPU2freeze (save states, spu2freeze.cpp not built): nothing to save.
 s32 SPU2Savestate::FreezeIt(DataBlock&) { return -1; }
 s32 SPU2Savestate::ThawIt(DataBlock&) { return -1; }

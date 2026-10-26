@@ -1,0 +1,379 @@
+From a8053abbf1b9d80052c30ec6def3186dfb0730fa Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 06:38:55 -0400
+Subject: [PATCH 75/76] IOP: RPC handlers of emulated servers run as IOP
+ threads (the server thread's priority) until they return, so they can block
+ on driver threads; handler stacks reused
+
+---
+ ps2xIOP/src/emulator/core/iop_kernel.cpp  | 46 +++++++++++
+ ps2xIOP/src/emulator/core/iop_kernel.h    | 12 +++
+ ps2xIOP/src/emulator/iop_emulator.cpp     | 57 +++++++++++++-
+ ps2xIOP/src/emulator/iop_emulator_const.h |  6 +-
+ ps2xIOP/src/emulator/services/iop_rpc.cpp | 19 +++--
+ ps2xIOP/src/emulator/services/iop_rpc.h   | 15 ++++
+ ps2xIOP/tests/iop_emulator_tests.cpp      | 94 +++++++++++++++++++++++
+ 7 files changed, 241 insertions(+), 8 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.cpp b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+index ece5ee2..03fa06b 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.cpp
++++ b/ps2xIOP/src/emulator/core/iop_kernel.cpp
+@@ -841,6 +841,52 @@ namespace ps2x::iop::detail
+         }
+     }
+ 
++    int IopKernel::createInternalThread(uint32_t entry, uint32_t gp, uint32_t priority, uint32_t stackBase,
++                                        uint32_t stackSize, uint32_t a0, uint32_t a1, uint32_t a2,
++                                        uint32_t returnSentinel)
++    {
++        if (stackBase == 0u || stackSize < 0x100u)
++            return -400;
++        IopThread thread;
++        thread.id = static_cast<int>(m_nextThreadId++);
++        thread.entry = entry;
++        thread.stackSize = stackSize;
++        thread.priority = std::clamp<uint32_t>(priority, 1u, 126u);
++        thread.initialPriority = thread.priority;
++        thread.cpu = {};
++        thread.cpu.pc = entry;
++        thread.cpu.gpr[4] = a0;
++        thread.cpu.gpr[5] = a1;
++        thread.cpu.gpr[6] = a2;
++        thread.cpu.gpr[28] = gp;
++        thread.cpu.gpr[29] = ((stackBase + stackSize) & ~15u) - 16u;
++        thread.cpu.gpr[31] = returnSentinel;
++        thread.state = IopThreadState::Ready; // stackBase stays 0: the caller's stack is not freed with the thread
++        const int id = thread.id;
++        m_threads.emplace(id, std::move(thread));
++        return id;
++    }
++
++    const IopThread *IopKernel::findThread(int id) const
++    {
++        const auto it = m_threads.find(id);
++        return it == m_threads.end() ? nullptr : &it->second;
++    }
++
++    void IopKernel::deleteInternalThread(int id)
++    {
++        const auto it = m_threads.find(id);
++        if (it == m_threads.end())
++            return;
++        if (m_currentThread == &it->second)
++            m_currentThread = nullptr;
++        if (m_headThreadId == id)
++            m_headThreadId = -1;
++        if (it->second.stackBase != 0u)
++            (void)m_memory.freeAllocation(it->second.stackBase);
++        m_threads.erase(it);
++    }
++
+     void IopKernel::sleepCurrent(IopCpuState &cpu)
+     {
+         if (m_currentThread == nullptr)
+diff --git a/ps2xIOP/src/emulator/core/iop_kernel.h b/ps2xIOP/src/emulator/core/iop_kernel.h
+index 2983ef3..a5e15ab 100644
+--- a/ps2xIOP/src/emulator/core/iop_kernel.h
++++ b/ps2xIOP/src/emulator/core/iop_kernel.h
+@@ -64,6 +64,18 @@ namespace ps2x::iop::detail
+         [[nodiscard]] int createInternalEventFlag(uint32_t attr, uint32_t option, uint32_t bits);
+         [[nodiscard]] bool setInternalEventFlag(int id, uint32_t bits);
+ 
++        // A thread the host starts for a guest call that may block (an RPC handler, patch 0075): Ready at
++        // entry(a0, a1, a2) with gp on the caller's stack (stackBase, stackSize bytes: the caller owns and reuses it,
++        // since IOP heap blocks are not reused once freed), returning to returnSentinel (Dormant there, v0 in
++        // cpu.gpr[2]).
++        [[nodiscard]] int createInternalThread(uint32_t entry, uint32_t gp, uint32_t priority, uint32_t stackBase,
++                                               uint32_t stackSize, uint32_t a0, uint32_t a1, uint32_t a2,
++                                               uint32_t returnSentinel);
++        [[nodiscard]] const IopThread *findThread(int id) const;
++        void deleteInternalThread(int id);
++        // The running thread's priority (an RPC server registering from its thread); 0x40 outside a thread.
++        [[nodiscard]] uint32_t currentPriority() const noexcept { return m_currentThread ? m_currentThread->priority : 0x40u; }
++
+         void sleepCurrent(IopCpuState &cpu);
+         void delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu);
+ 
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index cac2298..8ba047d 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -125,6 +125,7 @@ namespace ps2x::iop::detail
+ 
+         void reset()
+         {
++            freeRpcStacks.clear(); // their blocks go with memory.reset()
+             memory.reset();
+             kernel.reset();
+             modules.clear();
+@@ -590,6 +591,59 @@ namespace ps2x::iop::detail
+             return callFunction(address, a0, a1, a2, a3, gp);
+         }
+ 
++        uint32_t executeGuestFunctionOnThread(uint32_t address,
++                                              uint32_t a0,
++                                              uint32_t a1,
++                                              uint32_t a2,
++                                              uint32_t gp,
++                                              uint32_t priority,
++                                              bool &finished) override
++        {
++            // Patch 0075: the scheduler runs (this thread first at its priority; the others while it blocks) until
++            // it is back at the sentinel. Small steps: a handler that never blocks ends within its first slice, as
++            // the nested call did. The budget (one IOP second) only guards against a handler that never returns.
++            finished = false;
++            if (freeRpcStacks.empty())
++            {
++                const uint32_t stack = memory.allocate(kRpcThreadStackSize + kStackGuardBytes, 16u);
++                if (stack == 0u)
++                {
++                    log(LogLevel::Error, "[IOP] no IOP memory for an RPC handler thread's stack");
++                    return 0u;
++                }
++                freeRpcStacks.push_back(stack);
++            }
++            const uint32_t stack = freeRpcStacks.back();
++            freeRpcStacks.pop_back();
++            const int id = kernel.createInternalThread(address, gp, priority, stack, kRpcThreadStackSize, a0, a1, a2,
++                                                       kThreadReturnSentinel);
++            if (id <= 0)
++            {
++                freeRpcStacks.push_back(stack);
++                return 0u;
++            }
++            uint64_t ran = 0u;
++            for (;;)
++            {
++                const IopThread *thread = kernel.findThread(id);
++                if (thread == nullptr || thread->state == IopThreadState::Dormant || thread->state == IopThreadState::Dead)
++                    break;
++                if (ran >= kRpcThreadBudgetCycles)
++                {
++                    log(LogLevel::Warning, "[IOP] RPC handler thread did not return within its budget");
++                    break;
++                }
++                runCycles(kRpcThreadStepCycles);
++                ran += kRpcThreadStepCycles;
++            }
++            const IopThread *thread = kernel.findThread(id);
++            finished = thread != nullptr && thread->state == IopThreadState::Dormant;
++            const uint32_t result = thread != nullptr ? thread->cpu.gpr[2] : 0u;
++            kernel.deleteInternalThread(id);
++            freeRpcStacks.push_back(stack);
++            return finished ? result : 0u;
++        }
++
+         uint32_t executeGuestFunctionWithBudget(uint32_t address,
+                                                 uint32_t a0,
+                                                 uint32_t a1,
+@@ -971,7 +1025,8 @@ namespace ps2x::iop::detail
+         };
+         std::map<int, PendingDma> pendingDmaInterrupts;
+         uint64_t nextDmaCompletionCycle = UINT64_MAX; // earliest completionCycle above (patch 0049), and nextSpu2Cycle
+-        uint64_t nextSpu2Cycle = 0;                   // when the external SPU2 is next due (patch 0056); 0 = at once
++        uint64_t nextSpu2Cycle = 0;
++        std::vector<uint32_t> freeRpcStacks; // RPC handler thread stacks, allocated once and reused (patch 0075)                   // when the external SPU2 is next due (patch 0056); 0 = at once
+         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
+         uint32_t nextModuleId = 1;
+         uint32_t moduleCursor = kModuleLoadBase;
+diff --git a/ps2xIOP/src/emulator/iop_emulator_const.h b/ps2xIOP/src/emulator/iop_emulator_const.h
+index 52da380..b06c5b5 100644
+--- a/ps2xIOP/src/emulator/iop_emulator_const.h
++++ b/ps2xIOP/src/emulator/iop_emulator_const.h
+@@ -16,4 +16,8 @@ constexpr uint32_t kStackGuardBytes = 64u;
+ // IOP interrupt lines of the SPU2 (INTC 9) and its DMA channels 4 and 7 (32 + channel), as intrman numbers them.
+ constexpr int kSpu2Irq = 9;
+ constexpr int kSpu2Dma4Irq = 0x24;
+-constexpr int kSpu2Dma7Irq = 0x28;
+\ No newline at end of file
++constexpr int kSpu2Dma7Irq = 0x28;
++// RPC handlers run as IOP threads (patch 0075): stack, scheduler step and budget (one IOP second at 36.864 MHz).
++constexpr uint32_t kRpcThreadStackSize = 0x2000u;
++constexpr uint64_t kRpcThreadStepCycles = 64u;
++constexpr uint64_t kRpcThreadBudgetCycles = 36'864'000u;
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index 5e09b3e..c0f5a72 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -220,6 +220,7 @@ namespace ps2x::iop::detail
+             server.callback = m_memory.read32(stackPointer + 16u);
+             server.callbackBuffer = m_memory.read32(stackPointer + 20u);
+             server.queue = m_memory.read32(stackPointer + 24u);
++            server.priority = m_kernel.currentPriority();
+             m_servers[server.sid] = server;
+             if (server.serverData != 0u)
+             {
+@@ -319,12 +320,18 @@ namespace ps2x::iop::detail
+             }
+         }
+ 
+-        uint32_t returnPointer = executor.executeGuestFunction(server.function,
+-                                                               request.function,
+-                                                               server.buffer,
+-                                                               request.send.size,
+-                                                               0u,
+-                                                               server.gp);
++        // On a PS2 the handler runs in the server's thread (sceSifRpcLoop) and may block: Resident Evil Outbreak's
++        // dbcman calls mc2_s1, whose sio2man transfer waits for sio2man's own thread (patch 0075). A nested call
++        // cannot block, so the handler runs as an IOP thread of the server thread's priority until it returns.
++        bool finished = false;
++        uint32_t returnPointer = executor.executeGuestFunctionOnThread(server.function,
++                                                                       request.function,
++                                                                       server.buffer,
++                                                                       request.send.size,
++                                                                       server.gp,
++                                                                       server.priority,
++                                                                       finished);
++        (void)finished; // a handler that never returned is logged by the emulator; its buffer is replied as is
+         if (returnPointer == 0u)
+             returnPointer = server.buffer;
+         if (request.receive.address != 0u && request.receive.size != 0u && returnPointer != 0u)
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.h b/ps2xIOP/src/emulator/services/iop_rpc.h
+index a4286ba..c9ff1ef 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.h
++++ b/ps2xIOP/src/emulator/services/iop_rpc.h
+@@ -28,6 +28,20 @@ namespace ps2x::iop::detail
+                                                             uint32_t a2,
+                                                             uint32_t a3,
+                                                             uint32_t gp) = 0;
++        // Runs address(a0, a1, a2) as an IOP thread of the given priority until it returns, other threads running
++        // whenever it blocks (patch 0075: an RPC handler waiting for a driver thread). finished = it returned.
++        [[nodiscard]] virtual uint32_t executeGuestFunctionOnThread(uint32_t address,
++                                                                    uint32_t a0,
++                                                                    uint32_t a1,
++                                                                    uint32_t a2,
++                                                                    uint32_t gp,
++                                                                    uint32_t priority,
++                                                                    bool &finished)
++        {
++            (void)priority;
++            finished = true;
++            return executeGuestFunction(address, a0, a1, a2, 0u, gp);
++        }
+         [[nodiscard]] virtual uint32_t executeGuestFunctionWithBudget(uint32_t address,
+                                                                       uint32_t a0,
+                                                                       uint32_t a1,
+@@ -66,6 +80,7 @@ namespace ps2x::iop::detail
+             uint32_t callback = 0;
+             uint32_t callbackBuffer = 0;
+             uint32_t queue = 0;
++            uint32_t priority = 0x40; // the registering (server) thread's, for the handler's thread (patch 0075)
+         };
+ 
+         IopHost &m_host;
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 34c7be8..d41fefd 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -288,6 +288,68 @@ namespace
+                     importTable, sizeof(importTable));
+     }
+ 
++    // An RPC server (SID 0xB10C0001) whose handler blocks (patch 0075): DelayThread(100), then it stores
++    // GetThreadId() in its buffer and returns the buffer.
++    void writeBlockingRpcServerIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t sifcmdStub = loadAddress + 0x60u + 20u;
++        constexpr uint32_t delayStub = loadAddress + 0xA0u + 20u;
++        constexpr uint32_t threadIdStub = delayStub + 8u;
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++
++        const uint32_t entry[] = {
++            0x27BDFFE0u, 0xAFBF001Cu,
++            0x3C040001u, 0x34840200u, // a0 = server data
++            0x3C05B10Cu, 0x34A50001u, // a1 = 0xB10C0001
++            0x3C060001u, 0x34C60300u, // a2 = handler
++            0x3C070001u, 0x34E70400u, // a3 = buffer
++            0xAFA00010u, 0xAFA00014u, 0xAFA00018u,
++            jal(sifcmdStub), 0x00000000u, // sceSifRegisterRpc
++            0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, 0x00000000u,
++        };
++        const uint32_t sifcmdImports[] = {
++            0x41E00000u, 0u, 0x00000101u, 0x63666973u, 0x0000646Du, // "sifcmd"
++            0x03E00008u, 0x24000011u, 0u, 0u,                     // 17 sceSifRegisterRpc
++        };
++        const uint32_t thbaseImports[] = {
++            0x41E00000u, 0u, 0x00000101u, 0x61626874u, 0x00006573u, // "thbase"
++            0x03E00008u, 0x24000021u,                             // 33 DelayThread
++            0x03E00008u, 0x24000014u,                             // 20 GetThreadId
++            0u, 0u,
++        };
++        const uint32_t handler[] = {
++            0x27BDFFE0u, 0xAFBF001Cu, 0xAFA50018u, // save ra and the buffer (a1)
++            0x34040064u, jal(delayStub), 0x00000000u, // DelayThread(100)
++            jal(threadIdStub), 0x00000000u,          // GetThreadId()
++            0x8FA50018u, 0x00000000u,                // lw a1, 0x18(sp) + load delay slot
++            0xACA20000u, 0x00A01021u,                // *buffer = id; return buffer
++            0x8FBF001Cu, 0x27BD0020u, 0x03E00008u, 0x00000000u,
++        };
++
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x340u; program.memsz = 0x500u; program.flags = 7u; program.align = 4u;
++
++        std::vector<uint8_t> segment(program.filesz, 0u);
++        std::memcpy(segment.data(), entry, sizeof(entry));
++        std::memcpy(segment.data() + 0x60u, sifcmdImports, sizeof(sifcmdImports));
++        std::memcpy(segment.data() + 0xA0u, thbaseImports, sizeof(thbaseImports));
++        std::memcpy(segment.data() + 0x300u, handler, sizeof(handler));
++        std::fill(host.guest.begin() + address, host.guest.end(), 0u);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
++    }
++
+     void writeRelocatableRpcServerIrx(TestHost &host, uint32_t address)
+     {
+         constexpr uint32_t codeOffset = 0x100u;
+@@ -1206,6 +1268,38 @@ int main()
+     if (!expect(iop.debugSnapshot().emulatorInstructions > soundInstructionsBefore,
+                 "Sound RPC did not execute the physical IOP handler")) return 1;
+ 
++    {
++        // RPC handlers run as IOP threads (patch 0075): one that sleeps (DelayThread) resumes and returns, and it
++        // runs on a thread of its own (GetThreadId != 0), as in the server thread's sceSifRpcLoop on a PS2.
++        iop.reset();
++        writeBlockingRpcServerIrx(host, 0x100u);
++        const ModuleLoadResult blockingModule = iop.loadModuleBuffer(0x100u);
++        if (!expect(blockingModule.handled && blockingModule.startResult == 0 && iop.canBindRpc(0xB10C0001u),
++                    "Blocking RPC server IRX did not start")) return 1;
++        std::memset(host.guest.data() + 0xA00u, 0, sizeof(uint32_t));
++        RpcRequest blockingRequest{};
++        blockingRequest.sid = 0xB10C0001u;
++        blockingRequest.receive = {0xA00u, sizeof(uint32_t)};
++        const RpcResult blockingResult = iop.handleRpc(blockingRequest);
++        uint32_t handlerThreadId = 0u;
++        std::memcpy(&handlerThreadId, host.guest.data() + 0xA00u, sizeof(handlerThreadId));
++        if (!expect(blockingResult.handled && handlerThreadId != 0u,
++                    "an RPC handler must run on an IOP thread that can block (DelayThread) and then return")) return 1;
++        // Handler threads reuse their stacks: IOP heap blocks are not reused once freed (bump allocator), so a stack
++        // per call ran the heap out after a few hundred calls.
++        bool everyCallRan = true;
++        for (int call = 0; call < 300 && everyCallRan; ++call)
++        {
++            std::memset(host.guest.data() + 0xA00u, 0, sizeof(uint32_t));
++            const RpcResult repeated = iop.handleRpc(blockingRequest);
++            uint32_t id = 0u;
++            std::memcpy(&id, host.guest.data() + 0xA00u, sizeof(id));
++            everyCallRan = repeated.handled && id != 0u;
++        }
++        if (!expect(everyCallRan, "300 RPC calls in a row must each run their handler thread")) return 1;
++    }
++
++    iop.reset();
+     constexpr uint32_t relocatableRpcSid = 0xA11CE001u;
+     writeRelocatableRpcServerIrx(host, 0x100u);
+     const ModuleLoadResult relocatableRpcModule = iop.loadModuleBuffer(0x100u);
+-- 
+2.46.2.windows.1
+

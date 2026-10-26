@@ -9,7 +9,9 @@ other diagnostics live in the ob_diag plugin (`native/ob_diag`); `ob.sh boot` lo
 `ob.sh boot` and `ob.sh gate` pass `$OB_GAME` to the runner: default `game_files/SLPM_654.28` (the extracted folder,
 as before). `OB_GAME=<image.iso>` boots the disc image in place, `OB_GAME=<folder>` an extracted folder (boot ELF from
 its `SYSTEM.CNF`). The log's first lines say which: `[game] image|folder|elf <path> boot=cdrom0:\SLPM_654.28;1
-serial=SLPM-65428`. With an image, `mc0` is `<image folder>/mc0`. Verified 2026-10-24: gate 3/3 from
+serial=SLPM-65428`. Memory cards (patches 0071-0073): PCSX2 `.ps2` files in the `saves` folder (default
+`<exe folder>/memcards`); scripted and live-pad boots get an empty `$OB_ROOT/saves-run/<tag>` (`PS2X_SAVES`: no card,
+as the PCSX2 references) unless `PS2X_SAVES` is set. Verified 2026-10-24: gate 3/3 from
 `ps2_emu/roms/Biohazard - Outbreak (English v2.1).iso` (max 0) and from `game_files`; `gate/play.script` from the
 image reaches J's Bar (`C:\ob\frames-playiso\load240s-1.png`). A plain runner start takes the same from
 `outbreak.ini` beside the exe (`native/outbreak.ini.example`) when no argument is given.

@@ -73,10 +73,23 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   `PS2X_GS=pcsx2-sw|pcsx2-vk`. A performance switch, not a diagnostic.
 - Game data (patch 0043): the runner takes an ISO 9660 disc image (read in place through one buffered handle; the
   boot ELF is SYSTEM.CNF's `BOOT2` inside it; `sceCdSearchFile` answers with the image's real LSNs), an extracted
-  folder (boot ELF from its `SYSTEM.CNF`), or the boot ELF itself (the original form). Memory cards (`mc0`) and
-  `host:` sit beside the image, or in the folder. stdout `[game] <image|folder|elf> <path> boot=... serial=...`.
+  folder (boot ELF from its `SYSTEM.CNF`), or the boot ELF itself (the original form). `host:` sits beside the
+  image, or in the folder. stdout `[game] <image|folder|elf> <path> boot=... serial=...`.
+- Memory cards (patches 0071-0073, `reports/2026-10-26-memory-cards.md`): `PS2X_SIO2=pcsx2` (default) | `off`.
+  PCSX2's SIO2 + memory cards (`native/pcsx2_sio2`) sit behind the IOP's SIO2 registers and DMA 11/12. The game's
+  own libmc2/libdbc and disc modules (`sio2man`, `mc2_s1`) do the rest. Cards are PCSX2 `.ps2` files (8 MB + ECC)
+  in the memory card folder: `PS2X_SAVES`, else `outbreak.ini` `saves`, else `<exe folder>/memcards`. `Mcd001.ps2`
+  = slot 1, made blank (unformatted, as PCSX2) when missing except under `PS2X_SAVES`; `Mcd002.ps2` = slot 2 if
+  present. A write reaches the file before the IOP sees its result (the runner ends with `_Exit`). stdout
+  `[sio2] pcsx2 memory cards in <folder> (PS2X_SAVES|settings|default)`. `ob.sh boot --script/--pad` sets
+  `PS2X_SAVES` to an empty `$OB_ROOT/saves-run/<tag>` (no card, as the PCSX2 references) unless it is already set.
+  `ob.sh recompile` adds `recompile = ["sceDbcInit", "sceDbcEnd"]` to `decomp.toml` (patch 0073): libmc2 needs
+  the game's own sceDbcInit. Also needed: 0074 (`sceSifSetDmaIntr`), 0075 (RPC handlers as IOP threads), 0076
+  (`LWL`/`LWR` pair). In the game: OPTIONS > SAVE/LOAD > SAVE DATA (a blank card is formatted first, as on a PS2),
+  LOAD DATA; the save is the folder `BISLPM-65428NETBIO`. `python -I tools/ob/mcd.py info <card>` lists it.
 - `outbreak.ini` (engine, patch 0043): start-up settings beside the exe, or `PS2X_SETTINGS=<path>`; read once;
-  keys `game` (image, folder or ELF; the command-line argument wins), `textures` (PCSX2 layout
+  keys `game` (image, folder or ELF; the command-line argument wins), `saves` (memory card folder, patch 0072),
+  `textures` (PCSX2 layout
   `<root>/<serial>/replacements`, loaded by the PCSX2 GS with `pcsx2-vk` on Windows), `mods` (`<root>/<serial>/*.pnach`
   memory patches, e.g. widescreen), `upscale` (1..8, `pcsx2-vk`), `window` (`<W>x<H>`), `gpu_driver`, `vu1`
   (patches 0043-0050; `docs/ops/gs.md` "High resolution, widescreen, texture packs"). A bad line is logged once as

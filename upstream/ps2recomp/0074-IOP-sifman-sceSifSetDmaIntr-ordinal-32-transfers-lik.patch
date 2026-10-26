@@ -1,0 +1,129 @@
+From 41956b981bda33dbc1256685288b2c6d6d02d363 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 01:42:01 -0400
+Subject: [PATCH] IOP: sifman sceSifSetDmaIntr (ordinal 32) transfers like
+ sceSifSetDma and then calls its completion handler
+
+---
+ ps2xIOP/src/emulator/iop_emulator.cpp | 11 ++++
+ ps2xIOP/tests/iop_emulator_tests.cpp  | 75 +++++++++++++++++++++++++++
+ 2 files changed, 86 insertions(+)
+
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index a51f619..cac2298 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -389,6 +389,17 @@ namespace ps2x::iop::detail
+             }
+             if (iequals(call.library, "ioman") && ioman.dispatchImport(call.ordinal, cpu, *this))
+                 return ImportDisposition::Handled;
++            if (iequals(call.library, "sifman") && call.ordinal == 32u)
++            {
++                // sceSifSetDmaIntr(dmat, len, func, data) (ps2sdk sifman exports 32): sceSifSetDma's transfer, then
++                // func(data) in interrupt context once it is done (patch 0074). The copy is synchronous here, so
++                // the handler is queued as a guest callback at once.
++                const uint32_t handler = a2, handlerData = a3;
++                (void)rpc.dispatchSifManImport(7u, cpu);
++                if (cpu.gpr[2] != 0u && handler != 0u)
++                    pendingGuestCallbacks.emplace(totalCycles, ScheduledGuestCallback{handler, cpu.gpr[28], handlerData});
++                return ImportDisposition::Handled;
++            }
+             if (iequals(call.library, "sifman"))
+             {
+                 return rpc.dispatchSifManImport(call.ordinal, cpu)
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 3501015..34c7be8 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -751,6 +751,64 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+     }
+ 
++    // Start function: sceSifSetDmaIntr(descriptor, 1, callback, 0x1234) and returns its id; the callback stores its
++    // argument at IOP 0xF20 (patch 0074).
++    void writeSifDmaIntrIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t importTableAddress = loadAddress + 0x100u;
++        constexpr uint32_t setDmaIntrStub = importTableAddress + 20u;
++        constexpr uint32_t payloadAddress = loadAddress + 0x1A0u;
++        constexpr uint32_t eeDestination = 0xC10u;
++
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x200u; program.memsz = 0x200u; program.flags = 7u; program.align = 4u;
++
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++        const uint32_t entry[] = {
++            0x27BDFFF0u, 0xAFBF000Cu,
++            0x3C040001u, 0x34840180u, 0x24050001u, // a0 = descriptor, a1 = 1
++            0x3C060001u, 0x34C60060u,              // a2 = callback (loadAddress + 0x60)
++            0x34071234u,                           // a3 = 0x1234
++            jal(setDmaIntrStub), 0x00000000u,
++            0x8FBF000Cu, 0x27BD0010u, 0x03E00008u, 0x00000000u,
++        };
++        const uint32_t callback[] = {
++            0xAC040F20u, // sw a0, 0xF20($0)
++            0x03E00008u, 0x00000000u,
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x6D666973u, 0x00006E61u, // "sifman"
++            0x03E00008u, 0x24000020u, // 32 sceSifSetDmaIntr
++            0u, 0u,
++        };
++        const uint32_t descriptor[] = {
++            payloadAddress, eeDestination, sizeof(uint32_t), 0u,
++        };
++        constexpr uint32_t payload = 0x494E5452u; // "RTNI"
++
++        std::vector<uint8_t> segment(program.filesz, 0u);
++        std::memcpy(segment.data(), entry, sizeof(entry));
++        std::memcpy(segment.data() + 0x60u, callback, sizeof(callback));
++        std::memcpy(segment.data() + 0x100u, imports, sizeof(imports));
++        std::memcpy(segment.data() + 0x180u, descriptor, sizeof(descriptor));
++        std::memcpy(segment.data() + 0x1A0u, &payload, sizeof(payload));
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
++    }
++
+     void writeMcmanRegistrationIrx(TestHost &host, uint32_t address)
+     {
+         constexpr uint32_t codeOffset = 0x100u;
+@@ -1226,6 +1284,23 @@ int main()
+     if (!expect(sifDmaPayload == 0x53494621u,
+                 "IOP sceSifSetDma did not copy the payload into EE memory")) return 1;
+ 
++    {
++        // sceSifSetDmaIntr (sifman 32, patch 0074): the same transfer as sceSifSetDma, then func(data) once it is
++        // done. Resident Evil Outbreak's dbcman sends every reply this way ("dbcman: sceSifSetDma faild" before).
++        iop.reset();
++        writeSifDmaIntrIrx(host, 0x100u);
++        const ModuleLoadResult intrModule = iop.loadModuleBuffer(0x100u);
++        iop.runEeCycles(4096u);
++        iop.syncEe();
++        uint32_t intrPayload = 0u, callbackArgument = 0u;
++        std::memcpy(&intrPayload, host.guest.data() + 0xC10u, sizeof(intrPayload));
++        const bool readOk = iop.readMemory(0xF20u, &callbackArgument, sizeof(callbackArgument));
++        if (!expect(intrModule.handled && intrModule.startResult > 0 && intrPayload == 0x494E5452u,
++                    "sceSifSetDmaIntr must copy the payload into EE memory and return a transfer id")) return 1;
++        if (!expect(readOk && callbackArgument == 0x1234u,
++                    "sceSifSetDmaIntr must call its completion handler with its argument")) return 1;
++    }
++
+     iop.reset();
+     constexpr uint32_t otherDataPayload = 0x4B4E4142u; // "BANK"
+     std::memcpy(host.guest.data() + 0xC00u, &otherDataPayload, sizeof(otherDataPayload));
+-- 
+2.46.2.windows.1
+
