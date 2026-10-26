@@ -2,7 +2,8 @@
 
 - **Date:** 2026-10-26
 - **Status:** plan only, nothing built. All decisions A1-A10 and P1-P12 approved, and the open questions in
-  section 7 answered (2026-10-26). Ready for step 1 (research) when the developer says go.
+  section 7 answered (2026-10-26). Step 1 (research) done the same day; building
+  (step 2 on) waits for the developer's go.
 - **Mockups:** shown in the Claude Code session of 2026-10-26 (settings tabs, launcher + overlay, disc verification).
 
 ## 1. What it is
@@ -66,10 +67,22 @@ Play is enabled only when all three pass, in order. A failure stops the later ch
 - Why check 3 matters: the game's code is translated to native code ahead of time from one specific ELF
   (`PROJECT_CONTEXT.md:62`). A different ELF passes check 2 and then misbehaves.
 - Cost: only small files are read (the ELF is a few MB), so it should finish in well under a second. Unmeasured.
-- **Unknown:** no ELF hash is recorded in the repo yet. `32088394` (PCSX2's CRC of the ELF, in the pnach name) may
-  belong to the English v2.1 disc or to the Japanese original; unverified. The build will record its own hash.
-- **Unknown:** if the English patch leaves the ELF unchanged, check 3 cannot tell the patched disc from the
-  original Japanese one. Then a fourth check on one patched data file is needed. To find out in step 1.
+- **Found (step 1 research, 2026-10-26): the English patch changes the ELF**, so check 3 alone tells the releases apart.
+  - `game_files/SLPM_654.28` (the disc this build is made from: `SYSTEM.CNF` `VER = 1.04`): 1,294,104 bytes, SHA-256
+    `975dd77d1e1c81f0d8f5f072b35c487c5ad6befbb99b339641a4c9573a334480`, PCSX2 CRC `32088394`. The PCSX2 CRC is
+    the XOR of every 32-bit word of the ELF; recomputed here, it matches the pnach file name.
+  - PCSX2 knows three ELFs for SLPM-65428 (`ps2_emu/resources/patches.zip`): `03C8F393` "BioHazard Outbreak
+    [NTSC-J]" (the original Japanese disc), and `198EFDC1` and `32088394`, both "(ENGLISH PATCHED)". So a second
+    English patch release exists. That `32088394` is v2.1 rests on our disc's file name ("English v2.1",
+    `outbreak.ini.example`), not on a published list.
+  - The build stores the SHA-256 (the real check) and the CRC (for naming what was found). A failing check 3 names
+    the release when the CRC is known: `03C8F393` = "the original Japanese disc, without the English patch";
+    `198EFDC1` = "a different English patch release; this build needs v2.1"; anything else = "an unknown version".
+  - Consequence for question 2 (section 7): the unpatched Japanese disc never passes check 3, so its "allow with a
+    note" case does not arise with this build. It would only matter for a build made from the Japanese disc.
+  - Redump (the disc-preservation database) lists the Japanese v1.04 disc as 4,698,767,360 bytes, MD5
+    `f79fbe8fd8229eca319c5d609d350cc2` (`ps2_emu/resources/RedumpDatabase.yaml`). It isn't needed for the check,
+    which reads only the ELF (1.3 MB).
 - The result is remembered (path, size, modified time) so the check does not rerun at every launch unless the file changed.
 
 Texture pack and mods folder (A8): never block Play. If the folder has no `SLPM-65428` content, a note says so.
@@ -94,7 +107,7 @@ Texture pack and mods folder (A8): never block Play. If the folder has no `SLPM-
 | Display | 16:9 (P7) | new key, replaces the hand-made pnach | Live | 0050 pnach writes |
 | Display | Smooth / sharp scaling (P7) | `scaling` | Live | existing |
 | Display | Show FPS (P7) | new key | Live | frame counter, patch 0035 |
-| Memory cards | Save folder | `saves` | Launch | patch 0072 (in progress) |
+| Memory cards | Save folder | `saves` | Launch | patch 0072 (committed `a35bc7b`) |
 | Memory cards | Backup (P7) | new key | Launch | new |
 | Audio (P7) | Volume, device | new keys | Live | SPU2 stream, patch 0056 |
 | Advanced | Renderer, VU1 engine | `vu1`, renderer key | Launch | existing |
@@ -113,8 +126,17 @@ hand-edited `outbreak.ini` survives. Bad values keep today's rule: logged once a
   points in the runtime as numbered PS2Recomp patches, each with a test that fails without it.
 - Drawing: Dear ImGui. PCSX2's GS already makes an ImGui context and renders it on every present
   (`docs/ops/gs.md`, `ui_stubs.cpp` / `GSDeviceVK::RenderImGui`). ImGui has built-in controller navigation.
-  - **Unknown:** whether the GS device can present before any guest frame exists (the launcher runs before the
-    game). If not, the launcher draws with raylib (and its raygui widgets) before the GS attaches. Step 1 decides.
+  - **Found (step 1):** the GS can present with no game frame. `GSPresentCurrentFrame()` (PCSX2 `GS/GS.cpp:541`,
+    used by PCSX2 to redraw while paused, `MTGS.cpp:962-978`) skips the picture when there is none
+    (`GSRenderer.cpp:986-1008`), and every present ends in `EndPresentFrame` -> `GSDeviceVK::EndPresent` ->
+    `RenderImGui` (`GSRenderer.cpp:570-578`, `GSDeviceVK.cpp:2554`). So the launcher and the overlay can both be
+    ImGui on the GS: one toolkit.
+  - Today our adapter opens the GS lazily, at the game's first GS packet (`EnsureOpen`,
+    `native/pcsx2_gs/adapter/pcsx2_side.cpp:267`). The launcher needs it opened at window attach instead.
+  - The renderer, upscale and texture folder are inputs to `GSopen`. If the launcher changes them, Play applies them
+    with PCSX2's `GSreopen` (`GS/GS.cpp:243`) before the game starts. The Android driver is the exception: the
+    Vulkan library is loaded once per process (libadrenotools), so a driver change needs an app restart, and the
+    launcher says so.
 - Closed overlay cost: one key/combo check per frame, nothing else, so the game's speed is unchanged.
 
 ### 5.2 Pausing
@@ -122,8 +144,25 @@ hand-edited `outbreak.ini` survives. Bad values keep today's rule: logged once a
 - Stop the game at a vsync: the EE scheduler, the IOP, and the SPU2 audio stream; the GS thread keeps presenting the
   last frame with the overlay on top.
 - On resume: every button reads as released for one frame, then live input returns.
-- **Unknown:** the cleanest stop point across the game, IOP and timer threads. Pacing (patch 0051) and the vsync
-  tick are the likely places; to research in step 1.
+- **Found (step 1):** the threads involved, in `C:\ob\up` `ps2xRuntime`:
+  - The game runs on one host thread (`gameThread`, `src/lib/ps2_runtime.cpp:2872`). Guest time (VBlank, alarms,
+    EE timers) comes from `EeScheduler` (`include/runtime/ee_scheduler.h`; wait in `EeScheduler::waitForEvent`,
+    `src/lib/Kernel/EeScheduler.cpp` ~2060-2100), and the IOP and SPU2 run at event cycles folded into the same
+    next-event checks (patches 0042/0049/0056).
+  - The main thread runs the raylib loop: window, input, resize forwarding (`ps2_runtime.cpp` ~2894-2960).
+  - So the pause is a **hold in `EeScheduler`**: while held, it dispatches no event, and the game thread blocks at its
+    next wait, within a frame because the game waits for VBlank every frame. The main thread keeps running, so the
+    overlay's input still works.
+  - While held, the main loop asks the GS thread for `GSPresentCurrentFrame()` each frame (through the ring, as other
+    GS calls), so the last picture plus the overlay keep drawing.
+  - Sound: the raylib audio stream pulls from SPU2 and would run dry, so the overlay pauses the stream
+    (`PauseAudioStream`, raylib 5.5) and resumes it with the game.
+  - On resume the scheduler's host deadlines are moved forward by the paused time, so the game does not "catch up"
+    (fire a burst of VBlanks). The exact field is to read when building; pacing already keeps an epoch (patch 0051).
+  - This is a runtime change: a numbered PS2Recomp patch with a test (scheduler held -> no event fires; released ->
+    deadlines shifted, guest ticks unchanged).
+- Hotkey and combo detection live on the main thread, where raylib input is read; the hold-back (5.3) goes in the
+  pad read that feeds the game (`PSPadBackend`, patches 0020/0038).
 - Online play (milestone M7) cannot pause. The overlay then only stops sending input.
 
 ### 5.3 The controller combo with hold-back (P2)
@@ -134,20 +173,54 @@ hand-edited `outbreak.ini` survives. Bad values keep today's rule: logged once a
 
 ### 5.4 Display
 
-- Window modes: raylib's fullscreen and borderless-window calls (from memory: `ToggleFullscreen`,
-  `ToggleBorderlessWindowed` in raylib 5; unverified against the pinned raylib). Size changes already reach the GS
-  through `windowResized` (patch 0024).
-- Vsync: the picture is presented by PCSX2's Vulkan device (`gs_stubs.cpp`: `GetPreferredRenderer` = VK), so vsync is
-  its present mode; today host settings are PCSX2 defaults (`host_stubs.cpp`). The exact switch is unverified.
+- Window modes (found, step 1): the runtime pins raylib **5.5** (`C:\ob\up\ps2xRuntime\CMakeLists.txt:89`), which
+  has `ToggleFullscreen` ("resizes monitor to match window resolution"), `ToggleBorderlessWindowed` ("resizes window
+  to match monitor resolution"), `SetWindowMonitor`, `GetCurrentMonitor` and `GetMonitorWidth/Height`
+  (`raylib.h:981-1004`). Size changes already reach the GS through `windowResized` (patch 0024). Borderless is the
+  recommended full-screen option. "Fullscreen" changes the monitor's resolution to the chosen preset.
+  - **To try when building:** the GS draws with Vulkan into a child window of raylib's OpenGL window. Whether
+    `ToggleFullscreen`'s monitor mode switch behaves with that child on Windows was not tested.
+- Vsync (found, step 1): our adapter opens the GS with `GSVSyncMode::Mailbox` when the window is visible, else
+  `Disabled` (`native/pcsx2_gs/adapter/pcsx2_side.cpp:293`). PCSX2 has three modes (`Config.h:283`: Disabled,
+  FIFO, Mailbox) and switches live with `GSSetVSyncMode(mode, allow_present_throttle)` (`GS/GS.cpp:589`), run on the
+  GS thread. The menu offers:
+  - **On** = Mailbox, today's default: no tearing, little delay.
+  - **On (strict)** = FIFO: classic vsync, steadier on some screens, a frame more delay.
+  - **Off** = Disabled: may tear.
+  - Mailbox is not available on every driver. PCSX2 then falls back and logs the choice to `pcsx2-gs.log`. Whether
+    the menu should show the fallback is to decide when building.
 - Render resolution needs the Vulkan renderer (`outbreak.ini.example`, `upscale`). On the software renderer the
   preset list shows why it is unavailable.
 
 ### 5.5 Memory cards
 
-- Built on patch 0072: cards are PCSX2 `.ps2` files in the `saves` folder, default `<settings folder>/memcards`.
-  That work is in progress (`reports/2026-10-26-memory-cards.md`); this menu waits for it to land.
-- Changing the folder asks: move, copy or leave the existing cards. Launcher only, never while the game is running.
-- Shows each card's size and whether it holds a File #1 save (reading the card's directory; to design).
+Built on patches 0071-0072, committed in `a35bc7b` (2026-10-26; `reports/2026-10-26-memory-cards.md`): the game
+formats, saves and loads through PCSX2 `.ps2` cards. Not yet verified there: Android, and a card round trip with
+PCSX2.
+
+What exists (`native/outbreak.ini.example` `saves`, patch 0072 header):
+- The folder holds PCSX2's own 8 MB card files: `Mcd001.ps2` = slot 1, `Mcd002.ps2` = slot 2 (only if placed there).
+  The same files PCSX2 keeps, so cards copy between PCSX2 and this game either way (with PCSX2 closed: a card in use
+  by one cannot be opened by the other).
+- Default folder: `memcards` beside the exe (Windows), or in the app's files dir (Android).
+- Read once at start-up, so a change is Launch-only and takes effect on the next start.
+- A missing `Mcd001.ps2` is created blank in the new folder.
+- `PS2X_SAVES=<folder>` wins over `saves`. Only scripted runs (`ob.sh boot`) set it, so players are not affected; the
+  menu still shows a note when it is set ("this run's cards come from PS2X_SAVES"), so a developer is not confused.
+
+What the tab does:
+- Save folder with Browse (Windows) or the picker (Android, section 5.8). Changing it asks: move, copy or leave the
+  existing cards. Launcher only, never while the game runs.
+- Wording for a new or blank card (the game's behaviour, from the memory-card work): a new player sees **no**
+  memory-card screen at boot. With a card in the slot, even a blank one, the game skips the "no data" screen and
+  offers to format the card the first time it saves. So the tab says "A new card is created here. The game asks to
+  format it the first time you save", not "you will be asked at start-up".
+- Per card: present or not, and whether it holds File #1 data (its system save is the `BISLPM-65428NETBIO`
+  folder). `tools/ob/mcd.py info` already reads a card's directory in Python; the menu needs the same reading in
+  C++ (or PCSX2's own card code in `native/pcsx2_sio2`; to choose in step 1).
+- Import from PCSX2 (follows from the shared format; small): pick a `.ps2` file, copy it in as `Mcd001.ps2` after
+  asking whether to replace the current one.
+- Backup (P7): copy `Mcd001.ps2` to a dated file at each launch, keep the last few.
 
 ### 5.6 Android
 
@@ -203,14 +276,33 @@ Per use:
 
 | What | Picker | What C++ does with the descriptor |
 |---|---|---|
-| Game disc (`.iso`) | one file, permission kept | Keeps it open as the disc for the whole session. Patch 0043's ISO reader opens a path today; it needs an "open from descriptor" entry (a new PS2Recomp patch with a test), or `/proc/self/fd/<n>` as the path (simpler; works on Linux-based Android, unverified for this case). The disc check (section 3) runs on it. |
+| Game disc (`.iso`) | one file, permission kept | Keeps it open as the disc for the whole session and passes `/proc/self/fd/<n>` as the `game` path. The disc check (section 3) runs on it. See the research note below. |
 | Driver package (`.zip`, P10) | one file, once | Unpacks into `files/drivers/<name>/`, then the existing driver code takes over (it already copies to internal storage, because Android does not load libraries from shared storage). |
 | Texture pack, mods | one `.zip`, once | Copies it into the app's files folder (decided, section 7 question 5). Folder access through SAF gives one URI per file, so reading a pack of thousands of files in place would be slow. |
 
+Research note, the disc through a descriptor (step 1, 2026-10-26): patch 0043's `IsoImage` takes a path.
+`probe` checks `is_regular_file` and then opens it, `open` uses `fopen` / `_wfopen` "rb" with a 64 KiB buffer, and
+`shared()` caches one open image per normalized path (`upstream/ps2recomp/0043-*.patch`, lines ~310-505). A
+`/proc/self/fd/<n>` path fits all three: on Linux, opening it reopens the file behind the descriptor, and
+`is_regular_file` follows it to that file. So **no PS2Recomp change is expected**, as long as Java keeps the
+descriptor open for the whole session. The limit: this only works when the picked document is a real file (the
+device's own storage or an SD card). A cloud document (for example Google Drive) can come back as a pipe, and the
+ISO reader needs to seek. Then the launcher says "copy the disc to this device first". This is from how Linux
+`/proc` works and was not tried on the Odin; it gets checked on the device in step 9, and an "open from descriptor"
+entry (a new patch) is the fallback.
+
 Build changes, sizes unmeasured:
 - `tools/ob/android.sh` gains `javac` (against `android.jar`, already located at line 36) and `d8` (Android
-  build-tools) to make `classes.dex`, added to the APK. Still no Gradle. Needs a JDK on the build machine: whether one
-  is installed is unchecked (installing one would be asked first).
+  build-tools) to make `classes.dex`, added to the APK. Still no Gradle.
+- **Found (step 1): nothing to install.**
+  - The build already uses a JDK: `OB_JDK` = Android Studio's `jbr` (`tools/ob/android.sh:32`; today it is used for
+    `keytool` and `apksigner`). Its `javac` is 25.0.3.
+  - `d8` is in the build-tools the script already uses (`35.0.0`, `android.sh:31`; 34-37 are installed).
+  - Other JDKs on this machine: Microsoft OpenJDK 17.0.19 (`JAVA_HOME`) and 21.0.12 (first on `PATH`). The
+    PlayFieldPortal repo (a separate project of the developer's) builds with that JDK 17 (`JAVA_HOME`; its CI uses
+    JDK 17).
+  - Compile with `javac --release 11`-level output (`-source 11 -target 11 -bootclasspath android.jar`): d8 35
+    may not read class files from JDK 25's newest format. To confirm on the first build.
 - The Java is compiled once and cached like the rest of the Android build, so a C++-only change does not rebuild it.
 
 Sources: developer's note (2026-10-26) on SAF + JNI + descriptors; `native/android/AndroidManifest.xml`;
@@ -222,15 +314,16 @@ Sources: developer's note (2026-10-26) on SAF + JNI + descriptors; `native/andro
 
 Each step ends with tests green, the gate 3/3, J's Bar speed unchanged, and a struggle report entry.
 
-1. **Research** (no code): GS present before the first guest frame; the pause point; vsync switch; the ELF hash on
-   the English and Japanese discs; raylib window calls in the pinned version; for Android, a JDK on the build
-   machine, and whether the ISO reader can use `/proc/self/fd/<n>` or needs a descriptor entry (section 5.8).
+1. **Research** (no code). **Done 2026-10-26.** Results are in sections 3, 5.1, 5.2, 5.4 and 5.8. Left for the
+   building steps: fullscreen with the Vulkan child window (5.4), the scheduler's deadline field (5.2), `/proc/self/fd`
+   on the Odin (5.8), and C++ reading of a card's save list (5.5: port `mcd.py info`; PCSX2's `MemoryCardFile`
+   does raw pages only, unverified).
 2. **ini read/write** that keeps comments, with tests.
 3. **Disc check** (A7, A9), tested on a small synthetic image like patch 0043's test, plus the real disc by hand.
 4. **Launcher**: Game tab and Play, then the other tabs for Launch settings.
 5. **Pause, hotkey and combo** (P1, P2, P5), with tests for the combo detector and button release.
 6. **Overlay** with the Live settings: Controls, Display, Audio.
-7. **Memory cards tab**, after patch 0072 lands.
+7. **Memory cards tab** (unblocked: patch 0072 committed in `a35bc7b`).
 8. **Camera tab**, after the Modern camera is in the native build.
 9. **Android** pass on the Odin (each device step asked for first): the Java picker bridge (5.8) first, then the Graphics driver section (5.7):
    test with the system driver, a working Turnip package, and a deliberately broken package to see the fall-back
@@ -241,7 +334,8 @@ Each step ends with tests green, the gate 3/3, J's Bar speed unchanged, and a st
 1. (Answered 2026-10-26: P1-P12 approved.)
 2. (Answered 2026-10-26: allow it, with a note.) If the unpatched Japanese disc passes the code check, Play stays
    enabled and the launcher notes that the text will be Japanese and that this build is tested on English patch
-   v2.1. If the ELFs differ, the code check rejects it anyway.
+   v2.1. If the ELFs differ, the code check rejects it anyway. Research (section 3): the ELFs do differ
+   (`03C8F393` vs `32088394`), so with this build the unpatched disc is rejected with a message naming it.
 3. (Answered 2026-10-26: show it.) Until the Modern camera is in the native build, the Camera tab shows Classic
    selected and Modern camera greyed out as "coming later"; its options (sensitivity, invert, quick switch) are
    hidden until then.
@@ -260,9 +354,17 @@ All open questions are answered.
 - `upstream/ps2recomp/README.md`: patches 0024, 0035, 0038, 0040, 0043, 0050, 0051, 0056, 0071, 0072.
 - `docs/ops/gs.md`: ImGui context in the GS, host stubs.
 - `docs/ARCHITECTURE.md` section 4: engine vs diagnostics.
-- `reports/2026-10-26-memory-cards.md`: memory card work in progress.
+- `reports/2026-10-26-memory-cards.md`, commit `a35bc7b`: memory cards through PCSX2's SIO2 (patches 0071-0076).
+- Memory-card session's hand-off notes (2026-10-26): restart needed for `saves`, no boot card screen, `PS2X_SAVES` wins.
+- `tools/ob/mcd.py`: `.ps2` card make / format / info.
 - `legacy/README.md`: Modern camera controls and its Select + R3 switch.
 - `docs/ops/android.md` "GPU driver (system or custom)": driver folder layout, fall-back checks, no bundled drivers.
 - `PROJECT_CONTEXT.md:62`: code recompiled ahead of time from the disc.
+- Step 1 research (2026-10-26, read only): `ps2_emu/resources/patches.zip` (SLPM-65428 pnach CRCs and titles),
+  `ps2_emu/resources/RedumpDatabase.yaml`, `game_files/SLPM_654.28` and `SYSTEM.CNF`; PCSX2 v2.9.134 source in
+  `C:\ob\pcsx2` (`GS/GS.cpp`, `GS/Renderers/Common/GSRenderer.cpp`, `MTGS.cpp`, `Config.h`, `GSDeviceVK.cpp`);
+  PS2Recomp in `C:\ob\up` (`ps2xRuntime/src/lib/ps2_runtime.cpp`, `Kernel/EeScheduler.cpp`, `CMakeLists.txt`);
+  raylib 5.5 `C:\ob\g\_deps\raylib-src\src\raylib.h`; `tools/ob/android.sh`; PlayFieldPortal `gradle.properties`,
+  `.github/workflows/unit-tests.yml`.
 - From memory, not opened: RetroArch's menu combos (Start+Select, hold Start); XInput not reporting Guide; raylib 5
   window-mode calls.
