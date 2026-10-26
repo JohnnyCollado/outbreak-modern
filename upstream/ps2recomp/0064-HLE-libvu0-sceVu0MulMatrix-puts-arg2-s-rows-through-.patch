@@ -1,0 +1,105 @@
+From ba78d2f9500c80577762be8bebee74fc1c210a38 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 23:45:42 -0400
+Subject: [PATCH] HLE libvu0: sceVu0MulMatrix puts arg2's rows through arg1
+
+The stub returned mulVuMatrix(arg1, arg2): dst[4i+j] = sum_k arg1[4i+k] *
+arg2[4k+j]. libvu0 loads arg1's rows into vf4-vf7 and sends each row of arg2
+through VMULAx/VMADDAy/VMADDAz/VMADDw into the same row of dst
+(SLPM-65428 0x17E88C-0x17E8C4): dst[4i+j] = sum_k arg2[4i+k] * arg1[4k+j],
+the product in the other order. Resident Evil Outbreak's shadow-volume
+builder (SUBMAIN 0x347D60) is the function's only caller.
+
+Tests: MulMatrix_transforms_arg2_rows_by_arg1 (translation x scale, where
+the order shows); MulMatrix_general_matrices expects libvu0's order.
+Without the fix 539/541.
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp |  8 +++---
+ ps2xTest/src/ps2_vu_tests.cpp           | 38 +++++++++++++++++++++----
+ 2 files changed, 37 insertions(+), 9 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index 122ac01..cc6f863 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -701,10 +701,10 @@ namespace ps2_stubs
+         float m0[16]{}, m1[16]{}, out[16]{};
+         if (readVuMatrix4f(rdram, m0Addr, m0) && readVuMatrix4f(rdram, m1Addr, m1))
+         {
+-            // out = m0 * m1 (first source . second source), matching the
+-            // file's mulVuMatrix(lhs,rhs)=lhs.rhs convention and the RotMatrix
+-            // / ViewScreenMatrix siblings (first operand on the left).
+-            mulVuMatrix(m0, m1, out);
++            // libvu0 (SLPM-65428 0x17E88C-0x17E8C4): vf4-vf7 = m0's rows, and each
++            // row i of m1 goes through VMULAx/VMADDAy/VMADDAz/VMADDw into row i of
++            // dst: out[4i+j] = sum_k m1[4i+k] * m0[4k+j], i.e. mulVuMatrix(m1, m0).
++            mulVuMatrix(m1, m0, out);
+             (void)writeVuMatrix4f(rdram, dstAddr, out);
+         }
+         setReturnS32(ctx, 0);
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index 23e455f..2fbcceb 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -326,7 +326,36 @@ void register_ps2_vu_tests()
+             t.IsTrue(allMatch, "MulMatrix(dst, I, A) should equal A");
+         });
+ 
+-        tc.Run("MulMatrix_equals_arg1_times_arg2", [](TestCase &t)
++        tc.Run("MulMatrix_transforms_arg2_rows_by_arg1", [](TestCase &t)
++        {
++            // libvu0 (SLPM-65428 0x17E88C-0x17E8C4): vf4-vf7 = arg1's rows; each row of
++            // arg2 goes through VMULAx/VMADDAy/VMADDAz/VMADDw into the same row of dst:
++            // dst[4i+j] = sum_k arg2[4i+k] * arg1[4k+j]. arg1 = translation (10,20,30),
++            // arg2 = scale (2,3,4): row 3 = (10,20,30,1); the other order gives (20,60,120,1).
++            VuEnv env;
++            float tr[16]{}, sc[16]{};
++            makeIdentity(tr);
++            tr[12] = 10.0f;
++            tr[13] = 20.0f;
++            tr[14] = 30.0f;
++            makeIdentity(sc);
++            sc[0] = 2.0f;
++            sc[5] = 3.0f;
++            sc[10] = 4.0f;
++            writeMat4(env, kA, tr);
++            writeMat4(env, kB, sc);
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            SET_GPR_U32(&env.ctx, 6, kB);
++            ps2_stubs::sceVu0MulMatrix(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[16]{};
++            readMat4(env, kDst, out);
++            t.IsTrue(out[0] == 2.0f && out[5] == 3.0f && out[10] == 4.0f, "MulMatrix should keep arg2's scale rows");
++            t.IsTrue(out[12] == 10.0f && out[13] == 20.0f && out[14] == 30.0f && out[15] == 1.0f,
++                     "MulMatrix row 3 should be arg2's row 3 transformed by arg1 (the translation, unscaled)");
++        });
++
++        tc.Run("MulMatrix_general_matrices", [](TestCase &t)
+         {
+             VuEnv env;
+             float m0[16] = {
+@@ -347,9 +376,8 @@ void register_ps2_vu_tests()
+                     float sum = 0.0f;
+                     for (int k = 0; k < 4; ++k)
+                     {
+-                        // expected = mulVuMatrix(m0, m1) = m0 * m1 (arg1 * arg2);
+-                        // mulVuMatrix is file-local to VU.cpp, so mirror its formula here.
+-                        sum += m1[4 * k + j] * m0[4 * i + k];
++                        // libvu0: dst row i = arg2 row i through arg1 (arg1 = m0, arg2 = m1).
++                        sum += m0[4 * k + j] * m1[4 * i + k];
+                     }
+                     expected[4 * i + j] = sum;
+                 }
+@@ -370,7 +398,7 @@ void register_ps2_vu_tests()
+                     allMatch = false;
+                 }
+             }
+-            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should equal m0*m1 (mulVuMatrix(m0,m1), arg1*arg2)");
++            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should put m1's rows through m0 (dst[4i+j] = sum_k m1[4i+k] * m0[4k+j])");
+         });
+ 
+         tc.Run("RotMatrix_Z_matches_RotMatrixZ", [](TestCase &t)
+-- 
+2.46.2.windows.1
+

@@ -1,0 +1,86 @@
+From a1240ae9634cf5c947ff0d69823059365674abb3 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:11:01 -0400
+Subject: [PATCH 66/70] HLE libvu0: sceVu0ScaleVector scales by $f12 even when
+ it is 0
+
+With $f12 == 0 the stub took the scale from the bits of $a2, then from $a2
+as an integer: leftover register contents. libvu0 (SLPM-65428
+0x17EE58-0x17EE64) moves $f12 into vf5 and does VMULx.xyzw; a scale of 0
+gives a zero vector. No caller in Resident Evil Outbreak.
+
+Tests: ScaleVector_scales_xyzw, ScaleVector_by_zero_is_zero ($a2 holds 1.0f).
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp | 13 ++---------
+ ps2xTest/src/ps2_vu_tests.cpp           | 31 +++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+), 11 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index 682b1b5..ab9a7d8 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -939,18 +939,9 @@ namespace ps2_stubs
+     {
+         const uint32_t dstAddr = getRegU32(ctx, 4);
+         const uint32_t srcAddr = getRegU32(ctx, 5);
++        // libvu0 (SLPM-65428 0x17EE58-0x17EE64): VMULx.xyzw by $f12; a scale of 0 gives a zero vector.
++        const float scale = ctx ? ctx->f[12] : 0.0f;
+         float src[4]{}, out[4]{};
+-        float scale = ctx ? ctx->f[12] : 0.0f;
+-        if (scale == 0.0f)
+-        {
+-            uint32_t raw = getRegU32(ctx, 6);
+-            std::memcpy(&scale, &raw, sizeof(scale));
+-            if (scale == 0.0f)
+-            {
+-                scale = static_cast<float>(getRegU32(ctx, 6));
+-            }
+-        }
+-
+         if (readVuVec4f(rdram, srcAddr, src))
+         {
+             for (int i = 0; i < 4; ++i)
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index 228f639..b3dc64c 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -1162,5 +1162,36 @@ void register_ps2_vu_tests()
+             t.IsTrue(zero[0] == 0.0f && zero[1] == 0.0f && zero[2] == 0.0f && zero[3] == 0.0f,
+                      "Normalize of a zero vector should be zero");
+         });
++
++        tc.Run("ScaleVector_scales_xyzw", [](TestCase &t)
++        {
++            VuEnv env;
++            writeVec4(env, kA, 1.0f, 2.0f, 3.0f, 4.0f);
++            env.ctx.f[12] = 2.0f;
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            ps2_stubs::sceVu0ScaleVector(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[4]{};
++            readVec4f(env, kDst, out);
++            t.IsTrue(out[0] == 2.0f && out[1] == 4.0f && out[2] == 6.0f && out[3] == 8.0f,
++                     "ScaleVector should multiply all four lanes by $f12");
++        });
++
++        tc.Run("ScaleVector_by_zero_is_zero", [](TestCase &t)
++        {
++            // libvu0 (SLPM-65428 0x17EE60) multiplies by $f12 whatever it is; $a2 is not an argument and here holds
++            // the bits of 1.0f, which must not be used as the scale.
++            VuEnv env;
++            writeVec4(env, kA, 1.0f, 2.0f, 3.0f, 4.0f);
++            env.ctx.f[12] = 0.0f;
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            SET_GPR_U32(&env.ctx, 6, 0x3F800000u);
++            ps2_stubs::sceVu0ScaleVector(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[4]{};
++            readVec4f(env, kDst, out);
++            t.IsTrue(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f && out[3] == 0.0f,
++                     "ScaleVector by 0 should give a zero vector");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

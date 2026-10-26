@@ -1,0 +1,80 @@
+From 377a8a590adc622582c7e271c8e38417050f0a89 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:11:02 -0400
+Subject: [PATCH 67/70] HLE libvu0: sceVu0CameraMatrix normalizes like
+ sceVu0Normalize
+
+libvu0 (SLPM-65428 0x17F5C4-0x17F624) builds the camera from
+sceVu0OuterProduct, sceVu0Normalize, sceVu0TransMatrix and
+sceVu0InversMatrix: row0 = Normalize(up x fwd), row2 = Normalize(fwd),
+row1 = row2 x row0. The stub's own normalize put fwd.w in the length, so a
+fwd with w != 0 gave rows that are not unit length. It now uses
+normalizeVu0. No caller in Resident Evil Outbreak.
+
+Test: CameraMatrix_fwd_w_ignored (fwd = (0, 0, 2, 1) gives the identity).
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp | 13 ++++---------
+ ps2xTest/src/ps2_vu_tests.cpp           | 22 ++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 9 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index ab9a7d8..962879f 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -259,17 +259,12 @@ namespace ps2_stubs
+                 o[2] = (l[0] * r[1]) - (l[1] * r[0]);
+                 o[3] = 0.0f;
+             };
+-            auto normalize = [](const float (&s)[4], float (&o)[4])
+-            {
+-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+-                const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
+-                for (int i = 0; i < 4; ++i)
+-                    o[i] = s[i] * inv;
+-            };
++            // libvu0 (SLPM-65428 0x17F5C4-0x17F624): row0 = Normalize(up x fwd), row2 = Normalize(fwd),
++            // row1 = row2 x row0, all with w = 0 (sceVu0Normalize: x, y, z only), then translation and InversMatrix.
+             float rawCross[4]{}, row0[4]{}, row1[4]{}, row2[4]{};
+             cross(up, fwd, rawCross);
+-            normalize(rawCross, row0);
+-            normalize(fwd, row2);
++            normalizeVu0(rawCross, row0);
++            normalizeVu0(fwd, row2);
+             cross(row2, row0, row1);
+ 
+             float m[16]{};
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index b3dc64c..ffc122e 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -1193,5 +1193,27 @@ void register_ps2_vu_tests()
+             t.IsTrue(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f && out[3] == 0.0f,
+                      "ScaleVector by 0 should give a zero vector");
+         });
++
++        tc.Run("CameraMatrix_fwd_w_ignored", [](TestCase &t)
++        {
++            // libvu0 normalizes fwd with sceVu0Normalize (x, y, z only), so fwd = (0, 0, 2, 1) is the +z axis and the
++            // camera at the origin is the identity. With w in the length, row 2 would be (0, 0, 0.894, 0.447).
++            VuEnv env;
++            writeVec4(env, kA, 0.0f, 0.0f, 0.0f, 1.0f); // eye
++            writeVec4(env, kB, 0.0f, 0.0f, 2.0f, 1.0f); // fwd, w = 1
++            writeVec4(env, kC, 0.0f, 1.0f, 0.0f, 0.0f); // up
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            SET_GPR_U32(&env.ctx, 6, kB);
++            SET_GPR_U32(&env.ctx, 7, kC);
++            ps2_stubs::sceVu0CameraMatrix(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[16]{}, ident[16]{};
++            readMat4(env, kDst, out);
++            makeIdentity(ident);
++            bool allMatch = true;
++            for (int i = 0; i < 16; ++i)
++                allMatch = allMatch && nearlyEqual(out[i], ident[i], 1e-5f);
++            t.IsTrue(allMatch, "CameraMatrix should ignore fwd.w when normalizing");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

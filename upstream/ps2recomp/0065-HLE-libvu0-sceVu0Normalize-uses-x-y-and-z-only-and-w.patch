@@ -1,0 +1,109 @@
+From f82361f0154d46f6f2eb0a7ddd57b5a5023c1d47 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:11:01 -0400
+Subject: [PATCH 65/70] HLE libvu0: sceVu0Normalize uses x, y and z only and
+ writes w = 0
+
+The stub took the length over all four lanes, scaled w too, and returned
+zero for any length under 1e-6. libvu0 (SLPM-65428 0x17E9F4-0x17EA28)
+sums x*x + y*y + z*z (VMUL.xyz, VADDy.x, VADDz.x), takes VSQRT and
+VDIV 1/length, clears the result (VSUB.xyzw) and writes xyz * Q, so w is
+0 and there is no threshold; a zero vector stays zero (0 * max). New
+helper normalizeVu0. Resident Evil Outbreak's one caller (SUBMAIN
+0x3475C0) normalizes a cross product (w already 0) and keeps x, y, z.
+
+Tests: Normalize_xyz_only_w_zero, Normalize_short_vector_is_unit_zero_stays_zero.
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp | 23 +++++++++-------
+ ps2xTest/src/ps2_vu_tests.cpp           | 35 +++++++++++++++++++++++++
+ 2 files changed, 49 insertions(+), 9 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index cc6f863..682b1b5 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -89,6 +89,19 @@ namespace ps2_stubs
+             }
+         }
+ 
++        // libvu0 sceVu0Normalize (SLPM-65428 0x17E9F4-0x17EA28): the length comes from x, y and z only (VMUL.xyz,
++        // VADDy.x, VADDz.x, VSQRT), Q = 1 / length (VDIV), dst = (xyz * Q, 0) (VSUB.xyzw clears it, VMULq.xyz).
++        // A zero length gives Q = +max on the VU and 0 * max = 0, so a zero vector stays zero.
++        void normalizeVu0(const float (&src)[4], float (&out)[4])
++        {
++            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
++            const float q = (len != 0.0f) ? (1.0f / len) : 0.0f;
++            out[0] = src[0] * q;
++            out[1] = src[1] * q;
++            out[2] = src[2] * q;
++            out[3] = 0.0f;
++        }
++
+         void makeIdentityMatrix(float (&out)[16])
+         {
+             std::fill(std::begin(out), std::end(out), 0.0f);
+@@ -734,15 +747,7 @@ namespace ps2_stubs
+         float src[4]{}, out[4]{};
+         if (readVuVec4f(rdram, srcAddr, src))
+         {
+-            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
+-            if (len > 1.0e-6f)
+-            {
+-                const float invLen = 1.0f / len;
+-                for (int i = 0; i < 4; ++i)
+-                {
+-                    out[i] = src[i] * invLen;
+-                }
+-            }
++            normalizeVu0(src, out);
+             (void)writeVuVec4f(rdram, dstAddr, out);
+         }
+         setReturnS32(ctx, 0);
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index 2fbcceb..228f639 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -1127,5 +1127,40 @@ void register_ps2_vu_tests()
+             readMat4(env, kDst, out);
+             t.IsTrue(nearlyEqual(out[0], 0.0f), "DropShadowMatrix point mode should subtract d before scaling by k");
+         });
++
++        tc.Run("Normalize_xyz_only_w_zero", [](TestCase &t)
++        {
++            // libvu0 (SLPM-65428 0x17E9F8-0x17EA28): the length is from x, y, z; dst.w is 0. (3, 0, 4, 1) gives
++            // (0.6, 0, 0.8, 0); with w in the length it would be (3, 0, 4, 1) / sqrt(26).
++            VuEnv env;
++            writeVec4(env, kA, 3.0f, 0.0f, 4.0f, 1.0f);
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[4]{};
++            readVec4f(env, kDst, out);
++            t.IsTrue(nearlyEqual(out[0], 0.6f) && nearlyEqual(out[1], 0.0f) && nearlyEqual(out[2], 0.8f) && out[3] == 0.0f,
++                     "Normalize should divide x, y, z by their own length and write w = 0");
++        });
++
++        tc.Run("Normalize_short_vector_is_unit_zero_stays_zero", [](TestCase &t)
++        {
++            // libvu0 has no length threshold: (1e-7, 0, 0) normalizes to (1, 0, 0); a zero vector stays zero.
++            VuEnv env;
++            writeVec4(env, kA, 1.0e-7f, 0.0f, 0.0f, 0.0f);
++            writeVec4(env, kB, 0.0f, 0.0f, 0.0f, 0.0f);
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
++            SET_GPR_U32(&env.ctx, 4, kDst2);
++            SET_GPR_U32(&env.ctx, 5, kB);
++            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[4]{}, zero[4]{};
++            readVec4f(env, kDst, out);
++            readVec4f(env, kDst2, zero);
++            t.IsTrue(nearlyEqual(out[0], 1.0f), "Normalize should scale a short vector to unit length");
++            t.IsTrue(zero[0] == 0.0f && zero[1] == 0.0f && zero[2] == 0.0f && zero[3] == 0.0f,
++                     "Normalize of a zero vector should be zero");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

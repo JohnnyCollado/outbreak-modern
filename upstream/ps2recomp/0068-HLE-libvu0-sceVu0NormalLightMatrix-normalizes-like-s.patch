@@ -1,0 +1,83 @@
+From b55a8b10c4918a3f61b9b57e4a6f1a0a4c155671 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:11:02 -0400
+Subject: [PATCH 68/70] HLE libvu0: sceVu0NormalLightMatrix normalizes like
+ sceVu0Normalize
+
+libvu0 (SLPM-65428 0x17F670-0x17F6E8): each row is
+sceVu0Normalize(sceVu0ScaleVector(light, -1)), so w is 0 and only x, y, z
+set the length; row 3 is (0, 0, 0, 1); then sceVu0TransposeMatrix. The
+stub put w in the length and kept -w/length, which the transpose moved
+into the bottom row. It now uses normalizeVu0. No caller in Resident
+Evil Outbreak.
+
+Test: NormalLightMatrix_light_w_ignored.
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp | 11 +++++------
+ ps2xTest/src/ps2_vu_tests.cpp           | 22 ++++++++++++++++++++++
+ 2 files changed, 27 insertions(+), 6 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index 962879f..4299077 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -750,8 +750,9 @@ namespace ps2_stubs
+ 
+     void sceVu0NormalLightMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        // Rows = normalize(-light); the 4x4 is transposed so directions occupy
+-        // columns (one ApplyMatrix then yields per-light N.L).
++        // libvu0 (SLPM-65428 0x17F670-0x17F6E8): rows = sceVu0Normalize(-light) (x, y, z only, w = 0),
++        // row 3 = (0, 0, 0, 1), then TransposeMatrix: directions occupy columns (one ApplyMatrix then yields
++        // per-light N.L).
+         const uint32_t dstAddr = getRegU32(ctx, 4);
+         const uint32_t l0Addr = getRegU32(ctx, 5);
+         const uint32_t l1Addr = getRegU32(ctx, 6);
+@@ -761,10 +762,8 @@ namespace ps2_stubs
+         {
+             auto negNormalize = [](const float (&s)[4], float (&o)[4])
+             {
+-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+-                const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
+-                for (int i = 0; i < 4; ++i)
+-                    o[i] = -s[i] * inv;
++                const float neg[4] = {-s[0], -s[1], -s[2], -s[3]}; // sceVu0ScaleVector(tmp, l, -1.0f)
++                normalizeVu0(neg, o);
+             };
+             float r0[4]{}, r1[4]{}, r2[4]{};
+             negNormalize(l0, r0);
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index ffc122e..e5dbbf2 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -1215,5 +1215,27 @@ void register_ps2_vu_tests()
+                 allMatch = allMatch && nearlyEqual(out[i], ident[i], 1e-5f);
+             t.IsTrue(allMatch, "CameraMatrix should ignore fwd.w when normalizing");
+         });
++
++        tc.Run("NormalLightMatrix_light_w_ignored", [](TestCase &t)
++        {
++            // libvu0 normalizes each -light with sceVu0Normalize: (2, 0, 0, 1) gives row (-1, 0, 0, 0), so after the
++            // transpose out[0] = -1 and the bottom row (out[12..14]) stays 0. With w in the length out[0] would be
++            // -0.894 and out[12] -0.447.
++            VuEnv env;
++            writeVec4(env, kA, 2.0f, 0.0f, 0.0f, 1.0f);
++            writeVec4(env, kB, 0.0f, 3.0f, 0.0f, 1.0f);
++            writeVec4(env, kC, 0.0f, 0.0f, 4.0f, 1.0f);
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            SET_GPR_U32(&env.ctx, 6, kB);
++            SET_GPR_U32(&env.ctx, 7, kC);
++            ps2_stubs::sceVu0NormalLightMatrix(env.rdram.data(), &env.ctx, &env.runtime);
++            float out[16]{};
++            readMat4(env, kDst, out);
++            t.IsTrue(nearlyEqual(out[0], -1.0f) && nearlyEqual(out[5], -1.0f) && nearlyEqual(out[10], -1.0f),
++                     "NormalLightMatrix should normalize -light over x, y, z only");
++            t.IsTrue(out[12] == 0.0f && out[13] == 0.0f && out[14] == 0.0f && out[15] == 1.0f,
++                     "NormalLightMatrix's bottom row should be (0, 0, 0, 1) whatever the lights' w");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

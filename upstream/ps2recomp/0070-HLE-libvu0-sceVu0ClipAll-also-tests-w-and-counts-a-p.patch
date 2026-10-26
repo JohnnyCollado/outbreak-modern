@@ -1,0 +1,124 @@
+From b89cb558bc743d915e47602e1658d0f9ddc33f94 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:11:03 -0400
+Subject: [PATCH 70/70] HLE libvu0: sceVu0ClipAll also tests w and counts a
+ plane as outside
+
+libvu0 (SLPM-65428 0x17FE18-0x17FE64) transforms each vertex, clears the
+status flag and does VSUB.xyw (t.x - lo.x*t.w, t.y - lo.y*t.w,
+t.w - lo.w) and (hi.x*t.w - t.x, hi.y*t.w - t.y, hi.w - t.w); a vertex is
+inside only when no lane is zero or negative. The stub skipped the w lane
+(lo.w < t.w < hi.w) and treated a vertex on a plane as inside. No caller
+in Resident Evil Outbreak.
+
+Tests: ClipAll_w_outside_lo_hi_w_is_outside, ClipAll_on_a_plane_is_outside;
+the three older ClipAll tests set hi.w = 100.
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp | 11 ++++--
+ ps2xTest/src/ps2_vu_tests.cpp           | 45 +++++++++++++++++++++++--
+ 2 files changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index ea8450c..4f940cf 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -328,12 +328,17 @@ namespace ps2_stubs
+                 float v[4]{};
+                 if (!readVuVec4f(rdram, vAddr, v))
+                     break;
++                // libvu0 (SLPM-65428 0x17FE18-0x17FE64): t = v * m; clear the status flag; VSUB.xyw
++                // (t.x - lo.x*t.w, t.y - lo.y*t.w, t.w - lo.w) and (hi.x*t.w - t.x, hi.y*t.w - t.y, hi.w - t.w);
++                // the vertex is inside when no lane is zero or negative (STATUS & 0xC0 == 0).
+                 const float tx = (m[0] * v[0]) + (m[4] * v[1]) + (m[8] * v[2]) + (m[12] * v[3]);
+                 const float ty = (m[1] * v[0]) + (m[5] * v[1]) + (m[9] * v[2]) + (m[13] * v[3]);
+                 const float tw = (m[3] * v[0]) + (m[7] * v[1]) + (m[11] * v[2]) + (m[15] * v[3]);
+-                const bool outsideX = (tx < lo[0] * tw) || (tx > hi[0] * tw);
+-                const bool outsideY = (ty < lo[1] * tw) || (ty > hi[1] * tw);
+-                if (!outsideX && !outsideY)
++                const float loX = lo[0] * tw, loY = lo[1] * tw, hiX = hi[0] * tw, hiY = hi[1] * tw;
++                const uint32_t flags = vuStickyZeroSign(tx - loX) | vuStickyZeroSign(ty - loY) |
++                                       vuStickyZeroSign(tw - lo[3]) | vuStickyZeroSign(hiX - tx) |
++                                       vuStickyZeroSign(hiY - ty) | vuStickyZeroSign(hi[3] - tw);
++                if (flags == 0u)
+                 {
+                     result = 0;
+                     break;
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index 477195d..8926945 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -996,7 +996,7 @@ void register_ps2_vu_tests()
+             float ident[16]{};
+             makeIdentity(ident);
+             writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f); // lo
+-            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 0.0f);   // hi
++            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 100.0f); // hi (w: far limit for t.w)
+             writeMat4(env, kC, ident);
+             writeVec4(env, kArr, 5.0f, 5.0f, 0.0f, 1.0f);
+             writeVec4(env, kArr + 16u, -5.0f, -5.0f, 0.0f, 1.0f);
+@@ -1015,7 +1015,7 @@ void register_ps2_vu_tests()
+             float ident[16]{};
+             makeIdentity(ident);
+             writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f); // lo
+-            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 0.0f);   // hi
++            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 100.0f); // hi (w: far limit for t.w)
+             writeMat4(env, kC, ident);
+             writeVec4(env, kArr, 5.0f, 5.0f, 0.0f, 1.0f);
+             writeVec4(env, kArr + 16u, 0.0f, 0.0f, 0.0f, 1.0f);
+@@ -1034,7 +1034,7 @@ void register_ps2_vu_tests()
+             float ident[16]{};
+             makeIdentity(ident);
+             writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f); // lo
+-            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 0.0f);   // hi
++            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 100.0f); // hi (w: far limit for t.w)
+             writeMat4(env, kC, ident);
+             // Vertex x=2 sits OUTSIDE the raw [-1,1] band but INSIDE the
+             // homogeneous band [-w,w] = [-4,4] once scaled by w=4. With the
+@@ -1258,5 +1258,44 @@ void register_ps2_vu_tests()
+                 t.Equals(getRegU32(&env.ctx, 2), c.want, "ClipScreen should return libvu0's sticky zero/sign bits");
+             }
+         });
++
++        tc.Run("ClipAll_w_outside_lo_hi_w_is_outside", [](TestCase &t)
++        {
++            // libvu0 (SLPM-65428 0x17FE3C-0x17FE40) also tests t.w - lo.w and hi.w - t.w: a vertex inside the x/y
++            // planes but with w = 20 past hi.w = 10 is outside, so ClipAll culls (returns 1).
++            VuEnv env;
++            float ident[16]{};
++            makeIdentity(ident);
++            writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 1.0f);
++            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 10.0f);
++            writeMat4(env, kC, ident);
++            writeVec4(env, kArr, 0.0f, 0.0f, 0.0f, 20.0f);
++            SET_GPR_U32(&env.ctx, 4, kA);
++            SET_GPR_U32(&env.ctx, 5, kB);
++            SET_GPR_U32(&env.ctx, 6, kC);
++            SET_GPR_U32(&env.ctx, 7, kArr);
++            SET_GPR_U32(&env.ctx, 8, 1u);
++            ps2_stubs::sceVu0ClipAll(env.rdram.data(), &env.ctx, &env.runtime);
++            t.Equals(static_cast<int32_t>(getRegU32(&env.ctx, 2)), 1, "ClipAll should cull a vertex whose w is past hi.w");
++        });
++
++        tc.Run("ClipAll_on_a_plane_is_outside", [](TestCase &t)
++        {
++            // hi.x*t.w - t.x == 0 sets the sticky zero bit: libvu0 counts a vertex on a plane as outside.
++            VuEnv env;
++            float ident[16]{};
++            makeIdentity(ident);
++            writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f);
++            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 100.0f);
++            writeMat4(env, kC, ident);
++            writeVec4(env, kArr, 1.0f, 0.0f, 0.0f, 1.0f);
++            SET_GPR_U32(&env.ctx, 4, kA);
++            SET_GPR_U32(&env.ctx, 5, kB);
++            SET_GPR_U32(&env.ctx, 6, kC);
++            SET_GPR_U32(&env.ctx, 7, kArr);
++            SET_GPR_U32(&env.ctx, 8, 1u);
++            ps2_stubs::sceVu0ClipAll(env.rdram.data(), &env.ctx, &env.runtime);
++            t.Equals(static_cast<int32_t>(getRegU32(&env.ctx, 2)), 1, "ClipAll should cull a vertex lying on a plane");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

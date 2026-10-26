@@ -1,0 +1,70 @@
+From c3db3d20d806b57d29ad9b2077e0300e38117d9f Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 23:43:55 -0400
+Subject: [PATCH] HLE libvu0: sceVu0InnerProduct sums x, y and z only
+
+The stub added w*w' to the dot product. libvu0 computes VMUL.xyz, then
+VADDy.x and VADDz.x and returns x (SLPM-65428 0x17E994-0x17E9A4): w never
+enters. Resident Evil Outbreak's shadow-volume builder (SUBMAIN 0x347D60, the
+function's only caller) passes points with w = 1, so every dot product was
+1 too large.
+
+Tests: InnerProduct_ignores_w; the rounding test keeps its operands in x/y.
+Without the fix 538/541 (with 0064's tests present).
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp |  3 ++-
+ ps2xTest/src/ps2_vu_tests.cpp           | 17 +++++++++++++++--
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index bd85098..122ac01 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -554,7 +554,8 @@ namespace ps2_stubs
+         float dot = 0.0f;
+         if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
+         {
+-            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]) + (lhs[3] * rhs[3]);
++            // libvu0: VMUL.xyz, VADDy.x, VADDz.x (SLPM-65428 0x17E994-0x17E99C); w never enters.
++            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]);
+         }
+ 
+         if (ctx)
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index 7acf6bd..23e455f 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -88,8 +88,8 @@ void register_ps2_vu_tests()
+             // fma(x3, y3, -1)) it would be 2^-11 + 2^-24 = 0x3A000400.
+             VuEnv env;
+             const float a = 1.0f + 1.0f / 4096.0f;
+-            writeVec4(env, kA, 1.0f, 0.0f, 0.0f, a);
+-            writeVec4(env, kB, -1.0f, 0.0f, 0.0f, a);
++            writeVec4(env, kA, 1.0f, a, 0.0f, 0.0f);
++            writeVec4(env, kB, -1.0f, a, 0.0f, 0.0f);
+             SET_GPR_U32(&env.ctx, 4, kA);
+             SET_GPR_U32(&env.ctx, 5, kB);
+             ps2_stubs::sceVu0InnerProduct(env.rdram.data(), &env.ctx, &env.runtime);
+@@ -98,6 +98,19 @@ void register_ps2_vu_tests()
+             t.Equals(raw, 0x3A000000u, "InnerProduct: -1 + (1+2^-12)^2 rounds the product first (fused: 0x3A000400)");
+         });
+ 
++        tc.Run("InnerProduct_ignores_w", [](TestCase &t)
++        {
++            // libvu0 (SLPM-65428 0x17E994-0x17E9A4): VMUL.xyz, VADDy.x, VADDz.x, QMFC2:
++            // x*x' + y*y' + z*z', w never enters. (1,2,3,4).(5,6,7,8) = 38, not 70.
++            VuEnv env;
++            writeVec4(env, kA, 1.0f, 2.0f, 3.0f, 4.0f);
++            writeVec4(env, kB, 5.0f, 6.0f, 7.0f, 8.0f);
++            SET_GPR_U32(&env.ctx, 4, kA);
++            SET_GPR_U32(&env.ctx, 5, kB);
++            ps2_stubs::sceVu0InnerProduct(env.rdram.data(), &env.ctx, &env.runtime);
++            t.IsTrue(env.ctx.f[0] == 38.0f, "InnerProduct should sum x, y and z only");
++        });
++
+         tc.Run("MulVector_componentwise", [](TestCase &t)
+         {
+             VuEnv env;
+-- 
+2.46.2.windows.1
+

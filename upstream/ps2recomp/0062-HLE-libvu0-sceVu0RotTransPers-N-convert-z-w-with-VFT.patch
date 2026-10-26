@@ -1,0 +1,161 @@
+From 5e0950f7d8af2121189422bb71514c8b444af7dc Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 23:24:51 -0400
+Subject: [PATCH] HLE libvu0: sceVu0RotTransPers(N) convert z/w with VFTOI0
+ when mode != 0
+
+The stubs made z and w 12.4 fixed point (x16) when mode was non-zero and
+plain integers when it was zero. libvu0 does the opposite: VFTOI4.xyzw sits
+in the delay slot of `beq mode, $zero` and the VFTOI0.zw after it runs only
+for a non-zero mode (SLPM-65428 RotTransPers 0x17FB2C-0x17FB34,
+RotTransPersN 0x17FA6C-0x17FA74). Resident Evil Outbreak builds its character
+shadow volumes with mode 1; their 24-bit Z came out x16, the volumes' depth
+test against the scene passed the wrong pixels and the floor showed smeared
+fragments instead of a shadow.
+
+Tests: the RotTransPers cases use libvu0's mode; new
+RotTransPers_ftoi0_z_when_mode_nonzero and
+RotTransPersN_ftoi0_z_when_mode_nonzero. Without the fix 534/539.
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp |  7 ++--
+ ps2xTest/src/ps2_vu_tests.cpp           | 48 +++++++++++++++++++------
+ 2 files changed, 43 insertions(+), 12 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+index 99f0900..bd85098 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp
+@@ -889,7 +889,10 @@ namespace ps2_stubs
+         const uint32_t dstAddr = getRegU32(ctx, 4);
+         const uint32_t matAddr = getRegU32(ctx, 5);
+         const uint32_t vAddr = getRegU32(ctx, 6);
+-        const bool fullFtoi4 = (getRegU32(ctx, 7) != 0);
++        // libvu0: VFTOI4.xyzw sits in the delay slot of `beq mode, $zero` and
++        // VFTOI0.zw follows it, so mode == 0 keeps z/w x16 and any other mode
++        // makes them plain integers (SLPM-65428 0x17FB2C-0x17FB34).
++        const bool fullFtoi4 = (getRegU32(ctx, 7) == 0);
+         float m[16]{}, v[4]{};
+         if (readVuMatrix4f(rdram, matAddr, m) && readVuVec4f(rdram, vAddr, v))
+         {
+@@ -906,7 +909,7 @@ namespace ps2_stubs
+         const uint32_t matAddr = getRegU32(ctx, 5);
+         uint32_t vAddr = getRegU32(ctx, 6);
+         const int32_t count = static_cast<int32_t>(getRegU32(ctx, 7));
+-        const bool fullFtoi4 = (getRegU32(ctx, 8) != 0);
++        const bool fullFtoi4 = (getRegU32(ctx, 8) == 0); // as sceVu0RotTransPers (0x17FA6C-0x17FA74)
+         float m[16]{};
+         if (readVuMatrix4f(rdram, matAddr, m))
+         {
+diff --git a/ps2xTest/src/ps2_vu_tests.cpp b/ps2xTest/src/ps2_vu_tests.cpp
+index e543717..7acf6bd 100644
+--- a/ps2xTest/src/ps2_vu_tests.cpp
++++ b/ps2xTest/src/ps2_vu_tests.cpp
+@@ -766,15 +766,15 @@ void register_ps2_vu_tests()
+             SET_GPR_U32(&env.ctx, 4, kDst);
+             SET_GPR_U32(&env.ctx, 5, kA);
+             SET_GPR_U32(&env.ctx, 6, kB);
+-            SET_GPR_U32(&env.ctx, 7, 1u); // fullFtoi4 = true
++            SET_GPR_U32(&env.ctx, 7, 0u); // mode 0: z/w FTOI4 as x/y
+             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
+             int32_t out[4]{};
+             readVec4i(env, kDst, out);
+             t.IsTrue(out[0] == 256 && out[1] == 512 && out[2] == 128 && out[3] == 32,
+-                     "RotTransPers should perspective-divide x/y/z then FTOI4, with w taking the un-divided FTOI4 value");
++                     "RotTransPers mode 0 should perspective-divide x/y/z then FTOI4, with w taking the un-divided FTOI4 value");
+         });
+ 
+-        tc.Run("RotTransPers_ftoi0_z_when_flag0", [](TestCase &t)
++        tc.Run("RotTransPers_ftoi0_z_when_mode_nonzero", [](TestCase &t)
+         {
+             VuEnv env;
+             float ident[16]{};
+@@ -784,12 +784,15 @@ void register_ps2_vu_tests()
+             SET_GPR_U32(&env.ctx, 4, kDst);
+             SET_GPR_U32(&env.ctx, 5, kA);
+             SET_GPR_U32(&env.ctx, 6, kB);
+-            SET_GPR_U32(&env.ctx, 7, 0u); // fullFtoi4 = false
++            // libvu0 (SLPM-65428 0x17FB2C-0x17FB34): `beq mode, $zero` skips the
++            // VFTOI0.zw that follows the delay-slot VFTOI4.xyzw, so a non-zero mode
++            // leaves z/w as plain integers (24-bit GS Z); x/y stay 12.4.
++            SET_GPR_U32(&env.ctx, 7, 1u);
+             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
+             int32_t out[4]{};
+             readVec4i(env, kDst, out);
+-            t.IsTrue(out[2] == 8 && out[3] == 2,
+-                     "RotTransPers should FTOI0-truncate z/w instead of FTOI4 when fullFtoi4 is clear");
++            t.IsTrue(out[0] == 256 && out[1] == 512 && out[2] == 8 && out[3] == 2,
++                     "RotTransPers mode != 0 should FTOI0-truncate z/w and keep x/y FTOI4");
+         });
+ 
+         tc.Run("RotTransPers_persp_wzero_zero", [](TestCase &t)
+@@ -802,7 +805,7 @@ void register_ps2_vu_tests()
+             SET_GPR_U32(&env.ctx, 4, kDst);
+             SET_GPR_U32(&env.ctx, 5, kA);
+             SET_GPR_U32(&env.ctx, 6, kB);
+-            SET_GPR_U32(&env.ctx, 7, 1u);
++            SET_GPR_U32(&env.ctx, 7, 0u);
+             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
+             int32_t out[4]{};
+             readVec4i(env, kDst, out);
+@@ -822,7 +825,7 @@ void register_ps2_vu_tests()
+             //   t1 = m1*1 + m5*2 + m9*3  + m13*1 = 3 + 2  + 0  + 20 = 25
+             //   t2 = m2*1 + m6*2 + m10*3 + m14*1 = 0 + 8  + 3  + 30 = 41
+             //   t3 = m3*1 + m7*2 + m11*3 + m15*1 = 1
+-            // fullFtoi4=true => every lane x16: (432, 400, 656, 16).
++            // mode 0 => every lane x16: (432, 400, 656, 16).
+             VuEnv env;
+             float m[16] = {
+                 2.0f, 3.0f, 0.0f, 0.0f,
+@@ -835,7 +838,7 @@ void register_ps2_vu_tests()
+             SET_GPR_U32(&env.ctx, 4, kDst);
+             SET_GPR_U32(&env.ctx, 5, kA);
+             SET_GPR_U32(&env.ctx, 6, kB);
+-            SET_GPR_U32(&env.ctx, 7, 1u); // fullFtoi4 = true
++            SET_GPR_U32(&env.ctx, 7, 0u); // mode 0: every lane FTOI4
+             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
+             int32_t out[4]{};
+             readVec4i(env, kDst, out);
+@@ -855,7 +858,7 @@ void register_ps2_vu_tests()
+             SET_GPR_U32(&env.ctx, 5, kA);
+             SET_GPR_U32(&env.ctx, 6, kArr);
+             SET_GPR_U32(&env.ctx, 7, 2u);
+-            SET_GPR_U32(&env.ctx, 8, 1u);
++            SET_GPR_U32(&env.ctx, 8, 0u); // mode 0: z/w FTOI4
+             ps2_stubs::sceVu0RotTransPersN(env.rdram.data(), &env.ctx, &env.runtime);
+             int32_t out0[4]{}, out1[4]{};
+             readVec4i(env, kDst, out0);
+@@ -864,6 +867,31 @@ void register_ps2_vu_tests()
+             t.IsTrue(out1[3] == 640, "RotTransPersN second vertex should advance the input/output stride by 16 bytes");
+         });
+ 
++        tc.Run("RotTransPersN_ftoi0_z_when_mode_nonzero", [](TestCase &t)
++        {
++            // As RotTransPers (SLPM-65428 0x17FA6C-0x17FA74): mode != 0 gives integer
++            // z/w per vertex. Outbreak's shadow volumes pass mode 1 for their 24-bit Z.
++            VuEnv env;
++            float ident[16]{};
++            makeIdentity(ident);
++            writeMat4(env, kA, ident);
++            writeVec4(env, kArr, 32.0f, 64.0f, 16.0f, 2.0f);
++            writeVec4(env, kArr + 16u, 10.0f, 20.0f, 30.0f, 1.0f);
++            SET_GPR_U32(&env.ctx, 4, kDst);
++            SET_GPR_U32(&env.ctx, 5, kA);
++            SET_GPR_U32(&env.ctx, 6, kArr);
++            SET_GPR_U32(&env.ctx, 7, 2u);
++            SET_GPR_U32(&env.ctx, 8, 1u);
++            ps2_stubs::sceVu0RotTransPersN(env.rdram.data(), &env.ctx, &env.runtime);
++            int32_t out0[4]{}, out1[4]{};
++            readVec4i(env, kDst, out0);
++            readVec4i(env, kDst + 16u, out1);
++            t.IsTrue(out0[0] == 256 && out0[1] == 512 && out0[2] == 8 && out0[3] == 2,
++                     "RotTransPersN mode != 0 should keep x/y FTOI4 and FTOI0-truncate z/w");
++            t.IsTrue(out1[0] == 160 && out1[1] == 320 && out1[2] == 30 && out1[3] == 1,
++                     "RotTransPersN mode != 0 should apply to every vertex");
++        });
++
+         tc.Run("ecossin_cos_sin", [](TestCase &t)
+         {
+             VuEnv env;
+-- 
+2.46.2.windows.1
+
