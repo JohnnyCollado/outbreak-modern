@@ -134,7 +134,7 @@ Aim is a toggle on touch (tap to aim, tap again to lower), so one thumb is free 
   resolution change.
 - Vibrate on press: on by default.
 
-### 4.5 Settings menu (Controls tab, Android)
+### 4.5 Settings menu (its own "Touch controls" page, Android; developer 2026-10-26: moved off the Controls page so players find and touch only what they need)
 
 Rows under "Touch controls": Show touch controls (Auto / On / Off), Buttons (Minimal / Full), Classic movement
 (Directional / Tank; Tank shows the two zone sliders), Run at stick edge, Quick turn gesture (flick back on the tank

@@ -172,7 +172,7 @@ adb shell am force-stop com.outbreakmodern.app
 Design: `docs/plans/2026-10-26-touch-controls.md`; report `reports/2026-10-26-touch-controls.md`. Classic camera only.
 - `TouchOverlay.kt`: a full-screen dialog window over `OutbreakActivity`, `FLAG_NOT_FOCUSABLE`, so the controller's
   keys and Back still go to the game's NativeActivity input queue. Off = no window at all (touches reach the game as
-  before). Hidden while the in-game menu is open; Controls > Touch controls > Edit layout shows it over the held game.
+  before). Hidden while the in-game menu is open; Touch controls > Edit layout (its own page in the menu) shows it over the held game.
 - `TouchLogic.kt`: zones, gestures, button sets, settings (no Android imports); tested by
   `native/android/test/kotlin/.../TouchLogicTest.kt`, which `android.sh package` runs (`gradlew testDebugUnitTest
   assembleDebug`) and reports as `kotlin tests: n/n, kotlin warnings: n`.

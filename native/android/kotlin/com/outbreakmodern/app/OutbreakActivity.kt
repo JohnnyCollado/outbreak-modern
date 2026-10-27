@@ -79,7 +79,7 @@ class OutbreakActivity : NativeActivity() {
         var closed = false
         lateinit var dialog: ComponentDialog
         touch?.suspend(true)
-        // Controls > Touch controls > Edit layout: the menu steps aside (the game stays held) until Done.
+        // Touch controls > Edit layout: the menu steps aside (the game stays held) until Done.
         model.editTouchLayout = touch?.let { t -> { dialog.hide(); t.startEdit { dialog.show() } } }
         fun close(quit: Boolean) {
             if (closed) return
