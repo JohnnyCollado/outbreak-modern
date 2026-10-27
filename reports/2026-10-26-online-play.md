@@ -303,6 +303,24 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   `up-without.sh` (proves a test fails without the change). Temporary diagnostics lived in `net-src` only and are
   gone (`up-sync.sh`).
 
+### 23. The "-5" is not a card failure; why OK does nothing is still open
+
+- **Checked:** the card-check status is the same with the card image from before my `BWNETCNF` write (so not my
+  card writer), and no memory-card RPC fails: the mc2 traffic goes through dbcman (sid 0x80000211, fn 1 each
+  frame) and SIF command packets (sids 0/1), all answered. The -5 (`-0xFB`) is the game's own job code at main
+  0x1bec00: "found entry's size (0x308C00) != expected (job+0x88)". Live, both are 0x1BEC (the NET file) and the
+  entry buffer at 0x308BF0 names `BISLPM-65286NET`, so the compare passes now; the status byte at `S+0x10DA` = 2
+  is set by the success path too (0x5d09c8), so "status 1" may simply mean "checked". Unverified either way.
+- **Observed:** OK on the "Proxy Configuration" row opens its dialog, so input works on this screen; OK on
+  "1. Setting 1" does nothing. The screen's per-frame handler for the list rows (`netwk` 0x5c92d0) only acts for
+  `S[0x20]` < 6, and `S[0x20]` is 18 here (peeked), which belongs to the 20-state connect machine
+  (0x5c94f0, state 18 at 0x5ca5e8: usable check, then `S+0x1ACB4` byte (0 live) → state 13 with message 0x33,
+  else the compare with the game's own saved preference at 0x35EF00 (all zero: a fresh NET file) through
+  0x5c78a0, then 0x5cda50/0x5cd7c0 and state 5). Which of these runs on OK, and why nothing is drawn, needs a
+  call trace of the overlay or a reference run on PCSX2.
+- **State for the next session:** `C:\ob\saves-net\Mcd001.ps2` is the pre-`BWNETCNF` card again (the client
+  serves the settings; `Mcd001.with-bwnetcnf.ps2` kept beside it). Temporary diagnostics removed from `net-src`.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
