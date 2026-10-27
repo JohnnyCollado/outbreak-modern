@@ -193,7 +193,16 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
   spare CPU from closed apps (the thread was not short of a core before either). Shares of the game thread in the slow
   seconds: unwinding 5.4 -> 1.0 %, PLT 3.8 -> 1.1 %, EE timers + checkpoints 13.7 -> 8.1 %. The profiler recorded fewer
   samples per second than asked this time (Android throttles perf sampling), so only shares and `top` are compared.
-- **Still open:** J's Bar's opening is 53-56, not 60. Next costs: the IOP interpreter (about 19 %), the scheduler's
+- **Then the performance hint (developer approved):** `native/ob_ui/android/perf_hint.cpp`, one APerformanceHint
+  session for GameThread + GSThread, target 16 683 333 ns, the game thread's CPU time reported each host frame. Run 6
+  (05:01:07-05:04:00, gamer pro mode): "[perf] hint on: game thread 13106, GS thread 13065"; 172 s, median 60 fps,
+  166 s at 57+, 1 s under 50 (the start-up second). J's Bar's heavy stretch (the GS counter 1 532 records per vsync,
+  05:02:07-05:02:37, as heavy as run 5's 1 539) held 57-60 fps, one second 55. `GameThread` 69 % busy in the slow
+  seconds (93 % in run 5); the once-a-second clock sample still reads a 2.4 GHz median (max 3.07 GHz) and the thread
+  ran on cpu6 more often (64 samples at full speed, 26 in run 5), so the extra speed likely comes from faster clocks
+  and core moves between samples: not measured directly. The wireless adb link dropped four times (new port each
+  time; `timeout` on every adb call from now on).
+- **Earlier open point, J's Bar's opening at 53-56:** closed by the hint on this phone (57-60). Next costs: the IOP interpreter (about 19 %), the scheduler's
   remaining checkpoint work, SPU2 mixing; and the clocks (the thread never got the cpu6-7 cores during a dip).
 
 ## Mistakes and corrections
