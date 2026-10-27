@@ -13,6 +13,9 @@ Source: R0-003 (8), phase 1.1 T2/T4 (`docs/history/`). The everyday commands are
 - `PY -I tools/ob/mcd.py blank|format|info <card.ps2>` — PCSX2 `.ps2` memory cards: a new unformatted card (as PCSX2
   makes), a new empty formatted card (mymcplus' layout, PCSX2's ECC), or whether a card is formatted and its saves
   (root folders and their files). Never overwrites a file. Used for the memory card checks (patches 0071-0076).
+  `mcd.py netcnf <card.ps2> <disc>/ntgui2/conf/english` adds the network settings folder `BWNETCNF` (network adapter,
+  DHCP; the interface and device files scrambled for console ID 8×0xAA, PS2Recomp 0093) to a formatted card; refuses
+  if it exists. Test: `tools/test_mcd.py`.
 - `PY tools/q_scan.py` — read-only VU0 Q-register check. Test: tools/test_q_scan.py.
 - `bash tools/recomp_cycle.sh` — Linux/xvfb form of the recompile + boot cycle (not run on Windows).
 - `gate/boot.script` — scripted hidden boot to character select, six captures (grammar: `native/ob_diag/src/input_script.h`, was the patch 0020 header,
