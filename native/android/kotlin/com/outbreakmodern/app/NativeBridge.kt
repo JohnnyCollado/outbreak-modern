@@ -36,6 +36,8 @@ object NativeBridge {
     @JvmStatic external fun touchPad(pressed: Int, rx: Int, ry: Int, lx: Int, ly: Int)
     /** The game's pad reads with a controller or keyboard in use, since start (wraps): the overlay hides while it rises. */
     @JvmStatic external fun physicalPadReads(): Int
+    /** The game's screen (native/ob_ui/core/game_screen.h): -1 unknown, bit 0 = a menu screen, bits 8-15 = its controller type. */
+    @JvmStatic external fun gameScreen(): Int
     /** Opens the in-game menu, as the Back button does. */
     @JvmStatic external fun requestMenu()
 }

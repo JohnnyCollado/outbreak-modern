@@ -50,12 +50,48 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
 - **Evidence:** `TouchLogicTest.doubleTapNeedsTwoShortTaps`.
 - **Take-away:** gesture detectors need a test for the repeat case, not only the first fire.
 
+### 3. Copying the disc image to the phone: Git Bash rewrote the phone path
+
+- **Seen:** `adb push ... /sdcard/roms/...` failed: "failed to copy ... to 'C:/Program Files/Git/sdcard/roms/...':
+  remote secure_mkdirs() failed".
+- **Found by:** the error text (a Windows path on the phone side).
+- **Cause:** MSYS path conversion turns an argument starting with `/` into a Windows path.
+- **Fix:** `MSYS_NO_PATHCONV=1 adb ...`. The retry then found the phone unplugged; nothing reached it either time
+  (checked with `find /sdcard -name "Biohazard*"`).
+- **Take-away:** every adb command with a device path from Git Bash needs `MSYS_NO_PATHCONV=1`.
+
+### 4. Menu research: a run at 2-4 fps, and a boot that waited through the opening movie
+
+- **Seen:** live-pad commands timed out after the map opened; the boot driver timed out waiting for game state 2.
+- **Found by:** `[fps]` lines in `C:\ob\logs\boot-menu1.log` (2-4 fps); a `peek` of `0x48BF60` = 14.
+- **Cause:** the Windows default VU1 is the interpreter (memory "speed runs need mvu"); after J's Bar loads, the game
+  first plays its opening movie (state 14), which only Start skips.
+- **Fix:** `PS2X_VU1=mvu` for the second run; the driver presses Start / ○ until state 2 instead of waiting.
+- **Evidence:** run `menu3`: every open/close of status, map and pause matched `0x48BF7E` (design section 8).
+- **Take-away:** use `PS2X_VU1=mvu` for any live-pad run that reaches gameplay.
+
+### 5. A warning hidden by incremental builds: `u8path` is deprecated in C++20 (Android)
+
+- **Seen:** after patch 0081 changed `ps2_ui_external.h`, the Android build printed
+  `main.cpp:154: warning: 'u8path<char *, 0>' is deprecated [-Wdeprecated-declarations]`.
+- **Found by:** grepping `ob-android-build.log` for warnings after the build; `git blame` in `C:\ob\up`: the line came
+  from our own patch 0043, and five more `u8path` calls sit in `ps2_diag.cpp`, `ps2_game_source.cpp` (3) and
+  `ps2_input_bindings.cpp`, silent only because those files had not recompiled since.
+- **Cause:** libc++ (NDK 27) marks `std::filesystem::u8path` deprecated with C++20's `char8_t`; incremental builds
+  only show warnings for files they recompile, so the earlier "0 warnings" counts were not a full picture.
+- **Fix:** PS2Recomp patch 0082: `runtime/ps2_path_utf8.h` `ps2path::fromUtf8` (the bytes as `char8_t`, the same
+  conversion) for all six calls; then the whole runtime and our native code were recompiled for Android to check.
+- **Take-away:** to claim "no warnings", force a recompile of the touched libraries once; incremental counts miss old
+  warnings.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
 |---|---|---|---|
 | (design) Classic stick = mostly tank | the left stick is directional in the Classic camera too | the developer, from another session | design T5, T13, T14 |
 | (design) the aim pad may need a directional variant | aiming returns to tank-style aiming from either scheme | the developer | design T8 |
+| First build: "0 native warnings" | true only for the files that recompiled; six deprecated `u8path` calls were latent | patch 0081 made `main.cpp` recompile | patch 0082, struggle 5 |
+| (menu research) the map does not close with ✕ | it does; the 2-4 fps run lost the input | the full-speed run `menu3` | design section 8 |
 
 ## Still open
 

@@ -88,6 +88,18 @@ object Zones {
         return bits
     }
 
+    /** A 4-way D-pad (the menu layout, T15): one direction at a time, so a menu cursor never gets two at once. */
+    fun dpad4(p: PadPoint): Int {
+        if (p.mag < PAD_CENTRE) return 0
+        val a = p.angle
+        return when {
+            abs(a) <= 45f -> Ps2.UP
+            abs(a) >= 135f -> Ps2.DOWN
+            a > 0 -> Ps2.RIGHT
+            else -> Ps2.LEFT
+        }
+    }
+
     /** The directional stick (T5): x and y bytes, 0x80 = centre, up = smaller y (the PS2's convention). */
     fun stick(p: PadPoint): Pair<Int, Int> {
         if (p.mag < STICK_CENTRE) return 0x80 to 0x80
@@ -223,8 +235,10 @@ enum class Kind {
     TALK,
     /** The call wheel only (Full Call). */
     CALL,
-    /** Minimal: a fan of Status / Map / Options / Settings. Full: opens Settings. */
+    /** Minimal: a fan of Status / Map / Options / Settings. Full and the menu layout: opens Settings. */
     MENU,
+    /** Switches between the play layout and the menu layout by hand (T18). */
+    LAYOUT,
 }
 
 /** When a control shows. */
@@ -237,8 +251,20 @@ enum class Ctx { ALWAYS, WALKING, AIMING }
 data class ControlSpec(
     val id: String, val kind: Kind, val bits: Int, val glyph: String, val label: String,
     val x: Float, val y: Float, val size: Float, val round: Boolean = true,
-    val ctx: Ctx = Ctx.ALWAYS, val aimLabel: String = label,
-)
+    val ctx: Ctx = Ctx.ALWAYS, val aimLabel: String = label, val four: Boolean = false,
+) {
+    /**
+     * What it says (T19): the play or aim label under the game's controller type 0, the one its pause menu calls TYPE
+     * A (□ ad-lib, ✕ cancel/dash, ○ OK/attack). Another type moves the face buttons' jobs in ways not mapped yet, so
+     * those show their glyph alone.
+     */
+    fun labelFor(aiming: Boolean, controlType: Int): String =
+        if (controlType != 0 && bits and FACE_BUTTONS != 0) "" else if (aiming) aimLabel else label
+
+    companion object {
+        const val FACE_BUTTONS = Ps2.CIRCLE or Ps2.CROSS or Ps2.SQUARE or Ps2.TRIANGLE
+    }
+}
 
 /** A control as the player placed it (touch_layout.ini: "x, y, scale, hidden"). */
 data class Placement(val x: Float, val y: Float, val scale: Float = 1f, val hidden: Boolean = false) {
@@ -260,6 +286,7 @@ data class Placement(val x: Float, val y: Float, val scale: Float = 1f, val hidd
 object ButtonSets {
     /** touch_layout.ini section of a set. */
     fun section(minimal: Boolean) = if (minimal) "minimal" else "full"
+    const val MENU_SECTION = "menu"
 
     /** Minimal (T2, section 4.3): walking = pad, Action, Aim, Run, Talk, Menu; aiming swaps Talk for Shift/reload. */
     val MINIMAL = listOf(
@@ -269,6 +296,7 @@ object ButtonSets {
         ControlSpec("cross", Kind.HOLD, Ps2.CROSS, "✕", "Run", 0.77f, 0.82f, 50f, aimLabel = "Special"),
         ControlSpec("talk", Kind.TALK, Ps2.SQUARE, "", "Talk", 0.75f, 0.47f, 54f, ctx = Ctx.WALKING),
         ControlSpec("l1", Kind.HOLD, Ps2.L1, "L1", "Shift/reload", 0.75f, 0.47f, 58f, ctx = Ctx.AIMING),
+        ControlSpec("layout", Kind.LAYOUT, 0, "✚", "D-pad", 0.30f, 0.08f, 44f),
         ControlSpec("menu", Kind.MENU, 0, "", "Menu", 0.96f, 0.08f, 40f),
     )
 
@@ -287,6 +315,25 @@ object ButtonSets {
         ControlSpec("call", Kind.CALL, 0, "", "Call", 0.63f, 0.84f, 56f),
         ControlSpec("select", Kind.HOLD, Ps2.SELECT, "SEL", "Options", 0.42f, 0.07f, 50f, round = false),
         ControlSpec("start", Kind.HOLD, Ps2.START, "START", "Status", 0.58f, 0.07f, 50f, round = false),
+        ControlSpec("layout", Kind.LAYOUT, 0, "✚", "D-pad", 0.31f, 0.07f, 40f),
+        ControlSpec("menu", Kind.MENU, 0, "", "Settings", 0.96f, 0.08f, 40f),
+    )
+
+    /**
+     * The menu layout (T15): the status screen, map, pause menu, title and select screens. A 4-way D-pad, OK and Back,
+     * △, the shoulders (the map's floors), Start and Select, and the way back to the play layout.
+     */
+    val MENU = listOf(
+        ControlSpec("dpad", Kind.DPAD, 0, "", "D-pad", 0.15f, 0.64f, 160f, four = true),
+        ControlSpec("circle", Kind.HOLD, Ps2.CIRCLE, "○", "OK", 0.88f, 0.62f, 70f),
+        ControlSpec("cross", Kind.HOLD, Ps2.CROSS, "✕", "Back", 0.77f, 0.80f, 58f),
+        ControlSpec("triangle", Kind.HOLD, Ps2.TRIANGLE, "△", "Map", 0.77f, 0.44f, 50f),
+        ControlSpec("square", Kind.HOLD, Ps2.SQUARE, "□", "", 0.88f, 0.86f, 44f),
+        ControlSpec("l1", Kind.HOLD, Ps2.L1, "L1", "", 0.09f, 0.22f, 56f, round = false),
+        ControlSpec("r1", Kind.HOLD, Ps2.R1, "R1", "", 0.91f, 0.22f, 56f, round = false),
+        ControlSpec("select", Kind.HOLD, Ps2.SELECT, "SEL", "", 0.42f, 0.07f, 50f, round = false),
+        ControlSpec("start", Kind.HOLD, Ps2.START, "START", "", 0.58f, 0.07f, 50f, round = false),
+        ControlSpec("layout", Kind.LAYOUT, 0, "◎", "Game", 0.30f, 0.08f, 44f),
         ControlSpec("menu", Kind.MENU, 0, "", "Settings", 0.96f, 0.08f, 40f),
     )
 
@@ -294,8 +341,46 @@ object ButtonSets {
         if (minimal) MINIMAL else FULL.filter { it.kind != Kind.DPAD || directional }
 
     /** The controls showing now: by context, without the hidden ones. */
-    fun visible(specs: List<ControlSpec>, aiming: Boolean, placed: Map<String, Placement>): List<ControlSpec> =
-        specs.filter { (it.ctx == Ctx.ALWAYS || (it.ctx == Ctx.AIMING) == aiming) && placed[it.id]?.hidden != true }
+    fun visible(specs: List<ControlSpec>, aiming: Boolean, hidden: (String) -> Boolean): List<ControlSpec> =
+        specs.filter { (it.ctx == Ctx.ALWAYS || (it.ctx == Ctx.AIMING) == aiming) && !hidden(it.id) }
+}
+
+/**
+ * Which layout shows (T16, T18): the game's own choice (its menu flag), flipped while the player's toggle is on; a new
+ * screen clears the toggle, since it was meant for the last one.
+ */
+class LayoutChooser {
+    /** The player's toggle: show the other layout than the game asks for. */
+    var forced = false
+        private set
+    var gameMenu = false
+        private set
+    var controlType = 0
+        private set
+
+    val menu get() = gameMenu != forced
+
+    /** The game's screen from NativeBridge.gameScreen (-1 = unknown). True when the layout changed. */
+    fun game(screen: Int): Boolean {
+        if (screen < 0) return false
+        controlType = (screen shr 8) and 0xFF
+        val m = screen and 1 != 0
+        if (m == gameMenu) return false
+        val before = menu
+        gameMenu = m
+        forced = false
+        return menu != before
+    }
+
+    /** The toggle button: the other layout, by hand. */
+    fun toggle() {
+        forced = !forced
+    }
+
+    /** The overlay restarted (menu closed, settings read again): the game decides again. */
+    fun reset() {
+        forced = false
+    }
 }
 
 /** The Minimal set's Menu fan (T11): what each entry presses, or null = open the settings menu. */

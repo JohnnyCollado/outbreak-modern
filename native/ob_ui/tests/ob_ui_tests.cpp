@@ -7,8 +7,11 @@
 //   a late tap, the pad gate while open and after closing;
 // - memory cards: unformatted, a formatted card with one save, transfer never overwrites, backups keep N;
 // - touch pad: touch buttons press on top of the host pad, a pushed touch stick wins, a centred one leaves the
-//   physical stick, physical use is counted (buttons, a stick past its threshold) and touch alone is not.
+//   physical stick, physical use is counted (buttons, a stick past its threshold) and touch alone is not;
+// - game screen: menu layout before the game task and while the menu byte is set, play layout otherwise, the
+//   controller type, the attached RAM read live.
 #include "disc_check.h"
+#include "game_screen.h"
 #include "ini_file.h"
 #include "memory_card.h"
 #include "menu_trigger.h"
@@ -548,9 +551,41 @@ static void TouchTests()
 	Check(t.merge(0xFFFFu, s4) == 0xFFFFu && s4[2] == 0x80, "touch: clear releases buttons and sticks");
 }
 
+static void ScreenTests()
+{
+	// A synthetic EE RAM: the game task in its slot, the menu byte, the controller type (game_screen.h).
+	std::vector<uint8_t> ram(32u * 1024u * 1024u, 0u);
+	auto put32 = [&](uint32_t a, uint32_t v) {
+		for (int i = 0; i < 4; i++)
+			ram[a + i] = static_cast<uint8_t>(v >> (8 * i));
+	};
+	Check(!obui::classifyScreen(nullptr, 0).known, "screen: no RAM = unknown");
+	Check(!obui::classifyScreen(ram.data(), 0x1000).known, "screen: RAM too small = unknown");
+
+	obui::GameScreen g = obui::classifyScreen(ram.data(), static_cast<uint32_t>(ram.size()));
+	Check(g.known && g.menu, "screen: before the game task (title, select) = menu layout");
+
+	put32(obui::kGameTaskSlot, obui::kGameTaskFunc);
+	g = obui::classifyScreen(ram.data(), static_cast<uint32_t>(ram.size()));
+	Check(g.known && !g.menu, "screen: in the game task, no menu open = play layout");
+
+	ram[obui::kMenuOpen] = 1;
+	ram[obui::kControlType] = 2;
+	g = obui::classifyScreen(ram.data(), static_cast<uint32_t>(ram.size()));
+	Check(g.menu && g.controlType == 2, "screen: status / map / pause open = menu layout, with the controller type");
+
+	// The attached view follows the game's writes.
+	obui::attachGuestRam(ram.data(), static_cast<uint32_t>(ram.size()));
+	ram[obui::kMenuOpen] = 0;
+	Check(obui::currentScreen().known && !obui::currentScreen().menu, "screen: the attached RAM is read live");
+	obui::attachGuestRam(nullptr, 0);
+	Check(!obui::currentScreen().known, "screen: detached = unknown");
+}
+
 int main()
 {
 	IniTests();
+	ScreenTests();
 	DiscTests();
 	TriggerTests();
 	CardTests();

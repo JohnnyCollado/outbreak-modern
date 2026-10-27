@@ -2,6 +2,7 @@
 #include "android_menu.h"
 
 #include "disc_check.h"
+#include "game_screen.h"
 #include "ini_file.h"
 #include "memory_card.h"
 #include "touch_pad.h"
@@ -236,6 +237,16 @@ JNIEXPORT void JNICALL Java_com_outbreakmodern_app_NativeBridge_touchPad(JNIEnv*
 JNIEXPORT jint JNICALL Java_com_outbreakmodern_app_NativeBridge_physicalPadReads(JNIEnv*, jclass)
 {
 	return static_cast<jint>(obui::touchPad().physicalReads());
+}
+
+// gameScreen(): what the game's screen wants (core/game_screen.h): -1 not known yet (no game RAM), else bit 0 = a menu
+// screen (the D-pad layout), bits 8-15 = the game's controller type.
+JNIEXPORT jint JNICALL Java_com_outbreakmodern_app_NativeBridge_gameScreen(JNIEnv*, jclass)
+{
+	const obui::GameScreen g = obui::currentScreen();
+	if (!g.known)
+		return -1;
+	return (g.menu ? 1 : 0) | (static_cast<jint>(g.controlType) << 8);
 }
 
 // requestMenu(): open the in-game menu, as the Back button does (the overlay's Menu > Settings).

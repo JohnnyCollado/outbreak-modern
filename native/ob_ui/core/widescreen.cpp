@@ -61,7 +61,7 @@ namespace obui
 			if (EndsWith(Lower(name), ".pnach.disabled"))
 				base = name.substr(0, name.size() - 9); // drop ".disabled"
 			const std::string target = enable ? base : base + ".disabled";
-			return p.parent_path() / fs::u8path(target);
+			return p.parent_path() / fs::path(std::u8string(target.begin(), target.end())); // UTF-8, not C++20's deprecated u8path
 		}
 	} // namespace
 

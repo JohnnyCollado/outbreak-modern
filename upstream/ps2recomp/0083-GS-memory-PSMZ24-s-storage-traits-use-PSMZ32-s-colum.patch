@@ -1,0 +1,88 @@
+From 270a41bf4633e98568e3266cd7ca64989549975c Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:25:51 -0400
+Subject: [PATCH 83/83] GS memory: PSMZ24's storage traits use PSMZ32's column
+ (its reads and writes already use Z32's page table; the column was {0, 0}),
+ and the switches over storage modes have a default (clang -Wswitch on
+ Android)
+
+---
+ ps2xRuntime/include/runtime/gs/ps2_gs_memory.h |  9 +++++++++
+ ps2xTest/src/ps2_gs_tests.cpp                  | 13 +++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/gs/ps2_gs_memory.h b/ps2xRuntime/include/runtime/gs/ps2_gs_memory.h
+index c784ff7..cd8c242 100644
+--- a/ps2xRuntime/include/runtime/gs/ps2_gs_memory.h
++++ b/ps2xRuntime/include/runtime/gs/ps2_gs_memory.h
+@@ -81,6 +81,8 @@ namespace GSMem
+ 		case P4HH:
+ 		case P4HL:
+ 			return true;
++		default:
++			break;
+ 		}
+ 
+ 		return false;
+@@ -108,6 +110,8 @@ namespace GSMem
+ 			return 8;
+ 		case P4:
+ 			return 4;
++		default:
++			break;
+ 		}
+ 
+ 		return 32;
+@@ -174,6 +178,8 @@ namespace GSMem
+ 		case P4HL:
+ 		case P4HH:
+ 			return true;
++		default:
++			break;
+ 		}
+ 
+ 		return false;
+@@ -328,6 +334,7 @@ namespace GSMem
+ 		case C32:
+ 		case Z32:
+ 		case C24:
++		case Z24: // same layout as Z32 (its reads and writes use Z32's page table)
+ 		case P8H:
+ 		case P4HL:
+ 		case P4HH:
+@@ -341,6 +348,8 @@ namespace GSMem
+ 			return { 16, 16 };
+ 		case P4:
+ 			return { 32, 16 };
++		default:
++			break;
+ 		}
+ 
+ 		return { 0, 0 };
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index a5410dc..3a20c00 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -414,6 +414,19 @@ void register_ps2_gs_tests()
+ {
+     MiniTest::Case("PS2GS", [](TestCase &tc)
+     {
++        tc.Run("PSMZ24's storage traits are PSMZ32's layout (patch 0083)", [](TestCase &t)
++        {
++            // Z24 is stored like Z32 (its reads and writes already use Z32's page table); its column was {0, 0}.
++            using Z24 = GSMem::PixelStorageTraits<GSMem::PixelStorageMode::Z24>;
++            using Z32 = GSMem::PixelStorageTraits<GSMem::PixelStorageMode::Z32>;
++            t.Equals(static_cast<uint32_t>(Z24::ColumnExtent().x), static_cast<uint32_t>(Z32::ColumnExtent().x), "column width");
++            t.Equals(static_cast<uint32_t>(Z24::ColumnExtent().y), static_cast<uint32_t>(Z32::ColumnExtent().y), "column height");
++            t.Equals(static_cast<uint32_t>(Z24::PageExtent().x), static_cast<uint32_t>(Z32::PageExtent().x), "page width");
++            t.Equals(static_cast<uint32_t>(Z24::BlockExtent().y), static_cast<uint32_t>(Z32::BlockExtent().y), "block height");
++            t.IsTrue(!GSMem::IsValidPsm(GSMem::PixelStorageMode::Max), "Max is not a storage mode");
++            t.IsTrue(!GSMem::IsPaletted(GSMem::PixelStorageMode::Z24), "Z24 is not paletted");
++        });
++
+         tc.Run("GS CSR/IMR support coherent 64-bit and 32-bit access", [](TestCase &t)
+         {
+             PS2Memory mem;
+-- 
+2.46.2.windows.1
+

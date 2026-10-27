@@ -1,0 +1,170 @@
+From 76f1cad2b337b6b827e405b791225fccb62ddcee Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:21:02 -0400
+Subject: [PATCH 82/83] Runtime: paths from UTF-8 (command line, environment,
+ settings) through ps2path::fromUtf8 instead of C++20's deprecated
+ std::filesystem::u8path, which libc++ (Android NDK) warns about at every
+ call; same conversion
+
+---
+ ps2xRuntime/include/runtime/ps2_path_utf8.h | 18 ++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_diag.cpp            |  3 ++-
+ ps2xRuntime/src/lib/ps2_game_source.cpp     |  7 ++++---
+ ps2xRuntime/src/lib/ps2_input_bindings.cpp  |  3 ++-
+ ps2xRuntime/src/main.cpp                    |  3 ++-
+ ps2xTest/src/ps2_game_source_tests.cpp      | 13 +++++++++++++
+ 6 files changed, 41 insertions(+), 6 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_path_utf8.h
+
+diff --git a/ps2xRuntime/include/runtime/ps2_path_utf8.h b/ps2xRuntime/include/runtime/ps2_path_utf8.h
+new file mode 100644
+index 0000000..beff329
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_path_utf8.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++// A path from UTF-8 bytes (a command-line argument, an environment variable, a settings value) without C++20's
++// deprecated std::filesystem::u8path (patch 0082): the bytes become char8_t, which std::filesystem::path converts to
++// the native encoding exactly as u8path did (UTF-16 on Windows, unchanged elsewhere). libc++ (Android NDK) warns on
++// every u8path call under C++20.
++
++#include <filesystem>
++#include <string>
++#include <string_view>
++
++namespace ps2path
++{
++    inline std::filesystem::path fromUtf8(std::string_view utf8)
++    {
++        return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_diag.cpp b/ps2xRuntime/src/lib/ps2_diag.cpp
+index 2467c75..3c32653 100644
+--- a/ps2xRuntime/src/lib/ps2_diag.cpp
++++ b/ps2xRuntime/src/lib/ps2_diag.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_diag_hooks.h"
++#include "runtime/ps2_path_utf8.h"
+ 
+ #include <atomic>
+ #include <cstdlib>
+@@ -85,7 +86,7 @@ int ps2LoadDiagPlugin(const PS2DiagHost &host)
+     bool named = false;
+     if (const char *env = std::getenv("PS2X_DIAG"); env && *env)
+     {
+-        path = std::filesystem::u8path(env);
++        path = ps2path::fromUtf8(env);
+         named = true;
+     }
+     else
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index eacecbf..81590bf 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_game_source.h"
++#include "runtime/ps2_path_utf8.h"
+ 
+ #include "ps2x/iop/iso9660.h"
+ 
+@@ -230,7 +231,7 @@ namespace ps2game
+                 target->clear();
+                 continue;
+             }
+-            std::filesystem::path path = std::filesystem::u8path(value);
++            std::filesystem::path path = ps2path::fromUtf8(value);
+             if (path.is_relative() && !baseDirectory.empty())
+                 path = baseDirectory / path;
+             *target = path.lexically_normal();
+@@ -277,7 +278,7 @@ namespace ps2game
+         bool named = false;
+         if (const char *env = std::getenv("PS2X_SETTINGS"); env && *env)
+         {
+-            path = std::filesystem::u8path(env);
++            path = ps2path::fromUtf8(env);
+             named = true;
+         }
+         else
+@@ -348,7 +349,7 @@ namespace ps2game
+         if (env && *env)
+         {
+             from = "PS2X_SAVES";
+-            dir = std::filesystem::u8path(env).lexically_normal();
++            dir = ps2path::fromUtf8(env).lexically_normal();
+         }
+         else if (!settings.saves.empty())
+         {
+diff --git a/ps2xRuntime/src/lib/ps2_input_bindings.cpp b/ps2xRuntime/src/lib/ps2_input_bindings.cpp
+index 2408fa3..75d1490 100644
+--- a/ps2xRuntime/src/lib/ps2_input_bindings.cpp
++++ b/ps2xRuntime/src/lib/ps2_input_bindings.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_input_bindings.h"
++#include "runtime/ps2_path_utf8.h"
+ 
+ #include "raylib.h"
+ 
+@@ -496,7 +497,7 @@ namespace ps2input
+         bool named = false;
+         if (const char *env = std::getenv("PS2X_INPUT_INI"); env && *env)
+         {
+-            path = std::filesystem::u8path(env);
++            path = ps2path::fromUtf8(env);
+             named = true;
+         }
+         else
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index ce31d73..c28d8af 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_ui_external.h"
++#include "runtime/ps2_path_utf8.h"
+ #include <cstring>
+ #include "ps2_runtime.h"
+ #include "games_database.h"
+@@ -151,7 +152,7 @@ namespace
+         if (argc >= 2 && argv[1] && argv[1][0] != '\0')
+         {
+             std::cout << "Using argv boot path" << std::endl;
+-            return std::filesystem::u8path(argv[1]);
++            return ps2path::fromUtf8(argv[1]);
+         }
+         if (!ps2game::activeSettings().game.empty())
+         {
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 757e5d3..20c19a2 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -6,6 +6,7 @@
+ #include "ps2_syscalls.h"
+ #include "ps2x/iop/iso9660.h"
+ #include "runtime/ps2_game_source.h"
++#include "runtime/ps2_path_utf8.h"
+ 
+ #include <chrono>
+ #include <cstring>
+@@ -154,6 +155,18 @@ void register_ps2_game_source_tests()
+ {
+     MiniTest::Case("GameSource", [](TestCase &tc)
+     {
++        tc.Run("a UTF-8 path keeps every character, as u8path did (patch 0082)", [](TestCase &t)
++        {
++            // "games/Biohazard <e-acute>.iso": two UTF-8 bytes for one character, which the path must keep.
++            const std::filesystem::path p = ps2path::fromUtf8("games/Biohazard \xC3\xA9.iso");
++            t.IsTrue(p.filename().u8string() == std::u8string(u8"Biohazard é.iso"), "the name round-trips to UTF-8");
++            t.IsTrue(p.parent_path().u8string() == std::u8string(u8"games"), "the folder is kept");
++#if defined(_WIN32)
++            t.IsTrue(p.filename().wstring() == std::wstring(L"Biohazard é.iso"), "Windows: one UTF-16 unit for the é");
++#endif
++            t.IsTrue(ps2path::fromUtf8("").empty(), "empty stays empty");
++        });
++
+         tc.Run("ISO 9660: directory lookup ignores case, separators, device and ;1", [](TestCase &t)
+         {
+             TempDir dir;
+-- 
+2.46.2.windows.1
+

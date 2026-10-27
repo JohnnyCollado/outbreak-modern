@@ -181,7 +181,11 @@ Design: `docs/plans/2026-10-26-touch-controls.md`; report `reports/2026-10-26-to
   runtime patch). Auto hides on `NativeBridge.physicalPadReads()` rising (reads with a pad button down or a stick past
   0x30 from centre). Menu > Settings calls `NativeBridge.requestMenu()` (opened in `hostFrame` as by Back).
 - Settings: `[ui] touch*` keys (`native/outbreak.ini.example`); the dragged layout in `touch_layout.ini` in the files
-  dir (`[minimal]` / `[full]`, `id = x, y, scale, hidden`).
+  dir (`[minimal]` / `[full]` / `[menu]`, `id = x, y, scale, hidden`).
+- Menu layout (design section 8): a D-pad set while the game's status screen, map or pause menu is open, and on the
+  title and select screens. `NativeBridge.gameScreen()` reads the game's RAM (PS2Recomp patch 0081 hands it to the UI
+  hook; `native/ob_ui/core/game_screen.h` has the addresses), polled ten times a second; a toggle button switches by
+  hand until the screen changes.
 
 ## What's installed (launcher, 2026-10-26)
 

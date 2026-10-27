@@ -163,11 +163,11 @@ class TouchLogicTest {
     @Test
     fun buttonSetsByContext() {
         val min = ButtonSets.of(minimal = true, directional = true)
-        val walking = ButtonSets.visible(min, aiming = false, placed = emptyMap()).map { it.id }
-        val aiming = ButtonSets.visible(min, aiming = true, placed = emptyMap()).map { it.id }
-        assertEquals(listOf("pad", "circle", "r1", "cross", "talk", "menu"), walking)
-        assertEquals(listOf("pad", "circle", "r1", "cross", "l1", "menu"), aiming)
-        val hidden = ButtonSets.visible(min, false, mapOf("talk" to Placement(0.5f, 0.5f, 1f, true))).map { it.id }
+        val walking = ButtonSets.visible(min, aiming = false) { false }.map { it.id }
+        val aiming = ButtonSets.visible(min, aiming = true) { false }.map { it.id }
+        assertEquals(listOf("pad", "circle", "r1", "cross", "talk", "layout", "menu"), walking)
+        assertEquals(listOf("pad", "circle", "r1", "cross", "l1", "layout", "menu"), aiming)
+        val hidden = ButtonSets.visible(min, false) { it == "talk" }.map { it.id }
         assertFalse("talk" in hidden)
         // Full: the small D-pad only beside the directional stick (T14); every PS2 face and shoulder button present.
         assertTrue(ButtonSets.of(false, true).any { it.kind == Kind.DPAD })
@@ -175,8 +175,70 @@ class TouchLogicTest {
         val bits = ButtonSets.of(false, true).fold(0) { a, s -> a or s.bits }
         val want = Ps2.CIRCLE or Ps2.CROSS or Ps2.SQUARE or Ps2.TRIANGLE or Ps2.L1 or Ps2.L2 or Ps2.R1 or Ps2.R2 or Ps2.SELECT or Ps2.START
         assertEquals(want, bits and want)
-        // Ids are unique in each set (the layout file keys on them).
-        for (set in listOf(ButtonSets.MINIMAL, ButtonSets.FULL)) assertEquals(set.size, set.map { it.id }.toSet().size)
+        // Ids are unique in each set (the layout file keys on them); every set has the toggle and the Menu button.
+        for (set in listOf(ButtonSets.MINIMAL, ButtonSets.FULL, ButtonSets.MENU)) {
+            assertEquals(set.size, set.map { it.id }.toSet().size)
+            assertTrue(set.any { it.kind == Kind.LAYOUT } && set.any { it.kind == Kind.MENU })
+        }
+    }
+
+    @Test
+    fun menuLayoutHasTheMenuButtons() {
+        // T15: a 4-way D-pad, OK / Back, △, L1 / R1 (the map's floors), Start / Select; nothing that moves or aims.
+        val m = ButtonSets.MENU
+        assertTrue(m.single { it.kind == Kind.DPAD }.four)
+        val bits = m.fold(0) { a, s -> a or s.bits }
+        val want = Ps2.CIRCLE or Ps2.CROSS or Ps2.TRIANGLE or Ps2.L1 or Ps2.R1 or Ps2.START or Ps2.SELECT
+        assertEquals(want, bits and want)
+        assertFalse(m.any { it.kind == Kind.PAD || it.kind == Kind.TOGGLE || it.kind == Kind.TALK })
+        assertEquals("OK", m.single { it.id == "circle" }.labelFor(false, 0))
+        assertEquals("Back", m.single { it.id == "cross" }.labelFor(false, 0))
+    }
+
+    @Test
+    fun dpad4IsOneDirectionAtATime() {
+        assertEquals(Ps2.UP, Zones.dpad4(at(40f, 0.9f)))
+        assertEquals(Ps2.RIGHT, Zones.dpad4(at(50f, 0.9f)))
+        assertEquals(Ps2.DOWN, Zones.dpad4(at(-140f, 0.9f)))
+        assertEquals(Ps2.LEFT, Zones.dpad4(at(-90f, 0.9f)))
+        assertEquals(0, Zones.dpad4(at(0f, 0.1f)))
+        for (deg in -180..180 step 5) assertEquals(1, Integer.bitCount(Zones.dpad4(at(deg.toFloat(), 0.9f))))
+    }
+
+    @Test
+    fun layoutFollowsTheGameAndTheToggle() {
+        val c = LayoutChooser()
+        assertFalse(c.game(-1))                 // unknown: nothing changes
+        assertFalse(c.menu)
+        assertTrue(c.game(1))                   // the game opened a menu screen
+        assertTrue(c.menu)
+        assertFalse(c.game(1))                  // same screen: no change
+        c.toggle()                              // the player wants the play layout on it
+        assertFalse(c.menu)
+        assertFalse(c.game(1))                  // still the same screen: the toggle stays
+        assertFalse(c.menu)
+        assertFalse(c.game(0))                  // menu closed: play layout either way, toggle cleared
+        assertFalse(c.menu)
+        assertFalse(c.forced)
+        c.toggle()                              // a D-pad by hand in play (a prompt the flag misses)
+        assertTrue(c.menu)
+        assertFalse(c.game(0x0201))             // a menu opens while forced: menu shows, no switch
+        assertTrue(c.menu)
+        assertFalse(c.forced)
+        assertEquals(2, c.controlType)
+        c.toggle()
+        c.reset()
+        assertTrue(c.menu)                      // reset: the game's choice again
+    }
+
+    @Test
+    fun labelsFollowTheControllerType() {
+        val circle = ButtonSets.MINIMAL.single { it.id == "circle" }
+        assertEquals("Action", circle.labelFor(false, 0))
+        assertEquals("Fire", circle.labelFor(true, 0))
+        assertEquals("", circle.labelFor(false, 3))   // another type: glyph only
+        val r1 = ButtonSets.MINIMAL.single { it.id == "r1" }
+        assertEquals("Aim", r1.labelFor(false, 3))   // shoulders keep their label
     }
 
     @Test

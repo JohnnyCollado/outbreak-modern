@@ -5,6 +5,7 @@
 add_library(ob_ui_core STATIC
     core/ini_file.cpp
     core/disc_check.cpp
+    core/game_screen.cpp
     core/menu_trigger.cpp
     core/memory_card.cpp
     core/touch_pad.cpp

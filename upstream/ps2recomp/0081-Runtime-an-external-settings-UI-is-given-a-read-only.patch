@@ -1,0 +1,105 @@
+From b70986b313912c15255d4546cdcb95eb7028696a Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 21:45:51 -0400
+Subject: [PATCH] Runtime: an external settings UI is given a read-only view of
+ EE RAM when the runtime binds its memory (PS2ExternalUi::attachGuestRam,
+ default ignored), so it can follow the game's own state (a UI layout per game
+ screen)
+
+---
+ ps2xRuntime/include/runtime/ps2_ui_external.h |  9 +++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           |  4 +++
+ ps2xTest/src/ps2_gs_external_tests.cpp        | 35 +++++++++++++++++++
+ 3 files changed, 48 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_ui_external.h b/ps2xRuntime/include/runtime/ps2_ui_external.h
+index 6de85e7..27568a9 100644
+--- a/ps2xRuntime/include/runtime/ps2_ui_external.h
++++ b/ps2xRuntime/include/runtime/ps2_ui_external.h
+@@ -31,6 +31,15 @@ public:
+     // Game thread, at each host pad read (PSPadBackend::readState): may hide buttons (the menu's own button combo,
+     // or everything while the menu is open). buttons: PS2 active-low mask; sticks: rx, ry, lx, ly (0x80 = centre).
+     virtual uint16_t filterPad(int port, uint16_t buttons, uint8_t sticks[4]) = 0;
++
++    // Patch 0081: a read-only view of EE main RAM, given when the runtime binds its memory (syncCoreSubsystems), before
++    // the game's first instruction; the pointer stays valid for the runtime's life. For a UI that follows the game's
++    // own state (outbreak-modern: which touch layout a screen wants). Default: ignored.
++    virtual void attachGuestRam(const uint8_t *rdram, uint32_t size)
++    {
++        (void)rdram;
++        (void)size;
++    }
+ };
+ 
+ PS2ExternalUi *ps2ExternalUi();
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 9fb4db9..ae28ac5 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -828,6 +828,10 @@ bool PS2Runtime::syncCoreSubsystems()
+         return true;
+     }
+ 
++    // An external settings UI may follow the game's state (patch 0081): EE RAM, read-only, once per binding.
++    if (PS2ExternalUi *ui = ps2ExternalUi())
++        ui->attachGuestRam(rdram, static_cast<uint32_t>(PS2_RAM_SIZE));
++
+     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                     { m_gs.processGIFPacket(data, size); });
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index 9d50c90..4ecf7ae 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -3,6 +3,7 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/ps2_ui_external.h"
+ 
+ #include <chrono>
+ #include <cstdint>
+@@ -454,6 +455,40 @@ void register_ps2_gs_external_tests()
+             t.IsTrue(cpu.finish, "full decode: the same FINISH");
+         });
+ 
++        tc.Run("an external settings UI is given EE RAM when the runtime binds its memory (patch 0081)", [](TestCase &t)
++        {
++            struct FakeUi final : PS2ExternalUi
++            {
++                const uint8_t *ram = nullptr;
++                uint32_t size = 0u;
++                int calls = 0;
++                bool launch(std::filesystem::path &, bool) override { return true; }
++                HostAction hostFrame() override { return HostAction::Run; }
++                uint16_t filterPad(int, uint16_t buttons, uint8_t *) override { return buttons; }
++                void attachGuestRam(const uint8_t *rdram, uint32_t ramSize) override
++                {
++                    ram = rdram;
++                    size = ramSize;
++                    ++calls;
++                }
++            } fake;
++            ps2SetExternalUi(&fake);
++            {
++                PS2Runtime runtime;
++                const bool ok = runtime.memory().initialize() && runtime.syncCoreSubsystems();
++                t.IsTrue(ok, "memory initialized and bound");
++                t.Equals(fake.calls, 1, "the UI was given the RAM once");
++                t.IsTrue(fake.ram == runtime.memory().getRDRAM(), "the runtime's own EE RAM");
++                t.Equals(fake.size, static_cast<uint32_t>(PS2_RAM_SIZE), "all of it");
++                // What the game writes, the UI reads (a GameState byte, as outbreak-modern's touch layout uses).
++                runtime.memory().getRDRAM()[0x48BF7Eu] = 1u;
++                t.Equals(fake.ram ? static_cast<int>(fake.ram[0x48BF7Eu]) : -1, 1, "a guest write is visible through the view");
++                t.IsTrue(runtime.syncCoreSubsystems(), "binding again");
++                t.Equals(fake.calls, 1, "the same memory is not handed over twice");
++            }
++            ps2SetExternalUi(nullptr);
++        });
++
+         tc.Run("external GS hook sees arbiter packets, privileged writes and vsync in order", [](TestCase &t)
+         {
+             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+-- 
+2.46.2.windows.1
+

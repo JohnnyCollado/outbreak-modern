@@ -68,6 +68,9 @@ import kotlin.math.sin
  * the game's next read (native/ob_ui/core/touch_pad.h). Rules live in TouchLogic.kt. Classic camera only: the Modern
  * camera's layout (T7, T9) waits for that camera.
  *
+ * Two layouts: play (Minimal or Full) and the menu layout (a D-pad, design section 8), chosen by the game's own screen
+ * (NativeBridge.gameScreen: its menu flag, read from its RAM through PS2Recomp patch 0081) or by the toggle button.
+ *
  * Shown per the "touch" setting: Off = no window (touches reach the game as before), On = always, Auto (default) =
  * hidden while a controller or keyboard plays (NativeBridge.physicalPadReads rises) and back on the next touch; at
  * start hidden when a gamepad is connected. Hidden while the in-game menu is open, except in Edit layout.
@@ -82,13 +85,15 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
 
     // ---- state the drawing reads ----
     private var cfg by mutableStateOf(TouchSettings())
-    private var specs by mutableStateOf(ButtonSets.of(true, true))
-    private val placed = mutableStateMapOf<String, Placement>()
+    private var playSpecs by mutableStateOf(ButtonSets.of(true, true))
+    private val placed = mutableStateMapOf<String, Placement>() // "<section>/<id>": every set's placements
+    private val chooser = LayoutChooser()
+    private var layoutRev by mutableIntStateOf(0) // the chooser changed: read the layout again
     private var r1On by mutableStateOf(false)
     private var r2On by mutableStateOf(false)
     private var shown by mutableStateOf(true)
     private var editing by mutableStateOf(false)
-    private var editAiming by mutableStateOf(false)
+    private var editView by mutableStateOf(EditView.WALKING)
     private var selected by mutableStateOf<String?>(null)
     private var fanOpen by mutableStateOf(false)
     private val knobs = mutableStateMapOf<String, PadPoint>()
@@ -113,6 +118,19 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
 
     private val aiming get() = r1On || r2On
 
+    private enum class EditView(val label: String) { WALKING("walking"), AIMING("aiming"), MENU("menu screens") }
+
+    /** The menu layout (T15) shows: the game's menu screens or the player's toggle; in Edit layout, its own view. */
+    private val menuNow: Boolean get() {
+        @Suppress("UNUSED_VARIABLE") val r = layoutRev
+        return if (editing) editView == EditView.MENU else chooser.menu
+    }
+
+    /** The set showing now and its touch_layout.ini section. */
+    private val specs: List<ControlSpec> get() = if (menuNow) ButtonSets.MENU else playSpecs
+    private val section: String get() = if (menuNow) ButtonSets.MENU_SECTION else ButtonSets.section(cfg.minimal)
+    private fun key(id: String) = "$section/$id"
+
     // ---- the window ----
 
     /** Creates the window once the game's window is attached (OutbreakActivity.onAttachedToWindow). */
@@ -124,7 +142,9 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
     /** Reads the settings and the layout again; shows, hides or removes the window to match. */
     fun reload() {
         cfg = TouchSettings.load { k, d -> settings.ui(k, d) }
-        specs = ButtonSets.of(cfg.minimal, cfg.directional)
+        playSpecs = ButtonSets.of(cfg.minimal, cfg.directional)
+        chooser.reset()
+        layoutRev++
         loadPlacements()
         if (cfg.show == TouchShow.OFF && !editing) {
             remove()
@@ -147,7 +167,7 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
     fun startEdit(done: () -> Unit) {
         onEditDone = done
         editing = true
-        editAiming = false
+        editView = if (chooser.menu) EditView.MENU else EditView.WALKING
         selected = null
         fanOpen = false
         releaseAll()
@@ -216,22 +236,25 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
 
     // ---- placements (touch_layout.ini, one section per button set) ----
 
+    /** Every set this player can see: the chosen play set and the menu set. */
+    private fun allSets() = listOf(ButtonSets.section(cfg.minimal) to playSpecs, ButtonSets.MENU_SECTION to ButtonSets.MENU)
+
     private fun loadPlacements() {
         placed.clear()
-        val section = ButtonSets.section(cfg.minimal)
-        for (s in specs)
-            Placement.decode(NativeBridge.iniGet(layoutFile, section, s.id, false))?.let { placed[s.id] = it }
+        for ((sec, list) in allSets())
+            for (s in list)
+                Placement.decode(NativeBridge.iniGet(layoutFile, sec, s.id, false))?.let { placed["$sec/${s.id}"] = it }
     }
 
-    private fun placement(s: ControlSpec) = placed[s.id] ?: Placement(s.x, s.y)
+    private fun placement(s: ControlSpec) = placed[key(s.id)] ?: Placement(s.x, s.y)
 
     private fun savePlacements() {
-        val section = ButtonSets.section(cfg.minimal)
-        for (s in specs) {
-            val p = placed[s.id]
-            if (p == null) NativeBridge.iniRemove(layoutFile, section, s.id, false)
-            else NativeBridge.iniSet(layoutFile, section, s.id, p.encode(), false)
-        }
+        for ((sec, list) in allSets())
+            for (s in list) {
+                val p = placed["$sec/${s.id}"]
+                if (p == null) NativeBridge.iniRemove(layoutFile, sec, s.id, false)
+                else NativeBridge.iniSet(layoutFile, sec, s.id, p.encode(), false)
+            }
     }
 
     // ---- geometry ----
@@ -259,7 +282,9 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
         return PadPoint(d.x / r, d.y / r)
     }
 
-    private fun showing(): List<ControlSpec> = ButtonSets.visible(specs, if (editing) editAiming else aiming, placed)
+    private val aimNow: Boolean get() = if (editing) editView == EditView.AIMING else aiming
+
+    private fun showing(): List<ControlSpec> = ButtonSets.visible(specs, aimNow) { placed[key(it)]?.hidden == true }
 
     private fun hit(at: Offset): ControlSpec? {
         val list = showing()
@@ -351,10 +376,22 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
             Kind.MENU -> {
                 owner.remove(id)
                 ignored += id
-                if (cfg.minimal) fanOpen = !fanOpen else NativeBridge.requestMenu()
+                if (cfg.minimal && !menuNow) fanOpen = !fanOpen else NativeBridge.requestMenu()
+            }
+            Kind.LAYOUT -> {
+                owner.remove(id)
+                chooser.toggle()
+                switchedLayout()
+                ignored += id
             }
         }
         send()
+    }
+
+    /** The other layout shows: every finger and toggle let go (they belonged to the old controls). */
+    private fun switchedLayout() {
+        releaseAll()
+        layoutRev++
     }
 
     private fun move(id: PointerId, at: Offset) {
@@ -365,7 +402,7 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
             if (size.width <= 0f || size.height <= 0f) return
             val c = at - off
             val old = placement(s)
-            placed[s.id] = old.copy(x = (c.x / size.width).coerceIn(0.02f, 0.98f), y = (c.y / size.height).coerceIn(0.03f, 0.97f))
+            placed[key(s.id)] = old.copy(x = (c.x / size.width).coerceIn(0.02f, 0.98f), y = (c.y / size.height).coerceIn(0.03f, 0.97f))
             return
         }
         val sid = owner[id] ?: return
@@ -452,7 +489,7 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
                         if (cfg.runEdge && Zones.runs(p, t)) bits = bits or Ps2.CROSS
                     }
                 }
-                Kind.DPAD -> knobs[s.id]?.let { bits = bits or Zones.dpad(it) }
+                Kind.DPAD -> knobs[s.id]?.let { bits = bits or if (s.four) Zones.dpad4(it) else Zones.dpad(it) }
                 else -> {}
             }
         }
@@ -475,8 +512,9 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
         done?.invoke()
     }
 
+    /** Reset: the set being edited goes back to its defaults (the other sets keep theirs). */
     private fun resetLayout() {
-        placed.clear()
+        placed.keys.filter { it.startsWith("$section/") }.forEach { placed.remove(it) }
         selected = null
     }
 
@@ -486,10 +524,14 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
     private fun Overlay() {
         val tm = rememberTextMeasurer()
         LaunchedEffect(Unit) {
-            // Auto: a controller or keyboard in use hides the controls (not while a finger was on them lately).
+            // Ten times a second: the game's screen picks the layout (T16; native/ob_ui/core/game_screen.h). Every
+            // fourth: Auto, a controller or keyboard in use hides the controls (not while a finger was on them lately).
             lastPhysical = NativeBridge.physicalPadReads()
+            var tick = 0
             while (true) {
-                delay(250)
+                delay(100)
+                if (!editing && chooser.game(NativeBridge.gameScreen())) switchedLayout()
+                if (++tick % 4 != 0) continue
                 val n = NativeBridge.physicalPadReads()
                 if (n != lastPhysical) {
                     lastPhysical = n
@@ -571,9 +613,9 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
                     drawRoundRect(bg, Offset(c.x - r, c.y - h), Size(r * 2, h * 2), CornerRadius(10f * density))
                     drawRoundRect(line, Offset(c.x - r, c.y - h), Size(r * 2, h * 2), CornerRadius(10f * density), style = Stroke(1.5f * density))
                 }
-                val text = if (aiming && !editing || editing && editAiming) s.aimLabel else s.label
+                val text = s.labelFor(aimNow, chooser.controlType)
                 val glyph = when (s.kind) {
-                    Kind.MENU -> if (cfg.minimal) "≡" else "⚙"
+                    Kind.MENU -> if (cfg.minimal && !menuNow) "≡" else "⚙"
                     Kind.TALK, Kind.CALL -> "…"
                     else -> s.glyph
                 }
@@ -599,7 +641,6 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
     }
 
     private fun DrawScope.drawPad(tm: TextMeasurer, s: ControlSpec, c: Offset, r: Float, a: Float) {
-        val aimNow = if (editing) editAiming else aiming
         val text = Color.White.copy(alpha = a.coerceAtLeast(0.6f))
         val line = Color.White.copy(alpha = 0.6f * a)
         if (aimNow) {
@@ -668,7 +709,7 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
     @Composable
     private fun EditBar() {
         val sel = specs.firstOrNull { it.id == selected }
-        val hidden = specs.filter { placed[it.id]?.hidden == true }
+        val hidden = specs.filter { placed[key(it.id)]?.hidden == true }
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             Column(
                 Modifier
@@ -680,8 +721,8 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Edit layout: drag a control; tap one to size or hide it", fontSize = 13.sp, color = Color.White)
-                    OutlinedButton(onClick = { editAiming = !editAiming; selected = null }) {
-                        Text(if (editAiming) "Showing: aiming" else "Showing: walking", fontSize = 12.sp)
+                    OutlinedButton(onClick = { editView = EditView.entries[(editView.ordinal + 1) % EditView.entries.size]; selected = null }) {
+                        Text("Showing: ${editView.label}", fontSize = 12.sp)
                     }
                     OutlinedButton(onClick = { resetLayout() }) { Text("Reset", fontSize = 12.sp) }
                     Button(onClick = { finishEdit() }) { Text("Done", fontSize = 12.sp) }
@@ -692,17 +733,17 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
                         Text("${sel.glyph} ${sel.label}".trim(), fontSize = 13.sp, color = Color.White)
                         Text("Size ${(p.scale * 100).toInt()}%", fontSize = 12.sp, color = Color.White)
                         Slider(
-                            value = p.scale, onValueChange = { placed[sel.id] = p.copy(scale = (it * 20).toInt() / 20f) },
+                            value = p.scale, onValueChange = { placed[key(sel.id)] = p.copy(scale = (it * 20).toInt() / 20f) },
                             valueRange = 0.6f..1.8f, modifier = Modifier.width(220.dp),
                         )
-                        OutlinedButton(onClick = { placed[sel.id] = p.copy(hidden = true); selected = null }) { Text("Hide", fontSize = 12.sp) }
+                        OutlinedButton(onClick = { placed[key(sel.id)] = p.copy(hidden = true); selected = null }) { Text("Hide", fontSize = 12.sp) }
                     }
                 }
                 if (hidden.isNotEmpty()) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Hidden:", fontSize = 12.sp, color = Color.White)
                         for (h in hidden)
-                            OutlinedButton(onClick = { placed[h.id] = placement(h).copy(hidden = false) }) {
+                            OutlinedButton(onClick = { placed[key(h.id)] = placement(h).copy(hidden = false) }) {
                                 Text("Show ${h.label}", fontSize = 12.sp)
                             }
                     }

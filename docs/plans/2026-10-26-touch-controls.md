@@ -166,6 +166,55 @@ To check on the game before building (a short scripted run, no code change):
 - A one-time hint card the first time the overlay shows (the merged and gesture controls are not obvious).
 - A menu-only layout chosen from the game's own "menu open" state (needs a game memory address not yet found).
 
+## 8. Menu screens: a D-pad layout (research 2026-10-26; T15-T19 approved and built the same day)
+
+Request (developer, 2026-10-26): on the status and menu screens, show a D-pad so players navigate them as usual.
+
+Findings:
+
+1. **The stick already moves menu cursors.** The game turns the movement stick into direction bits `0xF0000` at 16
+   angles past magnitude 0x25 (`main/padread.c` `func_001A5420`, `func_001A5A90`), and the menus' control block folds
+   them onto the D-pad bits (`main/ctrl.c` `func_001AFE90`: `cur |= (cur & 0xF0000) >> 16`, auto-repeat 12 then 3
+   frames on `0xF000F`). The decomp names that stick "right"; the device test found the movement stick in those bytes
+   (`legacy/phase1-feasibility-report.md:491`). Decomp: GalaxyNostalgia/Outbreak-decomp (CC0), first drafts
+   (`NON_MATCHING`). So the D-pad layout is about showing the right controls, not about input that fails today.
+2. **One byte says "a menu screen is open": GameState `0x48BF60 + 0x1E` (= `0x48BF7E`).** Measured on Windows
+   (hidden runs `menu1`, `menu3`, live pad + `peek`, `PS2X_VU1=mvu` for the second): in J's Bar it is 0 in play, in the
+   opening movie (game state 14) and its in-engine scene, and after examining with ○; 1 on the status screen (Start:
+   ITEM / SPECIAL / FILE), the map (△) and the pause menu (Select); back to 0 when each closes (✕ for status and map,
+   Select again for pause). Every open and close in `menu3` matched. The decomp leaves it unnamed (`unk1E`).
+3. Also seen: `+0xC4` = 1 only with the pause menu (the decomp: "the offline overlay's per-frame work is paused");
+   game state stays 2 behind every menu (the game runs on behind status and map).
+4. The map's own help: left stick or D-pad moves the map, right stick zooms, L1/R1 change floor, ✕ cancels
+   (screenshot `C:\ob\frames-menu1\o_triangle.png`, game data, not in git).
+5. **The game has its own control types.** The pause menu shows "Controller settings: TYPE A (□ ad-lib, ✕
+   cancel/dash, ○ OK/attack)". The type is `Options` `0x306590 + 0x2C` (0..5), which picks the confirm/cancel buttons
+   from the table at `0x2168C0` (`main/ctrl.c:210`). The touch labels assume Type A today.
+6. Before the game task: the title and select screens are known states (`gate/boot.script`: `TitleWork*` at
+   `0x23BE34`, `SelectWork*` at `0x3065FC`); the game task is installed when `0x2F8654` = `0x5CD580`.
+7. Reading guest RAM from the touch code: the settings-UI hook (patch 0078) has no memory access. The external IPU is
+   handed the RAM pointer in the same library (`native/pcsx2_gs/adapter/hook.cpp:157`), but only while `PS2X_IPU` is
+   on. A small PS2Recomp patch giving the UI hook a read-only view of guest RAM is the clean way (with a test).
+
+Not covered yet: item boxes, the "take it?" style prompts and text windows, Game Over / continue, the files screen
+inside status, rooms other than J's Bar, and what each control type number means.
+
+Proposal:
+
+| # | Proposal |
+|---|---|
+| T15 | A **menu layout**: a large D-pad, ○, ✕, △, small L1 / R1 and Start / Select, and the Menu button; the gameplay pad, Aim and Talk hidden. |
+| T16 | It shows by itself while `0x48BF7E` = 1 in the game task, and on the title and select screens before it; the gameplay layout otherwise. Read once per pad read on the game thread (one byte), handed to the overlay like `physicalPadReads`. |
+| T17 | The read goes through a new PS2Recomp patch (read-only guest RAM for the UI hook), not the IPU's pointer. |
+| T18 | A small **D-pad toggle** stays on the gameplay layout as a fallback for screens the flag does not cover (prompts, item boxes) until they are researched. |
+| T19 | Labels follow the game's control type (`0x306590 + 0x2C`); until its values are mapped, Type A labels, and glyphs only for other types. Value 0 = TYPE A: confirmed live (run `ctype`: the byte reads 0 while the pause menu shows TYPE A; the menu byte 1 with the pause menu open, 0 after; the game task `0x5CD580` in its slot). |
+
+Built (developer, 2026-10-26: "Approved: build T15-T19 ... including the PS2Recomp patch for read-only guest RAM"):
+PS2Recomp 0081 (`PS2ExternalUi::attachGuestRam`), `native/ob_ui/core/game_screen.*` (`classifyScreen`; read by
+`NativeBridge.gameScreen` ten times a second, nothing per frame), `ButtonSets.MENU` and `LayoutChooser` in
+`TouchLogic.kt` (the toggle flips the game's choice until the screen changes), the menu set's own placements
+(`touch_layout.ini [menu]`) and a third Edit layout view ("menu screens").
+
 ## 7. Sources
 
 - Repo: `legacy/phase1-feasibility-report.md:487`, `:493`, `:494`, `:496`, `:504`; `legacy/mod/game.h:30`;

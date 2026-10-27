@@ -5,6 +5,7 @@
 #include "runtime/ps2_ui_external.h"
 
 #include "ob_gs_bridge.h"
+#include "game_screen.h"
 #include "ob_ui.h"
 
 #include "raylib.h"
@@ -385,6 +386,10 @@ namespace
 		{
 			return obui::filterPad(port, buttons, sticks, GetTime());
 		}
+
+		// PS2Recomp patch 0081: the game's RAM, read-only, for the touch controls' layout per screen
+		// (native/ob_ui/core/game_screen.h).
+		void attachGuestRam(const uint8_t* rdram, uint32_t size) override { obui::attachGuestRam(rdram, size); }
 	};
 } // namespace
 
