@@ -4,6 +4,8 @@
 - **Status:** built 2026-10-26 (report `reports/2026-10-26-settings-menu.md`): Windows ImGui and Android Kotlin +
   Compose, PS2Recomp 0077-0080. Decisions A11-A15 and the later changes in the report supersede parts of this plan.
 - **Mockups:** shown in the Claude Code session of 2026-10-26 (settings tabs, launcher + overlay, disc verification).
+- **Later addition:** a **Network** page (online play: player name, servers, hosting, saved logins, connection
+  test), planned in `docs/plans/2026-10-26-online-play.md` section 3a (decision N5).
 
 ## 1. What it is
 
