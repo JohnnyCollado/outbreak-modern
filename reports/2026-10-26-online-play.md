@@ -233,6 +233,23 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   the host's local time in BCD like the EE stub already did. IOP tests 5/5; each fails without its patch (4/5).
 - **Next:** write the settings set onto the card image (entry to follow).
 
+### 20. Settings on the card, but NETCNF can't open files: the IOP's ioman only registers drivers
+
+- **Done:** `tools/ob/mcd.py netcnf` wrote `BWNETCNF` onto `C:\ob\saves-net\Mcd001.ps2` (backup beside it:
+  `Mcd001.before-bwnetcnf.ps2`) beside the game's own save; `mcd.py info` lists both. Two corrections to my notes
+  on the way: the real `netcnf.irx` fills all 24 key slots from the 8 ID bytes (code 0x128c-0x12f0; ps2sdk's
+  decompilation stops one byte short) and an Ethernet setting is `type eth` (1), not `nic` (3, netcnf.c's parser).
+- **Seen (drive, runner with 0093/0094):** NET CONNECTION still says "you need to configure the network settings".
+  The cdvdman 24 warnings are gone. New in `boot-net-live.err`: after NETCNFIF starts, repeated
+  `unhandled import ioman:4`, `ioman:6`, `ioman:5` (open, read, close; NETCNF links the old `ioman`, version 0x104).
+- **Cause:** PS2Recomp's IOP `ioman` handles only AddDrv (20) and DelDrv (21) (`iop_ioman.cpp`): the card driver
+  MCMAN registers its `mc` device, but nothing routes `open("mc0:/BWNETCNF/BWNETCNF")` to it, so the unhandled open
+  "succeeds" with 0 and the read returns nothing: NETCNF sees no settings, whatever the card holds.
+- **Open question (developer's call):** the fix is a PS2Recomp patch giving ioman a file table that calls the
+  registered device's operations (open, read, close, then lseek/getstat/dopen as NETCNF needs). MCMAN's operations
+  wait for the card hardware, so they must run where the guest can block (patch 0075's thread runner), not as a
+  plain nested call. Paused here to agree the approach.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
