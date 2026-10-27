@@ -19,9 +19,10 @@ and the others just display them; a **desync** is when machines drift apart.
 PC, Android, PCSX2, real PS2. The cheapest way to speak it exactly is to keep the game's whole network stack and
 emulate the network adapter under it, borrowing PCSX2's DEV9 "Sockets" adapter the way memory cards borrowed
 PCSX2's SIO2 (option A, section 5). Two real blockers remain: the network overlays are not recompiled yet, and the
-server pushes a 0x7AA0-byte code patch to old clients. One question is still open and decides how risky PC vs
-Android is: whether the game is lockstep or state sync. A cheap experiment with PCSX2 can answer it before any
-code is written.
+server pushes a 0x7AA0-byte code patch to old clients. **Follow-up (section 7): the game is state sync, not
+lockstep** (high confidence, from its code): each client sends its own character's state, and each room's
+first player runs and broadcasts that room's enemies. So PC and Android don't need bit-identical maths. They
+need the same message bytes and the same room-owner rules, which recompiling the same game code gives.
 
 ## 1. What the repo already knows
 
@@ -169,14 +170,87 @@ without redoing the transport. What the narrower scope allows:
 - The determinism question narrows to Windows vs Android of the same build (section 2). It can be measured
   between our two clients once they connect; the PCSX2 test (section 5, step 1) stays the cheaper early answer.
 
+## 7. Follow-up research (2026-10-26, after the scope decision)
+
+### 7.1 State sync, not lockstep (from the game's code)
+
+Read in the splat disassembly (`C:\ob\splat\SLPM_654.28`); "seen" = read in code, "inferred" = reasoning.
+
+- **The in-game network layer is the NETAQ overlay** (0x820000, shares the address with SINGLE), not NETWK
+  (NETWK is the lobby; it shares 0x540000 with GAME, so it can't be resident in play). Seen: NETAQ's strings
+  (`netaq/data/data.data.s`): USERMSG, RUN_SESSION, DISCONNECT, PING, DROPOUT, "AQ buff full",
+  "!!PL DATA full!!", "MY AQ EXEC", "OTHER AQ EXEC", and ACCESS's own TCP/IP drivers (AVETCP/AVEPPP/AVEWRAPM IRX),
+  not Sony's INET. Spot-checked: 5 of these strings found.
+- **Single player goes through the same message API.** Main-ELF wrappers check a mode byte (`func_001AF500`,
+  D_003065C2: 0 = single, 1 = network) and call SINGLE's functions or NETAQ's: send `func_001AF000`, per-frame
+  poll `func_001AEEA0` (seen; that SINGLE is a loopback is inferred).
+- **What is sent** (GAME, `en/game/text.s`): message = subtype, size, sender slot, payload.
+  - Types 1-4 = "PL DATA", one per player slot. `func_0064CF50` packs only the local player: position as 3 floats
+    (chr+0x38/0x3C/0x40), angle, motion, a flags word, room, status bytes; size 0x2C (seen; spot-checked the 0x2C
+    size and the `lwc1 0x38` load).
+  - Type 8 = object/enemy events; type 9 = item placement (float x/y/z + id); types 6-7 = session control.
+  - Receive: NETAQ `func_00820080` switches on type and drops its own messages; types 1-4 go to GAME
+    `func_0064D140`, which applies a remote player's state (seen).
+- **Who runs what:**
+  - `func_001AF540(chr)` = "is this my character"; GAME calls it 136 times (spot-checked: 136). Most player logic
+    runs only for the local character (inferred).
+  - **Room owner:** NETAQ `func_00821590(room)` returns the first player who entered the room, from a per-room
+    table at D_00825810; GAME calls `func_001AF440` 27 times (spot-checked). Enemy broadcasts (`func_006094A0`,
+    type 8) happen only when I own the enemy's room (seen; spot-checked the call).
+- **No lockstep stall:** NETAQ drains its receive queue each frame and moves on; no loop waiting for peers was
+  found (read by scanning branches, not every line).
+- **Not settled:** a shared random seed (not searched for specifically); whether non-owners skip enemy AI entirely
+  (read `func_00609590`, the type-8 handler, to confirm); a second port 8653 in a NETAQ string (role unknown).
+
+**What it means:** desync risk between our Windows and Android clients is low; float differences change only how
+a remote player is drawn until their next update. The 30 Hz tick and the message bytes must not change (presentation
+options stay visual only, as M7 says). Section 2's maths gaps matter for single-player fidelity, not for online.
+
+### 7.2 Lifting PCSX2's network adapter (from `C:\ob\pcsx2\pcsx2\DEV9`)
+
+- **Size:** ~16.6k lines compiled (core 5.2k, InternalServers 1.5k, PacketReader 3.9k, Sessions 3.2k, ATA
+  compiled but never opened, because `DEV9.h` holds an `ATA*`). Skip pcap and `Win32/` (TAP) with small stubs.
+- **Dependencies are already in our build** from `native/pcsx2_gs` (common/, fmt, `EmuConfig`;
+  `config_stubs.cpp:34` already stubs `DEV9Options()`). The adapter defines `dev9Irq` and `psxDMA8Interrupt`.
+- **Android:** POSIX paths exist (`getifaddrs`, BSD sockets). Needs only the INTERNET permission. Pass the network
+  interface name from Kotlin, because the automatic pick reads `/proc/net/route` (`AdapterUtils.cpp:406`), which
+  newer Android likely blocks (unverified). Use the internal DNS, not `/etc/resolv.conf`.
+- **Server choice:** host overrides come from `EmuConfig.DEV9.EthHosts` (`DNS_Server.cpp:103-110`); entries must be
+  lowercase (:183). **Port remap** for Android hosts: one line at `TCP_Session_Out.cpp:210`. That edits PCSX2
+  source, which our precedent avoids, so the choice is a carried patch, a connect wrapper, or remapping on the
+  server.
+- **PS2Recomp side (new patch, like 0071):** the 64 KB SPEED/SMAP page at 0x10000000 with reads and writes at
+  their real width (a 32-bit read of the receive FIFO pops data, so no read-modify-write); revision register
+  0x1F80146E = 0x32; DMA channel 8 (0x1F801510-18); interrupt line 13 raised at any time, not only inside a
+  register write; the idle IOP must wake when a packet arrives (follow the SPU2 device's event pattern,
+  `iop_emulator.cpp:218-231`). Unverified: whether the disc's dev9.irx uses dmacman for channel 8 (then dmacman
+  needs the same extension as for 11/12).
+- **Effort (estimate):** build + link both platforms 1-2 days; PS2Recomp patch + tests 2 days; getting the disc's
+  dev9 → smap → DHCP → DNS → TCP chain working 3-6 days. About 1.5-2 weeks.
+- **Riskiest part:** the disc's network drivers on our IOP interpreter and HLE (interrupt and DMA gaps, timeouts),
+  then speed on the Odin (unmeasured).
+
+### 7.3 Server side (Bioserver1 source, read 2026-10-26)
+
+- `Slot.java`: a slot (game) stores status, scenario, load type, a ruleset, a wait timer ("game will be started"
+  on timeout), and `host` = "room master's userid". No seed or difficulty in this class (maybe in `RuleSet`).
+- `GameServerPacketHandler.java`: login (0x82 0x02 + GSLOGIN) maps a session code to a user and that user's game
+  number; every other packet goes to everyone with the same game number except the sender. A one-minute
+  keep-alive drops frozen players. No host logic. So the room-owner rule lives entirely in the game (7.1).
+- What our own first-release server needs: the lobby (8300, with its user and session database), the relay
+  (8690), and DNAS/login answers (in the client's emulated adapter, scope decision in 5b).
+
 ## 6. Open questions
 
-1. Lockstep or state sync (step 1's experiment, or a read of NETWK's message code).
+1. ~~Lockstep or state sync~~: state sync (section 7.1). Left: confirm non-owners only apply enemy state; the
+   shared-seed question; what port 8653 is for.
 2. What `patch_101` changes, and whether it may be shipped or each user must capture it.
 3. How fast the disc's TCP/IP stack runs on the IOP interpreter on the Odin.
 4. How much of PCSX2's `DEV9/` builds outside PCSX2 and on Android.
 5. Whether the public Obsrv server is up, and whether its admins accept native clients.
 6. Whether presentation options (widescreen, Modern Camera, 60 fps) are allowed online (`m7-network.md`).
+7. Whether the game needs a network configuration file on the memory card before it goes online (PS2 online
+   games usually do; not checked).
 
 ## Sources
 
