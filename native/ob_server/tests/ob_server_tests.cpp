@@ -8,6 +8,13 @@
 // - the session number's 10 digits decode the capture's "2374125810" with packet id 0x4592 into 59318000, and
 //   encode back.
 #include "protocol.h"
+#include "tls_server.h"
+#include "web.h"
+
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/net_sockets.h"
+#include "mbedtls/ssl.h"
 
 #include <cstdio>
 #include <cstring>
@@ -142,6 +149,139 @@ static void TestSession()
 		}
 }
 
+static WebConfig TestWebConfig()
+{
+	WebConfig c;
+	c.mintSession = [](const std::string&) { return 12345678u; };
+	return c;
+}
+
+// The login pages (research/2026-10-27-lobby-protocol.md section 2) with quick login.
+static void TestWebPages()
+{
+	const WebConfig c = TestWebConfig();
+	const WebResponse top = webRespond(c, "/00000002/CRS-top.jsp", "10.0.0.2");
+	Check(top.status == 200 && top.body.find("<!--CRS-top-->") != std::string::npos &&
+			  top.body.find("content=\"1; url=startsession.php?sessid=12345678\"") != std::string::npos,
+		"CRS-top.jsp refreshes straight to the game-start page with a minted session (quick login)");
+
+	const WebResponse start = webRespond(c, "/00000002/startsession.php?sessid=12345678", "10.0.0.2");
+	Check(start.body.find("<!--CRS-game-start-->") != std::string::npos &&
+			  start.body.find("CHARSET=EUC-JP") != std::string::npos &&
+			  start.body.find("<!--<CSV>\"OK\",\"12345678\",\"https://www01.kddi-mmbb.jp/00000002/enterareas.html\",") !=
+				  std::string::npos &&
+			  start.body.find("\",</CSV>-->") != std::string::npos,
+		"the game-start page carries the marker, EUC-JP and the CSV the game reads");
+
+	const WebResponse lobby = webRespond(c, "/00000002/enterareas.html", "10.0.0.2");
+	Check(lobby.body.find("<!--CRS-lbs-info-get-->") != std::string::npos &&
+			  lobby.body.find("\"www01.kddi-mmbb.jp:8300\",") != std::string::npos,
+		"the lobby list names our lobby by the game's host name and port 8300");
+
+	Check(webRespond(c, "/other", "").status == 404, "anything else is 404");
+	const std::string http = webSerialize(top);
+	Check(http.rfind("HTTP/1.0 200 OK\r\n", 0) == 0 &&
+			  http.find("Content-Length: " + std::to_string(top.body.size()) + "\r\n") != std::string::npos &&
+			  http.find("Connection: close\r\n\r\n") != std::string::npos,
+		"HTTP/1.0 with an exact Content-Length and no keep-alive");
+	Check(webRequestPath("GET /00000002/CRS-top.jsp HTTP/1.0\r\nHost: x\r\n\r\n") == "/00000002/CRS-top.jsp" &&
+			  webRequestPath("GET https://www01.kddi-mmbb.jp/00000002/a HTTP/1.0\r\n\r\n") == "/00000002/a" &&
+			  webRequestPath("garbage").empty(),
+		"request paths are read from the request line");
+}
+
+// One HTTPS GET over loopback with the protocol version and the single suite given; returns the body ("" on failure).
+static std::string FetchTls(uint16_t port, int minor, int suite, const char* path)
+{
+	mbedtls_net_context net;
+	mbedtls_ssl_context ssl;
+	mbedtls_ssl_config conf;
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context drbg;
+	mbedtls_net_init(&net);
+	mbedtls_ssl_init(&ssl);
+	mbedtls_ssl_config_init(&conf);
+	mbedtls_entropy_init(&entropy);
+	mbedtls_ctr_drbg_init(&drbg);
+	std::string response;
+	const int suites[] = {suite, 0};
+	bool ok = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy, nullptr, 0) == 0 &&
+			  mbedtls_net_connect(&net, "127.0.0.1", std::to_string(port).c_str(), MBEDTLS_NET_PROTO_TCP) == 0 &&
+			  mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+				  MBEDTLS_SSL_PRESET_DEFAULT) == 0;
+	if (ok)
+	{
+		mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
+		mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+		mbedtls_ssl_conf_min_version(&conf, MBEDTLS_SSL_MAJOR_VERSION_3, minor);
+		mbedtls_ssl_conf_max_version(&conf, MBEDTLS_SSL_MAJOR_VERSION_3, minor);
+		mbedtls_ssl_conf_ciphersuites(&conf, suites);
+		mbedtls_ssl_conf_read_timeout(&conf, 5000);
+		ok = mbedtls_ssl_setup(&ssl, &conf) == 0;
+		mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, nullptr, mbedtls_net_recv_timeout);
+	}
+	int rc = 0;
+	while (ok && (rc = mbedtls_ssl_handshake(&ssl)) != 0)
+		if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
+			ok = false;
+	if (ok)
+	{
+		const std::string request = std::string("GET ") + path + " HTTP/1.0\r\nUser-Agent: test\r\n\r\n";
+		ok = mbedtls_ssl_write(&ssl, reinterpret_cast<const unsigned char*>(request.data()), request.size()) ==
+			 static_cast<int>(request.size());
+		unsigned char buffer[4096];
+		while (ok && (rc = mbedtls_ssl_read(&ssl, buffer, sizeof(buffer))) > 0)
+			response.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(rc));
+	}
+	mbedtls_ssl_free(&ssl);
+	mbedtls_ssl_config_free(&conf);
+	mbedtls_net_free(&net);
+	mbedtls_ctr_drbg_free(&drbg);
+	mbedtls_entropy_free(&entropy);
+	const size_t body = response.find("\r\n\r\n");
+	return body == std::string::npos ? std::string() : response.substr(body + 4);
+}
+
+// The login pages over the TLS the PS2's browser may speak (protocol and suite each forced by the client).
+static void TestTlsServer()
+{
+	TlsWebServer server;
+	std::string error;
+	const bool started = server.start(TestWebConfig(), "127.0.0.1", 0, &error);
+	Check(started && server.port() != 0, "the TLS web server starts on a free loopback port");
+	if (!started)
+	{
+		std::printf("  (%s)\n", error.c_str());
+		return;
+	}
+	struct Case
+	{
+		int minor;
+		int suite;
+		const char* what;
+	};
+	const Case cases[] = {
+		{MBEDTLS_SSL_MINOR_VERSION_1, MBEDTLS_TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA, "TLS 1.0 + DHE-RSA-3DES (the fan setup's suite)"},
+		{MBEDTLS_SSL_MINOR_VERSION_1, MBEDTLS_TLS_RSA_WITH_3DES_EDE_CBC_SHA, "TLS 1.0 + RSA-3DES"},
+		{MBEDTLS_SSL_MINOR_VERSION_0, MBEDTLS_TLS_RSA_WITH_3DES_EDE_CBC_SHA, "SSL 3.0 + RSA-3DES"},
+		{MBEDTLS_SSL_MINOR_VERSION_0, MBEDTLS_TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA, "SSL 3.0 + DHE-RSA-3DES"},
+	};
+	for (const Case& c : cases)
+	{
+		const std::string body = FetchTls(server.port(), c.minor, c.suite, "/00000002/CRS-top.jsp");
+		const bool ok = body.find("startsession.php?sessid=12345678") != std::string::npos;
+		Check(ok, c.what);
+		if (!ok)
+			std::printf("  (handshake failures so far: %u)\n", server.handshakesFailed());
+	}
+	const std::string start = FetchTls(server.port(), MBEDTLS_SSL_MINOR_VERSION_1,
+		MBEDTLS_TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA, "/00000002/startsession.php?sessid=12345678");
+	Check(start.find("<!--CRS-game-start-->") != std::string::npos, "the game-start page over TLS");
+	Check(server.lastSession().find("TLS-DHE-RSA-WITH-3DES-EDE-CBC-SHA") != std::string::npos,
+		"the server reports the negotiated suite");
+	server.stop();
+}
+
 int main()
 {
 	TestHeader();
@@ -149,6 +289,8 @@ int main()
 	TestRelayStream();
 	TestScramble();
 	TestSession();
+	TestWebPages();
+	TestTlsServer();
 	std::printf("ob_server: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

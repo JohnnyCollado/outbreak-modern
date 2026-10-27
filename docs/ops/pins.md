@@ -24,3 +24,8 @@ Source: R0-003, upstream/ps2recomp/README.md, tools/ob.sh; 2026-10-21.
   another HEAD. A bump is deliberate: re-copy `config_defaults_a64.cpp` (Pcsx2Config.cpp constructors) and
   `GetGSPacketSize` in `ob_a64mvu_fakes.h`, re-check the external symbol list, re-run vucompare on the device.
   vixl from `C:\ob\pcsx2\3rdparty\vixl` (same sources as ARMSX2's, study 1.4).
+- **mbedTLS 2.28.10** (tag `v2.28.10`, commit 2fc8413bfcb51354c8e679141b17b3f1a5942561), shallow clone in
+  `C:\ob\mbedtls\v2.28.10` (`OB_MBEDTLS`), for `native/ob_server`'s login pages: the last mbedTLS line with 3DES suites
+  and SSL 3.0, which the PS2's 2003-era login browser needs (plan `docs/plans/2026-10-26-online-play.md` P4 result).
+  Built with `native/ob_server/src/mbedtls_config_ob.h` (SSL 3.0, SSLv2-format greeting). 2.28 is end of life; it
+  serves only the game's login pages on the local network. A bump to 3.x is not possible (no 3DES, TLS 1.2+ only).
