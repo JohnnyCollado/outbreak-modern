@@ -270,6 +270,10 @@ cmd_recompile() {
         "$PY" -I "$REPO/tools/mwo3_to_elf.py" "$OB_RUN/PROG/$up.BIN" "$o.elf" || return 1
         "$PY" -I "$REPO/tools/splat_functions.py" "$asm" "$o-functions.csv" || return 1
         sed -e "s/demo/$o/g" demo.toml > "$o.gen.toml"
+        # NETWK's DNAS step (func_0058B3D0: loads NETDNAS, runs Sony's check, returns 1 on success) becomes "return 1":
+        # NETDNAS has code scrambled at rest that can't be recompiled, our client skips DNAS (plan P4 result), and
+        # nothing after it reads its result (reports/2026-10-26-online-play.md entry 13). jr $ra; addiu $v0,$zero,1.
+        [ "$o" = netwk ] && printf '\n[patches]\ninstructions = [\n  { address = "0x58B3D0", value = "0x03E00008" },\n  { address = "0x58B3D4", value = "0x24020001" },\n]\n' >> "$o.gen.toml"
         rm -rf "output-$o"
         "$OB_T/ps2xRecomp/ps2_recomp.exe" "$o.gen.toml" > "recomp-$o.log" 2>&1 || { echo "$o: recomp failed (recomp-$o.log)"; tail -5 "recomp-$o.log"; return 1; }
         e=$(grep -c '\[error\]' "recomp-$o.log")

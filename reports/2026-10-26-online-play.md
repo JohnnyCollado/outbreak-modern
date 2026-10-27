@@ -153,6 +153,21 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Evidence:** adapter-on boot, 90 s: `[fileio] sceDevctl("hdd0:", 0x4807) = 3`, `sceMount(...) = -19 (no HDD)`,
   then USBD/USBKB load (17 modules) and the same disc files and overlays as single player; ps2x 558/558.
 
+### 13. Skipping DNAS without running any NETDNAS code
+
+- **Seen:** NETDNAS can't be recompiled (entry 3), so the client must never run it.
+- **Found by:** reading the lobby overlay (read-only helper, 2026-10-27): the NETWK step dispatcher (`func_00596D90`,
+  step variable D_0068C5F0) runs step 33, `func_0058B3D0`, which loads NETDNAS (`func_005897F0(1)` → overlay id 4),
+  drives Capcom's wrapper at 0x7437E0 (NETDNAS's plain tail, not the scrambled part) and returns 1 on success, -1 on
+  failure. On 1 the game goes to step 35, which loads NETHTTP over NETDNAS and opens
+  `https://www01.kddi-mmbb.jp/00000002/CRS-top.jsp`. Nothing later reads DNAS's result (status/auth buffers are never
+  referenced from main, NETWK or NETHTTP). Only the "update patch" path calls 0x743E10/0x743F50 (not needed).
+- **Fix:** an instruction patch in NETWK's recompile config (`ob.sh`): 0x58B3D0 = `jr $ra`, 0x58B3D4 =
+  `addiu $v0, $zero, 1`. The recompiled function returns 1 on entry; NETDNAS is never loaded.
+- **Evidence:** trial recompile of NETWK with the patch: 0 errors; the generated `netwk_func_0058B3D0` starts with
+  `jr $ra` + `v0 = 1`. Not yet seen in the running game (needs the network menu: step C).
+- **Take-away:** skip a protection at the caller's state step, not inside the protected code.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
@@ -174,7 +189,10 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   `research/2026-10-27-lobby-protocol.md`, design `docs/plans/2026-10-27-ob-server.md` (approved).
 - ob_server step A done: `native/ob_server` (packet header, lobby/relay stream splitting, string scrambling, session
   digits), tests 27/27, 0 warnings, in `ob.sh test`. The scrambling formula decodes the fan server's captured version
-  string into "0311172218" (ten digits: strong evidence the formula is right). Next: step B (login pages, DNAS hook).
+  string into "0311172218" (ten digits: strong evidence the formula is right).
+- ob_server step B done: login pages with quick login over SSL 3.0 / TLS 1.0 with RSA and DHE-RSA 3DES (tests 40/40,
+  mbedTLS 2.28.10 pinned), and the DNAS skip patch (entry 13). Not yet tried with the game itself: that needs the game
+  to reach its network menu and our adapter's DNS pointing at the server (step C). Next: step C (lobby).
 - Faking an installed HDD: not now (research 7.5: only for HDD-only rooms).
 - mbedTLS on a real device and against the PS2's actual ClientHello: S3 / S6.
 
