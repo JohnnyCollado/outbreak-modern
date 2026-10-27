@@ -261,7 +261,31 @@ namespace
 		(void)h;
 #endif
 	}
-	void UiSetVolume(float v) { SetMasterVolume(v); }
+	// The saved volume is applied at start-up (obui::prepare), before the runtime opens the audio device
+	// (PS2Runtime::initialize: InitAudioDevice); raylib's SetMasterVolume does nothing without a device, and a new device
+	// starts at full volume (developer, 2026-10-27: "set to zero, it'll still play"). So until the device is ready the
+	// volume waits here, and the first host frame applies it.
+	float s_pendingVolume = -1.0f;
+
+	void UiSetVolume(float v)
+	{
+		if (IsAudioDeviceReady())
+		{
+			SetMasterVolume(v);
+			s_pendingVolume = -1.0f;
+		}
+		else
+			s_pendingVolume = v;
+	}
+
+	void ApplyPendingVolume()
+	{
+		if (s_pendingVolume < 0.0f || !IsAudioDeviceReady())
+			return;
+		SetMasterVolume(s_pendingVolume);
+		std::fprintf(stderr, "[ui] volume %d%% applied (audio device ready)\n", static_cast<int>(s_pendingVolume * 100.0f + 0.5f));
+		s_pendingVolume = -1.0f;
+	}
 	void UiSetTitle(const char* t) { SetWindowTitle(t); }
 	std::string InputIniPath()
 	{
@@ -376,6 +400,7 @@ namespace
 		HostAction hostFrame() override
 		{
 			SetIconOnce();
+			ApplyPendingVolume();
 			if (!ob_gs_window_ready())
 				return HostAction::Hold; // Android, app in the background: hold the game until its window is back
 			const int r = obui::hostFrame(SampleInput());

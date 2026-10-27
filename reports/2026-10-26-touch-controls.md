@@ -122,6 +122,29 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
   "Skip the launcher" does not start the game again when the player has just quit it.
 - **Take-away:** a NativeActivity whose native code keeps process-wide state belongs in a process of its own.
 
+### 9. The saved master volume was ignored at game start
+
+- **Seen:** the developer (2026-10-27, OnePlus 13): volume set to 0 in the launcher, the game still played sound
+  until the dial was moved again in game.
+- **Found by:** reading the order: `obui::prepare` (in the UI's launch, before the game) calls `host.setVolume` ->
+  raylib `SetMasterVolume`; the runtime opens the audio device later (`PS2Runtime::initialize`, `InitAudioDevice`,
+  ps2_runtime.cpp:1177). raylib's `SetMasterVolume` sets the miniaudio device's volume, which does not exist yet, and
+  the new device starts at full volume.
+- **Fix:** `ui_hook.cpp` keeps the volume until `IsAudioDeviceReady()` and applies it at the first host frame
+  (`[ui] volume N% applied (audio device ready)`). Windows check: a hidden run with `[ui] volume = 0` logs
+  "[ui] volume 0% applied" right after "AUDIO: Device initialized".
+- **Take-away:** a setting applied "at start-up" must wait for the device it drives.
+
+### 10. Game speed follows the frame rate (catch-up bursts) - found, not fixed yet
+
+- **Seen:** the developer (OnePlus 13): the frame rate swings between about 45 and above 60, and the game's speed
+  with it (caught in a window by a zombie, then healed almost at once).
+- **Found by:** reading the pacing: each VBlank's host deadline is the last one + 16 667 us (`EeScheduler.cpp`
+  1933-1939), an absolute schedule; after a slow stretch the missed VBlanks are all due and run back to back, faster
+  than 60 per second, until the schedule is caught up (no limit on the debt). The game's logic counts VBlanks, so it
+  runs fast during the burst. The period is also 60.00 Hz, not NTSC's 59.94 (0.1 %).
+- **Next:** a plan for the developer (cap the catch-up; measure the dips on the phone).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
