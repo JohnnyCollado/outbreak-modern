@@ -1,0 +1,412 @@
+From 6039889519529dbed6357c97cdf5ef648de98886 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 11:41:34 -0400
+Subject: [PATCH] IOP ioman: file operations reach the registered device's
+ functions
+
+ioman handled only AddDrv (20) and DelDrv (21): a driver like MCMAN could register its "mc" device, but open,
+read, close and the rest were unhandled imports returning 0, so an IRX reading a memory card file (Sony's NETCNF
+reading mc0:/BWNETCNF/BWNETCNF) "opened" fd 0 and read nothing.
+
+Now open (4), close (5), read (6), write (7), lseek (8), ioctl (9), remove (10), mkdir (11), rmdir (12), dopen (13),
+dclose (14), dread (15), getstat (16), chstat (17) and format (18) (ps2sdk ioman.h) find the device by the name
+before the unit number and ':', fill an iop_file_t {mode, unit, device, privdata} from a 32-slot table and call
+the device's function from its iop_device_ops_t with the path after ':'. The call runs on the caller's own thread
+(pc moves to the function, gp is the device's, ra a sentinel): a driver that waits for hardware, as MCMAN waits
+for the card, blocks that thread while the others run. At the sentinel ioman restores the caller's ra and gp and
+turns the result into the caller's: open/dopen return the fd (an error frees the slot), close/dclose and the
+name-only operations free their slot, the others pass the result through. Unknown device -19, bad fd -9, table
+full -24.
+
+Test: iop_emulator_tests, a module registering device "tst" opens "tst3:/ab" with flags 1, reads, closes and opens
+an unknown device: the device sees unit 3, flags 1 and path "/ab", fd 0, 4 bytes read, -19. Fails without: IOP
+4/5.
+---
+ ps2xIOP/src/emulator/imports/iop_ioman.cpp | 174 +++++++++++++++++++++
+ ps2xIOP/src/emulator/imports/iop_ioman.h   |  13 ++
+ ps2xIOP/src/emulator/iop_emulator.cpp      |  16 +-
+ ps2xIOP/src/emulator/iop_emulator_const.h  |   2 +
+ ps2xIOP/tests/iop_emulator_tests.cpp       |  75 +++++++++
+ 5 files changed, 278 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/imports/iop_ioman.cpp b/ps2xIOP/src/emulator/imports/iop_ioman.cpp
+index 3eb4119..7f3f1da 100644
+--- a/ps2xIOP/src/emulator/imports/iop_ioman.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_ioman.cpp
+@@ -2,9 +2,11 @@
+ 
+ #include "../core/iop_cpu.h"
+ #include "../core/iop_memory.h"
++#include "../iop_emulator_const.h"
+ #include "../services/iop_rpc.h"
+ 
+ #include <algorithm>
++#include <cctype>
+ 
+ namespace ps2x::iop::detail
+ {
+@@ -13,9 +15,124 @@ namespace ps2x::iop::detail
+     {
+     }
+ 
++    namespace
++    {
++        // Byte offsets in ps2sdk ioman.h: iop_file_t {mode, unit, device, privdata}; iop_device_t {name, type,
++        // version, desc, ops}; iop_device_ops_t {init, deinit, format, open, close, read, write, lseek, ioctl,
++        // remove, mkdir, rmdir, dopen, dclose, dread, getstat, chstat}.
++        constexpr uint32_t kFileMode = 0u, kFileUnit = 4u, kFileDevice = 8u;
++        constexpr uint32_t kDeviceOps = 16u;
++        constexpr uint32_t kOpFormat = 8u, kOpOpen = 12u, kOpClose = 16u, kOpRead = 20u, kOpWrite = 24u,
++                           kOpLseek = 28u, kOpIoctl = 32u, kOpRemove = 36u, kOpMkdir = 40u, kOpRmdir = 44u,
++                           kOpDopen = 48u, kOpDclose = 52u, kOpDread = 56u, kOpGetstat = 60u, kOpChstat = 64u;
++        constexpr int32_t kEbadf = -9, kEnodev = -19, kEmfile = -24;
++        // What finishCall does with the device's result: Pass returns it; Open returns the fd (or the error,
++        // freeing the slot); Close and Once (a name-only operation on a temporary slot) free the slot.
++        constexpr uint32_t kPass = 0u, kOpen = 1u, kClose = 2u, kOnce = 3u;
++        // The caller's frame below its sp: 16 bytes the device function may store its arguments in (o32), then
++        // the caller's ra, gp, the slot and the kind.
++        constexpr uint32_t kFrameSize = 32u;
++    }
++
+     void IopIoman::reset()
+     {
+         m_devices.clear();
++        m_files = 0u;
++        m_fileDevices.assign(kMaxFiles, 0u);
++    }
++
++    const IopIoman::Device *IopIoman::fileDevice(uint32_t fd) const
++    {
++        if (fd >= m_fileDevices.size() || m_fileDevices[fd] == 0u)
++            return nullptr;
++        const auto device = std::find_if(m_devices.begin(), m_devices.end(),
++                                         [&](const Device &candidate) { return candidate.address == m_fileDevices[fd]; });
++        return device != m_devices.end() ? &*device : nullptr;
++    }
++
++    // "mc0:/BWNETCNF/BWNETCNF": the device named by the letters before the unit number and ':'; a free slot whose
++    // iop_file_t gets mode, unit and device; path = the guest address after ':'. Returns the slot or an error.
++    int32_t IopIoman::openSlot(uint32_t nameAddress, uint32_t mode, const Device *&device, uint32_t &path)
++    {
++        const std::string name = m_memory.readString(nameAddress, 256u);
++        const size_t colon = name.find(':');
++        if (colon == std::string::npos)
++            return kEnodev;
++        size_t unitStart = colon;
++        while (unitStart > 0u && std::isdigit(static_cast<unsigned char>(name[unitStart - 1u])))
++            --unitStart;
++        const std::string deviceName = name.substr(0u, unitStart);
++        const auto found = std::find_if(m_devices.begin(), m_devices.end(),
++                                        [&](const Device &candidate) { return candidate.name == deviceName; });
++        if (found == m_devices.end())
++            return kEnodev;
++        if (m_files == 0u)
++            m_files = m_memory.allocate(kMaxFiles * kFileSize, 16u);
++        if (m_fileDevices.size() < kMaxFiles)
++            m_fileDevices.resize(kMaxFiles, 0u);
++        const auto free = std::find(m_fileDevices.begin(), m_fileDevices.end(), 0u);
++        if (m_files == 0u || free == m_fileDevices.end())
++            return kEmfile;
++        const uint32_t slot = static_cast<uint32_t>(free - m_fileDevices.begin());
++        const uint32_t file = m_files + slot * kFileSize;
++        uint32_t unit = 0u;
++        for (size_t i = unitStart; i < colon; ++i)
++            unit = unit * 10u + static_cast<uint32_t>(name[i] - '0');
++        for (uint32_t i = 0; i < kFileSize; i += 4u)
++            m_memory.write32(file + i, 0u);
++        m_memory.write32(file + kFileMode, mode);
++        m_memory.write32(file + kFileUnit, unit);
++        m_memory.write32(file + kFileDevice, found->address);
++        m_fileDevices[slot] = found->address;
++        device = &*found;
++        path = nameAddress + static_cast<uint32_t>(colon) + 1u;
++        return static_cast<int32_t>(slot);
++    }
++
++    void IopIoman::callDevice(IopCpuState &cpu, const Device &device, uint32_t operation, uint32_t slot,
++                              uint32_t kind, uint32_t a1, uint32_t a2, uint32_t a3)
++    {
++        const uint32_t ops = m_memory.read32(device.address + kDeviceOps);
++        const uint32_t function = ops != 0u ? m_memory.read32(ops + operation) : 0u;
++        if (function == 0u)
++        {
++            if (kind != kPass)
++                m_fileDevices[slot] = 0u;
++            cpu.gpr[2] = static_cast<uint32_t>(kEnodev);
++            return; // the caller goes on at ra
++        }
++        const uint32_t sp = cpu.gpr[29] - kFrameSize;
++        m_memory.write32(sp + 16u, cpu.gpr[31]);
++        m_memory.write32(sp + 20u, cpu.gpr[28]);
++        m_memory.write32(sp + 24u, slot);
++        m_memory.write32(sp + 28u, kind);
++        cpu.gpr[29] = sp;
++        cpu.gpr[4] = m_files + slot * kFileSize;
++        cpu.gpr[5] = a1;
++        cpu.gpr[6] = a2;
++        cpu.gpr[7] = a3;
++        cpu.gpr[28] = device.gp;
++        cpu.gpr[31] = kIomanReturnSentinel;
++        cpu.pc = function;
++        cpu.branchPending = false;
++    }
++
++    void IopIoman::finishCall(IopCpuState &cpu)
++    {
++        const uint32_t sp = cpu.gpr[29];
++        const uint32_t ra = m_memory.read32(sp + 16u);
++        const uint32_t gp = m_memory.read32(sp + 20u);
++        const uint32_t slot = m_memory.read32(sp + 24u);
++        const uint32_t kind = m_memory.read32(sp + 28u);
++        const int32_t result = static_cast<int32_t>(cpu.gpr[2]);
++        if (slot < m_fileDevices.size() && (kind == kClose || kind == kOnce || (kind == kOpen && result < 0)))
++            m_fileDevices[slot] = 0u;
++        if (kind == kOpen && result >= 0)
++            cpu.gpr[2] = slot;
++        cpu.gpr[29] = sp + kFrameSize;
++        cpu.gpr[28] = gp;
++        cpu.pc = ra;
++        cpu.branchPending = false;
+     }
+ 
+     bool IopIoman::dispatchImport(uint16_t ordinal, IopCpuState &cpu, IopGuestExecutor &executor)
+@@ -84,6 +201,63 @@ namespace ps2x::iop::detail
+             setV0(0u);
+             return true;
+         }
++        case 4:  // open(name, flags)
++        case 13: // dopen(name)
++        case 10: // remove(name)
++        case 11: // mkdir(name)
++        case 12: // rmdir(name)
++        case 16: // getstat(name, stat)
++        case 17: // chstat(name, stat, mask)
++        case 18: // format(name)
++        {
++            const Device *device = nullptr;
++            uint32_t path = 0u;
++            const int32_t slot = openSlot(a0, ordinal == 4u ? cpu.gpr[5] : 0u, device, path);
++            if (slot < 0)
++            {
++                setV0(static_cast<uint32_t>(slot));
++                return true;
++            }
++            const uint32_t s = static_cast<uint32_t>(slot);
++            switch (ordinal)
++            {
++            case 4: callDevice(cpu, *device, kOpOpen, s, kOpen, path, cpu.gpr[5], 0u); break;
++            case 13: callDevice(cpu, *device, kOpDopen, s, kOpen, path, 0u, 0u); break;
++            case 10: callDevice(cpu, *device, kOpRemove, s, kOnce, path, 0u, 0u); break;
++            case 11: callDevice(cpu, *device, kOpMkdir, s, kOnce, path, 0u, 0u); break;
++            case 12: callDevice(cpu, *device, kOpRmdir, s, kOnce, path, 0u, 0u); break;
++            case 16: callDevice(cpu, *device, kOpGetstat, s, kOnce, path, cpu.gpr[5], 0u); break;
++            case 17: callDevice(cpu, *device, kOpChstat, s, kOnce, path, cpu.gpr[5], cpu.gpr[6]); break;
++            default: callDevice(cpu, *device, kOpFormat, s, kOnce, 0u, 0u, 0u); break;
++            }
++            return true;
++        }
++        case 5:  // close(fd)
++        case 14: // dclose(fd)
++        case 6:  // read(fd, buffer, size)
++        case 7:  // write(fd, buffer, size)
++        case 8:  // lseek(fd, offset, whence)
++        case 9:  // ioctl(fd, command, argument)
++        case 15: // dread(fd, dirent)
++        {
++            const Device *device = fileDevice(a0);
++            if (device == nullptr)
++            {
++                setV0(static_cast<uint32_t>(kEbadf));
++                return true;
++            }
++            switch (ordinal)
++            {
++            case 5: callDevice(cpu, *device, kOpClose, a0, kClose, 0u, 0u, 0u); break;
++            case 14: callDevice(cpu, *device, kOpDclose, a0, kClose, 0u, 0u, 0u); break;
++            case 6: callDevice(cpu, *device, kOpRead, a0, kPass, cpu.gpr[5], cpu.gpr[6], 0u); break;
++            case 7: callDevice(cpu, *device, kOpWrite, a0, kPass, cpu.gpr[5], cpu.gpr[6], 0u); break;
++            case 8: callDevice(cpu, *device, kOpLseek, a0, kPass, cpu.gpr[5], cpu.gpr[6], 0u); break;
++            case 9: callDevice(cpu, *device, kOpIoctl, a0, kPass, cpu.gpr[5], cpu.gpr[6], 0u); break;
++            default: callDevice(cpu, *device, kOpDread, a0, kPass, cpu.gpr[5], 0u, 0u); break;
++            }
++            return true;
++        }
+         default:
+             return false;
+         }
+diff --git a/ps2xIOP/src/emulator/imports/iop_ioman.h b/ps2xIOP/src/emulator/imports/iop_ioman.h
+index 182f786..0465a67 100644
+--- a/ps2xIOP/src/emulator/imports/iop_ioman.h
++++ b/ps2xIOP/src/emulator/imports/iop_ioman.h
+@@ -16,7 +16,10 @@ namespace ps2x::iop::detail
+         explicit IopIoman(IopMemory &memory) noexcept;
+ 
+         void reset();
++        // A file operation (4-18) leaves cpu.pc at the device's function, called on the caller's own thread so a
++        // driver may block (MCMAN waits for the card); it returns to kIomanReturnSentinel, where finishCall ends it.
+         [[nodiscard]] bool dispatchImport(uint16_t ordinal, IopCpuState &cpu, IopGuestExecutor &executor);
++        void finishCall(IopCpuState &cpu);
+ 
+     private:
+         struct Device
+@@ -26,7 +29,17 @@ namespace ps2x::iop::detail
+             std::string name;
+         };
+ 
++        static constexpr uint32_t kMaxFiles = 32u;
++        static constexpr uint32_t kFileSize = 32u; // iop_file_t (16 bytes) with room for iomanX's longer one
++
++        void callDevice(IopCpuState &cpu, const Device &device, uint32_t operation, uint32_t slot, uint32_t kind,
++                        uint32_t a1, uint32_t a2, uint32_t a3);
++        [[nodiscard]] int32_t openSlot(uint32_t nameAddress, uint32_t mode, const Device *&device, uint32_t &path);
++        [[nodiscard]] const Device *fileDevice(uint32_t fd) const;
++
+         IopMemory &m_memory;
+         std::vector<Device> m_devices;
++        uint32_t m_files = 0u;                      // guest iop_file_t table, kMaxFiles * kFileSize
++        std::vector<uint32_t> m_fileDevices;        // per slot: the device's iop_device_t address; 0 = free
+     };
+ }
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 526925e..7427cfb 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -459,8 +459,13 @@ namespace ps2x::iop::detail
+                 setV0(0);
+                 return ImportDisposition::Handled;
+             }
+-            if (iequals(call.library, "ioman") && ioman.dispatchImport(call.ordinal, cpu, *this))
+-                return ImportDisposition::Handled;
++            if (iequals(call.library, "ioman"))
++            {
++                // A file operation moves pc to the device's function (patch 0095): run it there.
++                const uint32_t stubPc = cpu.pc;
++                if (ioman.dispatchImport(call.ordinal, cpu, *this))
++                    return cpu.pc != stubPc ? ImportDisposition::JumpToGuest : ImportDisposition::Handled;
++            }
+             if (iequals(call.library, "sifman") && call.ordinal == 32u)
+             {
+                 // sceSifSetDmaIntr(dmat, len, func, data) (ps2sdk sifman exports 32): sceSifSetDma's transfer, then
+@@ -539,6 +544,13 @@ namespace ps2x::iop::detail
+         {
+             if (cpu.stopped)
+                 return false;
++            if (cpu.pc == kIomanReturnSentinel)
++            {
++                ioman.finishCall(cpu);
++                ++totalInstructions;
++                ++totalCycles;
++                return true;
++            }
+             if (cpu.pc == kThreadReturnSentinel || cpu.pc == kCallReturnSentinel)
+             {
+                 cpu.stopped = true;
+diff --git a/ps2xIOP/src/emulator/iop_emulator_const.h b/ps2xIOP/src/emulator/iop_emulator_const.h
+index 3ab1423..3057320 100644
+--- a/ps2xIOP/src/emulator/iop_emulator_const.h
++++ b/ps2xIOP/src/emulator/iop_emulator_const.h
+@@ -3,6 +3,8 @@
+ 
+ constexpr uint32_t kThreadReturnSentinel = 0x1FFFFF00u;
+ constexpr uint32_t kCallReturnSentinel = 0x1FFFFF04u;
++// A device function called by ioman (patch 0095) returns here: ioman turns its result into the caller's.
++constexpr uint32_t kIomanReturnSentinel = 0x1FFFFF08u;
+ constexpr uint64_t kIopClockHz = 36'864'000ull;
+ // NTSC field cadence (approximately 59.94 Hz).  VBlank imports are
+ // scheduler waits, not no-op timing hints: returning immediately lets
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 12b92b0..cffc709 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -337,6 +337,74 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset + 0x80u, imports, sizeof(imports));
+     }
+ 
++    // A module with an ioman device "tst" (patch 0095): AddDrv, open("tst3:/ab", 1), read 4 bytes, close, then
++    // open("nod0:/x"). The device's open stores path[1] (path = after the colon) + unit + flags in the file's
++    // privdata; its read writes that byte to the buffer and returns the size. Returns byte | read count << 8 |
++    // fd << 16 | (second open & 0xFF) << 24.
++    void writeIomanIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00017000u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x400u; program.memsz = 0x400u; program.flags = 7u; program.align = 4u;
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2) & 0x03FFFFFFu); };
++        const uint32_t stubAddDrv = loadAddress + 0x194u, stubOpen = loadAddress + 0x19Cu,
++                       stubRead = loadAddress + 0x1A4u, stubClose = loadAddress + 0x1ACu;
++        const uint32_t code[] = {
++            0x27BDFFE0u, 0xAFBF001Cu, 0xAFB00018u, 0xAFB10014u, // frame; save ra, s0, s1
++            0x3C040001u, jal(stubAddDrv), 0x34847200u,          // AddDrv(&device @0x17200)
++            0x24050001u, 0x3C040001u, jal(stubOpen), 0x34847248u, // open("tst3:/ab", 1)
++            0x00408025u,                                        // s0 = fd
++            0x02002025u, 0x3C050001u, 0x34A57300u, jal(stubRead), 0x24060004u, // read(fd, @0x17300, 4)
++            0x00408825u,                                        // s1 = count
++            jal(stubClose), 0x02002025u,                        // close(fd)
++            0x3C040001u, jal(stubOpen), 0x34847258u,            // open("nod0:/x", ...)
++            0x00021600u, 0x00118A00u, 0x00511025u, 0x00108400u, 0x00501025u, // v0 = v0 << 24 | s1 << 8 | s0 << 16
++            0x3C080001u, 0x91097300u, 0u, 0x00491025u,          // | buffer[0]
++            0x8FB10014u, 0x8FB00018u, 0x8FBF001Cu, 0u,
++            0x03E00008u, 0x27BD0020u,
++        };
++        const uint32_t functions[] = {
++            0x03E00008u, 0x24020000u,                           // @0x100 return 0
++            0x90A80001u, 0x8C890004u, 0u, 0x01094021u, 0x01064021u, 0xAC88000Cu, 0x03E00008u, 0x24020000u, // @0x108 open
++            0x8C88000Cu, 0u, 0xA0A80000u, 0x03E00008u, 0x00C01021u, // @0x128 read
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000104u,
++            0x616D6F69u, 0x0000006Eu, // "ioman"
++            0x03E00008u, 0x24000014u, // 20 AddDrv
++            0x03E00008u, 0x24000004u, // 4 open
++            0x03E00008u, 0x24000006u, // 6 read
++            0x03E00008u, 0x24000005u, // 5 close
++            0u, 0u,
++        };
++        const uint32_t device[] = {loadAddress + 0x240u, 0x10u, 0x100u, 0u, loadAddress + 0x260u};
++        uint32_t ops[17];
++        for (uint32_t &op : ops)
++            op = loadAddress + 0x100u;
++        ops[3] = loadAddress + 0x108u; // open
++        ops[5] = loadAddress + 0x128u; // read
++        uint8_t *image = host.guest.data() + address + codeOffset;
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(image, code, sizeof(code));
++        std::memcpy(image + 0x100u, functions, sizeof(functions));
++        std::memcpy(image + 0x180u, imports, sizeof(imports));
++        std::memcpy(image + 0x200u, device, sizeof(device));
++        std::memcpy(image + 0x240u, "tst", 4);
++        std::memcpy(image + 0x248u, "tst3:/ab", 9);
++        std::memcpy(image + 0x258u, "nod0:/x", 8);
++        std::memcpy(image + 0x260u, ops, sizeof(ops));
++    }
++
+     // A module calling cdvdman import `number` as f(buf, &result), buf[0] and result preset to -1; returns
+     // buf[first] | buf[second] << 8 | (result & 0xFF) << 16 | f's return << 24. sceCdRI (22): the console ID NETCNF
+     // keys its settings files' encoding on; sceCdReadClock (24): the clock USBSRCH polls.
+@@ -1837,6 +1905,13 @@ int main()
+                         (clock.startResult & 0xFF) == 0 && bcdMonth,
+                     "sceCdReadClock must clear the status, write a BCD month (0x01-0x12) and return 1")) return 1;
+ 
++        // ioman file operations reach a registered device (NETCNF reading mc0:/BWNETCNF through MCMAN).
++        writeIomanIrx(host, 0x1400u);
++        const ModuleLoadResult files = iop.loadModuleBuffer(0x1400u);
++        if (!expect(files.handled && static_cast<uint32_t>(files.startResult) == 0xED000465u, // "/ab"[1] 'a' + 3 + 1
++                    "ioman open/read/close must call the device's functions with an iop_file_t (unit 3, flags 1, "
++                    "path after ':'), return fd 0 and the read count, and an unknown device must give -19")) return 1;
++
+         // A module loading another through modload 19 + 8 (Capcom's LOADHIGH.IRX for its network stack).
+         writeArgvIrx(host, 0xA00u);
+         host.files["argv.irx"].assign(host.guest.begin() + 0xA00, host.guest.begin() + 0xA00 + 0x200);
+-- 
+2.46.2.windows.1
+

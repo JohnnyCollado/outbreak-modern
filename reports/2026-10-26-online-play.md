@@ -250,6 +250,29 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   wait for the card hardware, so they must run where the guest can block (patch 0075's thread runner), not as a
   plain nested call. Paused here to agree the approach.
 
+### 21. ioman now reaches drivers, but this game's card isn't an ioman device: NETCNF reads through the EE
+
+- **Done (developer approved 2026-10-27):** PS2Recomp 0095, ioman file operations call the registered device's
+  functions on the caller's own thread (a return sentinel turns the result into an fd). IOP tests 5/5; fails without
+  (4/5). Written code-first, test second; the developer asked for test-first from now on. My first expected value
+  was also wrong (`"/ab"[1]` is 'a', 0x65, not 0x66), corrected from the string, not from the output.
+- **Seen (drive with temporary logging in `net-src` only, since removed):** the ioman warnings are gone, the screen
+  is unchanged. Only `dev9x`, `hdd`, `pfs` register with ioman; NETCNF's six `open("mc0:/BWNETCNF/BWNETCNF")` get
+  -19 (no device). The game's card driver is `mc2_s1` (libmc2 over `sio2d`/`dbcman`), which imports no ioman. The
+  classic `mcman.irx` exists only in `ntgui2/modules` (Sony's settings utility).
+- **How the real game reads its settings** (ps2sdk `netcnfif.c` 1131-1189 and the dispatcher case 11): NETCNFIF RPC
+  function 11 = `sceNetCnfSetCallback`: NETCNF's file open/read/close go to callbacks that call an **EE** RPC server
+  (sid 0x80001101, functions 12 open, 13 read, 14 close); the game's EE code reads the card with libmc2.
+- **Cause of the hang:** first `sce_callback_initialize` binds that EE server and loops until `gcd.server` is set.
+  PS2Recomp's IOP `sifcmd` answers `sceSifBindRpc` (15), `sceSifCallRpc` (16) and `sceSifCheckStatRpc` (18) with 0
+  and nothing else (`iop_rpc.cpp`, ordinals per ps2sdk `sifcmd.h`), so it never binds; the handler runs out of its
+  one-second budget (the "did not return within its budget" warning: entry 0xc24c0, function 0xb) and the callbacks
+  are never installed. On the EE, `sceSifRpcLoop` returns at once (`Stubs/SIF.cpp:610`): no IOP-to-EE calls exist.
+- **0095's place:** correct and tested, but not on this game's path. Kept for now; the developer decides.
+- **Open question (developer's call):** serve sid 0x80001101 calls 12/13/14 on the host (settings files generated
+  from the app's Network page or read from the card image), or build real IOP-to-EE RPC so the game's own libmc2
+  code serves them.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
