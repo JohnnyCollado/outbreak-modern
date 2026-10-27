@@ -40,7 +40,9 @@ if(TARGET ps2_runtime)
     if(ANDROID)
         # The Storage Access Framework bridge (native/android/java OutbreakActivity; plan section 5.8).
         # The Kotlin side (native/android/kotlin, decision A14): the in-game menu bridge and the launcher JNI.
-        target_sources(ob_ui PRIVATE android/android_picker.cpp android/android_menu.cpp)
+        target_sources(ob_ui PRIVATE android/android_picker.cpp android/android_menu.cpp android/fast_unwind.cpp)
+        # Its self-test throws and catches once; the target inherits PCSX2's -fno-exceptions (a source option comes last).
+        set_source_files_properties(android/fast_unwind.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions")
         target_include_directories(ob_ui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/android"
             "${CMAKE_ANDROID_NDK}/sources/android/native_app_glue")
         target_link_libraries(ob_ui PRIVATE zip android log)

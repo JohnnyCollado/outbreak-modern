@@ -1,0 +1,233 @@
+From 30bd43683265f91ad1bf49d3edd13fe9535285da Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 03:58:37 -0400
+Subject: [PATCH] EE timers: brought up to date only when one can raise an
+ interrupt or a timer register is read or written, instead of at every
+ scheduler accounting step (four timers' 64-bit divisions and a register-map
+ lookup each time: 8-11 % of the game thread on a phone); the same counts,
+ flags and interrupt cycles; GIF_STAT's FIFO count still cleared at the next
+ advance
+
+---
+ ps2xRuntime/include/runtime/ps2_memory.h | 12 +++++
+ ps2xRuntime/src/lib/ps2_memory.cpp       | 60 +++++++++++++++++++++---
+ ps2xTest/src/ps2_memory_tests.cpp        | 51 ++++++++++++++++++++
+ 3 files changed, 116 insertions(+), 7 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index 5d5127e..e95ac90 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -268,6 +268,10 @@ public:
+     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
+     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+     void resetEeTimers() noexcept;
++    // Patch 0086: how many times the four timers were actually brought up to date. advanceEeTimers runs at every
++    // scheduler accounting step; the timers are updated only when one can raise an interrupt or a timer register is
++    // read or written (the counts and flags are the same as updating every time).
++    [[nodiscard]] uint64_t eeTimerFullUpdates() const noexcept { return m_eeTimerFullUpdates; }
+ 
+     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
+     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
+@@ -411,6 +415,14 @@ public:
+     };
+ 
+     std::array<EeTimer, 4> m_eeTimers{};
++    // Patch 0086: EE cycles not yet applied to the timers, and how many may pass before one can raise an interrupt
++    // (0 = update at the next advance). GIF_STAT's FIFO count is cleared at the next advance after a transfer set it.
++    uint64_t m_eeTimerPendingCycles = 0;
++    uint64_t m_eeTimerUpdateAt = 0;
++    uint64_t m_eeTimerFullUpdates = 0;
++    bool m_gifFqcSet = false;
++    uint32_t updateEeTimers() noexcept;
++    [[nodiscard]] uint64_t cyclesUntilEeTimerEvent() const noexcept;
+     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+     void queueCompletedDmacCause(uint32_t cause);
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 361f3e6..09386eb 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -486,6 +486,8 @@ bool PS2Memory::initialize(size_t ramSize)
+ void PS2Memory::resetEeTimers() noexcept
+ {
+     m_eeTimers = {};
++    m_eeTimerPendingCycles = 0u;
++    m_eeTimerUpdateAt = 0u;
+ }
+ 
+ void ps2x::setIpuDevice(IpuDevice *device)
+@@ -538,14 +540,34 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+         }
+     }
+ 
+-    constexpr uint32_t kGifStat = 0x10003020u;
+-    constexpr uint32_t kGifFqcMask = 0x1F000000u;
+-    auto gifStatIt = m_ioRegisters.find(kGifStat);
+-    if (gifStatIt != m_ioRegisters.end())
+-        gifStatIt->second &= ~kGifFqcMask;
++    // GIF_STAT's FIFO count drains as time passes; cleared at the first advance after a transfer set it (patch 0086:
++    // was a register-map lookup at every advance).
++    if (m_gifFqcSet)
++    {
++        constexpr uint32_t kGifStat = 0x10003020u;
++        constexpr uint32_t kGifFqcMask = 0x1F000000u;
++        auto gifStatIt = m_ioRegisters.find(kGifStat);
++        if (gifStatIt != m_ioRegisters.end())
++            gifStatIt->second &= ~kGifFqcMask;
++        m_gifFqcSet = false;
++    }
++
++    // Patch 0086: the timers move in one step once enough cycles have passed for one of them to raise an interrupt
++    // (or when a timer register is read or written). Their arithmetic carries the clock remainder, so one step of N
++    // cycles gives the same counts and flags as many steps adding up to N.
++    m_eeTimerPendingCycles += eeCycles;
++    if (m_eeTimerPendingCycles < m_eeTimerUpdateAt)
++        return ipuInterrupt;
++    return updateEeTimers() | ipuInterrupt;
++}
+ 
++uint32_t PS2Memory::updateEeTimers() noexcept
++{
++    const uint64_t eeCycles = m_eeTimerPendingCycles;
++    m_eeTimerPendingCycles = 0u;
++    ++m_eeTimerFullUpdates;
+     uint32_t interruptMask = 0u;
+-    for (size_t index = 0; index < m_eeTimers.size(); ++index)
++    for (size_t index = 0; index < m_eeTimers.size() && eeCycles != 0u; ++index)
+     {
+         EeTimer &timer = m_eeTimers[index];
+         if ((timer.mode & kEeTimerModeCue) == 0u)
+@@ -604,7 +626,8 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+             interruptMask |= 1u << index;
+         }
+     }
+-    return interruptMask | ipuInterrupt;
++    m_eeTimerUpdateAt = cyclesUntilEeTimerEvent();
++    return interruptMask;
+ }
+ 
+ uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+@@ -615,6 +638,16 @@ uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+     const ExternalIpu &ipu = externalIpu();
+     if (ipu.device && ipu.nextEvent != std::numeric_limits<uint64_t>::max())
+         nearest = ipu.nextEvent > ipu.cycle ? ipu.nextEvent - ipu.cycle : 1u;
++    // The timers' next event, less the cycles already counted towards it (patch 0086).
++    if (m_eeTimerUpdateAt != std::numeric_limits<uint64_t>::max())
++        nearest = std::min(nearest, m_eeTimerUpdateAt > m_eeTimerPendingCycles ? m_eeTimerUpdateAt - m_eeTimerPendingCycles : 1u);
++    return nearest;
++}
++
++// EE cycles from the timers' last update until one of them can raise an interrupt; max when none can.
++uint64_t PS2Memory::cyclesUntilEeTimerEvent() const noexcept
++{
++    uint64_t nearest = std::numeric_limits<uint64_t>::max();
+     for (const EeTimer &timer : m_eeTimers)
+     {
+         if ((timer.mode & kEeTimerModeCue) == 0u)
+@@ -1270,6 +1303,8 @@ void PS2Memory::write128(uint32_t address, __m128i value)
+ 
+ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+ {
++    if (address == 0x10003020u)
++        m_gifFqcSet = true; // GIF_STAT: its FIFO count is cleared at the next timer advance, as before patch 0086
+     if (ExternalIpu &ipu = externalIpu(); ipu.device)
+     {
+         // External IPU (ps2_ipu_external.h): its registers, FIFOs and channels 3/4 go to it; the DMAC master enable
+@@ -1309,6 +1344,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+     {
++        // Patch 0086: the cycles counted so far apply under the old settings first (no event is due yet: an advance
++        // that reaches one updates at once), then the next event is found under the new ones.
++        updateEeTimers();
++        struct NextEvent
++        {
++            PS2Memory &self;
++            ~NextEvent() { self.m_eeTimerUpdateAt = self.cyclesUntilEeTimerEvent(); }
++        } nextEvent{*this};
+         EeTimer &timer = m_eeTimers[timerIndex];
+         switch (timerOffset)
+         {
+@@ -1990,6 +2033,7 @@ void PS2Memory::processPendingTransfers()
+         constexpr uint32_t kGifFqcMask = 0x1F000000u;
+         uint32_t &gifStat = m_ioRegisters[kGifStat];
+         gifStat = (gifStat & ~kGifFqcMask) | (observedGifQwc << 24u);
++        m_gifFqcSet = true; // cleared at the next timer advance (patch 0086)
+     }
+ 
+     for (size_t idx = 0; idx < m_pendingGifTransfers.size(); ++idx)
+@@ -2640,6 +2684,8 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+     {
++        if (m_eeTimerPendingCycles != 0u)
++            updateEeTimers(); // patch 0086: the count as of now (never raises an interrupt here: none is due yet)
+         const EeTimer &timer = m_eeTimers[timerIndex];
+         switch (timerOffset)
+         {
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 3da0a04..c88d22a 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -428,6 +428,57 @@ void register_ps2_memory_tests()
+             t.Equals(mem.readIORegister(kTimerBases[1] + 0x30u), 0x3456u, "Timer1 HOLD should be 16-bit");
+         });
+ 
++        tc.Run("EE timers update only near an event, with the same counts and interrupts (patch 0086)", [](TestCase &t)
++        {
++            constexpr uint32_t kCount = 0x10001000u, kMode = 0x10001010u, kCompare = 0x10001020u;
++            constexpr uint32_t kCue = 1u << 7u, kCmpe = 1u << 8u, kZret = 1u << 6u, kBusDiv256 = 2u;
++
++            // Compare at 8 ticks of BUSCLK/256 = 4096 EE cycles, reached one cycle at a time (the scheduler's small steps).
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            mem.writeIORegister(kCount, 0u);
++            mem.writeIORegister(kCompare, 8u);
++            mem.writeIORegister(kMode, kBusDiv256 | kCue | kCmpe);
++            const uint64_t updatesBefore = mem.eeTimerFullUpdates();
++            uint32_t firedAt = 0u;
++            for (uint32_t cycle = 1u; cycle <= 5000u && firedAt == 0u; ++cycle)
++                if (mem.advanceEeTimers(1u) & (1u << 2u))
++                    firedAt = cycle;
++            t.Equals(firedAt, 4096u, "TIM2 is raised on the same EE cycle as with an update at every step");
++            const uint64_t updates = mem.eeTimerFullUpdates() - updatesBefore;
++            t.IsTrue(updates >= 1u && updates <= 2u,
++                     "4096 one-cycle advances updated the timers " + std::to_string(mem.eeTimerFullUpdates() - updatesBefore) + " times");
++
++            // A read in between sees the live count (the pending cycles are applied first).
++            PS2Memory mid;
++            t.IsTrue(mid.initialize(), "PS2Memory initialize should succeed");
++            mid.writeIORegister(kCount, 0u);
++            mid.writeIORegister(kCompare, 8u);
++            mid.writeIORegister(kMode, kBusDiv256 | kCue | kCmpe);
++            for (uint32_t i = 0u; i < 3000u; ++i)
++                mid.advanceEeTimers(1u);
++            t.Equals(mid.readIORegister(kCount), 5u, "after 3000 cycles COUNT is 5 (3000 / 512)");
++
++            // ZRET with a small compare wraps many times: uneven small steps end where one large step does.
++            PS2Memory a, b;
++            t.IsTrue(a.initialize() && b.initialize(), "PS2Memory initialize should succeed");
++            for (PS2Memory *m : {&a, &b})
++            {
++                m->writeIORegister(kCount, 0u);
++                m->writeIORegister(kCompare, 3u);
++                m->writeIORegister(kMode, kBusDiv256 | kCue | kZret);
++            }
++            uint64_t total = 0u;
++            for (uint32_t i = 0u; i < 400u; ++i)
++            {
++                const uint32_t step = 37u + (i * 53u) % 211u;
++                a.advanceEeTimers(step);
++                total += step;
++            }
++            b.advanceEeTimers(total);
++            t.Equals(a.readIORegister(kCount), b.readIORegister(kCount), "same COUNT after " + std::to_string(total) + " cycles");
++        });
++
+         tc.Run("EE Timer2 compare and overflow flags raise INTC_TIM2 and clear on write-one", [](TestCase &t)
+         {
+             PS2Memory mem;
+-- 
+2.46.2.windows.1
+

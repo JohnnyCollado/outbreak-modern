@@ -148,6 +148,44 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
   300 ms guest stall, 21 VBlanks ran in the next 100 ms without the patch, at most 9 with it.
 - **Still open:** the dips themselves (below 50 fps on the OnePlus 13): to be measured on the phone.
 
+### 11. Dips on the OnePlus 13: one maxed game thread on cores the phone keeps slow
+
+- **Seen:** the developer (2026-10-27): dips into the 40s with audio problems, at the start of J's Bar (characters
+  moving, zombies at the window); full speed again in the first stairwell.
+- **Found by:** two captures on the phone over wireless adb (developer's go): the runner's `[fps]` lines (logcat tag
+  `ps2x`), the phone's thermal status, battery temperature and CPU clocks every 5 s, then `top -H` per thread once a
+  second (an on-device loop, the game's `:game` process).
+  - Capture 1 (03:09-03:12): 37-48 fps for 40 s (03:10:51-03:11:32); thermal status 0 throughout, battery 31.7-32.6 C;
+    the 2.4 GHz cores at their top; the GS thread's own counter: about 1 600 records per vsync in that window against
+    about 200 before (3.65 M vs 0.74 M records), with only 2 queue-ahead stalls (58 ms): the renderer kept up.
+  - Capture 2 (03:21-03:24, J's Bar again): in every second under 56 fps `GameThread` (the EE: game code + the VU1
+    recompiler) ran at 85-103 % of one core; `GSThread` 15-30 %; the Android UI thread 30-45 % while the touch
+    controls were in use.
+  - CPU limits (`/sys/devices/system/cpu/cpuN/cpufreq`, SM8750): hardware max 3.53 GHz (cpu0-5) and 4.32 GHz (cpu6-7);
+    the phone's caps 3.07 and 3.51 GHz (its balanced mode); seen while slow: cpu0-5 about 2.4 GHz, cpu6 1.0-2.0 GHz.
+- **Cause:** the game is bound by one thread (the EE), and Android's governor does not run that thread near the
+  chip's speed: nothing tells it the app is a game with a 16.7 ms frame deadline. Under full speed the SPU2 makes
+  sound slower than it plays, so the audio runs dry. Not heat, not the renderer.
+  - Run 3 (03:27:40-03:30:19, the developer in OnePlus "gamer pro mode"): worse, 37-44 fps for 50 s (03:29:14-03:30:02,
+    J's Bar again; the GS thread's counter again about 1 600 records per vsync); the per-thread sampler had already
+    ended, so the clocks during it are not known. After it: thermal 0, battery 32 C, caps unchanged (3.07 / 3.51 GHz)
+    with the game closed. Quit game at 03:30:19 left no game process (the quit fix works; the process that lingered
+    after run 1 came from leaving without Quit game, and Play ended it).
+  - Run 4, profiled (developer: "profiler first"; 03:39:13-03:41:48, gamer pro mode): `simpleperf record --app ... -p
+    <game pid> -e cpu-clock -f 2000` from an on-phone script (the Wi-Fi link drops), 156 s, 296 214 samples, none
+    lost; symbolized on the PC with the NDK's host simpleperf and the unstripped `libps2EntryRunner.so` (`--symfs`).
+    The game's own clock (the `[fps]` lines) mapped onto the samples by the quit time; 38 seconds at 20-50 fps.
+    `GameThread` busy 88 % of each slow second (66 % at full speed); its cores 0-5, median 2.4 GHz, never above the
+    3.07 GHz cap: gamer pro mode did not raise it, and the thread never ran on cpu6-7 during a dip.
+    Where its time went in the slow seconds (full-speed seconds in brackets): game code 18 % (16), EE timer
+    bookkeeping + scheduler checkpoints 14 % (19; `PS2Memory::advanceEeTimers` alone 8-11 %), the IOP interpreter
+    16 % (13), C++ exception unwinding 5 % (12; `libunwind::findUnwindSectionsByPhdr` + the linker's
+    `dl_iterate_phdr`: something throws in the hot path), SPU2 mixing + time stretch 5 % (12), guest memory helpers
+    6 % (8), movie decoding 5 % (7), PLT stubs 4 % (4), VU1 JIT 3 % (0), VIF1/GIF 4 % (0), the rest about 9 %.
+- **Root cause:** the emulator's own overhead takes most of each frame on a core the phone runs at about 2.4 GHz; the
+  game's code is under a fifth of it. J's Bar's opening adds geometry and sound work, and the thread goes over 100 %.
+- **Next (proposed to the developer):** see the summary of options in the session; not built yet.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

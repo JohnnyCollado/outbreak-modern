@@ -35,4 +35,8 @@ namespace obui::android
 
 	// Internal (android_picker.cpp init): finds showMenu on the activity class and registers nativeMenuClosed.
 	bool InitMenu(JNIEnv* env, jclass activityClass);
+
+	// fast_unwind.cpp: turns on the quicker library lookup for C++ exception unwinding (once; InitMenu calls it,
+	// before the game runs).
+	void installFastUnwind();
 } // namespace obui::android

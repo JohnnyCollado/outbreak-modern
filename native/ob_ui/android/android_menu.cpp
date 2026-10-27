@@ -50,6 +50,7 @@ namespace obui::android
 
 	bool InitMenu(JNIEnv* env, jclass cls)
 	{
+		installFastUnwind(); // before the game's first thread switch (fast_unwind.cpp)
 		s_showMenu = env->GetMethodID(cls, "showMenu", "()V");
 		if (env->ExceptionCheck())
 		{

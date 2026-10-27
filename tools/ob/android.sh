@@ -49,6 +49,9 @@ NDKCMAKE=(-G Ninja "-DCMAKE_TOOLCHAIN_FILE=$TC" -DANDROID_ABI=arm64-v8a "-DANDRO
 # Release: a 140 s link per change) and no debug info: the NDK toolchain adds -g to every compile, which made the .so 604 MB before strip and its link
 # 237 s after a one-file change (report 2026-10-24 entry 5); -g0 after it wins. As Windows (no /Zi by default).
 RELFLAGS="-O3 -DNDEBUG -g0"
+# Calls between functions inside libps2EntryRunner.so go direct, not through its PLT (developer's OnePlus 13 profile,
+# 2026-10-27: PLT stubs were 4 % of the game thread); what the library exports is unchanged.
+SOLDFLAGS="-Wl,-Bsymbolic-functions"
 
 step_shaderc() {
     local log="$OB_LOGS/ob-android-shaderc.log" start rc z sum want
@@ -94,7 +97,8 @@ step_configure() {
     if [ -f "$OB_ANDROID_R/build.ninja" ] && grep -qxF "PS2X_EXTERNAL_GS_DIR:PATH=$egs" "$OB_ANDROID_R/CMakeCache.txt" &&
         grep -qxF "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=$RELFLAGS" "$OB_ANDROID_R/CMakeCache.txt" &&
         grep -qxF "OB_ADRENOTOOLS:PATH=$OB_ADRENOTOOLS" "$OB_ANDROID_R/CMakeCache.txt" &&
-        grep -qxF "PS2X_EXTERNAL_VU1_DIR:PATH=$evu" "$OB_ANDROID_R/CMakeCache.txt"; then
+        grep -qxF "PS2X_EXTERNAL_VU1_DIR:PATH=$evu" "$OB_ANDROID_R/CMakeCache.txt" &&
+        grep -qxF "CMAKE_SHARED_LINKER_FLAGS:STRING=$SOLDFLAGS" "$OB_ANDROID_R/CMakeCache.txt"; then
         echo "configure: $OB_ANDROID_R already configured"; return 0
     fi
     # raylib 5.5: the source the Windows tools tree already fetched (no second download); the Android build of it
@@ -102,7 +106,7 @@ step_configure() {
     # once into $OB_ROOT/android-fetch, then reused. PS2X_EXTERNAL_VU1_DIR: native/pcsx2_vu's Android branch builds
     # libob_a64vu.so (ARMSX2's ARM64 microVU, a dependency of ps2EntryRunner, not linked: dlopened at start-up).
     cmake -S "$OB_SRC" -B "$OB_ANDROID_R" "${NDKCMAKE[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=$RELFLAGS" \
-        "-DCMAKE_C_FLAGS_RELWITHDEBINFO=$RELFLAGS" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF \
+        "-DCMAKE_C_FLAGS_RELWITHDEBINFO=$RELFLAGS" "-DCMAKE_SHARED_LINKER_FLAGS=$SOLDFLAGS" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF \
         -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF \
         -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_ROOT/android-fetch" \
         "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=$OB_T/_deps/raylib-src" \
