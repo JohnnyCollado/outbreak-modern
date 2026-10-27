@@ -1,11 +1,11 @@
-From fbad8bd380988492156340342f1acc6eed4491c7 Mon Sep 17 00:00:00 2001
+From 263e7bb6370b3ada6dcb08bb47f89877c564ea10 Mon Sep 17 00:00:00 2001
 From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 22:30:28 -0400
-Subject: [PATCH] IOP: optional external DEV9 device (the 0x1000xxxx page and
- the revision register at their access widths, DMA 8 ended by the device, its
- interrupt INTC line 13, run with the IOP clock), dmacman slice DMA on channel
- 8 through it; runtime: PS2X_DEV9=pcsx2|off (default off) from the external
- library, PS2X_NET_IF, PS2X_NET_HOSTS
+Subject: [PATCH 87/92] IOP: optional external DEV9 device (the 0x1000xxxx page
+ and the revision register at their access widths, DMA 8 ended by the device,
+ its interrupt INTC line 13, run with the IOP clock), dmacman slice DMA on
+ channel 8 through it; runtime: PS2X_DEV9=pcsx2|off (default off) from the
+ external library, PS2X_NET_IF, PS2X_NET_HOSTS
 
 ---
  ps2xIOP/include/ps2x/iop/iop_dev9.h           | 48 +++++++++++
@@ -513,7 +513,7 @@ index 0000000..d5166fb
 +
 +#endif
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index 9fb4db9..9fd7120 100644
+index ae28ac5..2949fe7 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -9,6 +9,7 @@
@@ -553,7 +553,7 @@ index 9fb4db9..9fd7120 100644
  #endif
          m_iopSubsystem.reset();
          m_iopHost.reset();
-@@ -1078,6 +1087,51 @@ bool PS2Runtime::initialize(const char *title)
+@@ -1082,6 +1091,51 @@ bool PS2Runtime::initialize(const char *title)
          }
          else
              std::cout << "[sio2] off" << (sio2Mode == "off" ? "" : " (unknown PS2X_SIO2, pcsx2|off)") << std::endl;

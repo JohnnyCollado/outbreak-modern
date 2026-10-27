@@ -1,0 +1,167 @@
+From 7927804c91c69e742523e16030e48fbf25fc1699 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 06:08:06 -0400
+Subject: [PATCH 90/92] IOP: a module's start function gets (argc, argv) as
+ loadcore passes them (argv[0] = the module's name or path, then each
+ NUL-separated argument, argv[argc] = 0; the block stays allocated) instead of
+ (argument size, raw buffer); load and start are separate steps (startModule)
+
+---
+ ps2xIOP/src/emulator/iop_emulator.cpp | 71 +++++++++++++++++++++------
+ ps2xIOP/tests/iop_emulator_tests.cpp  | 42 ++++++++++++++++
+ 2 files changed, 97 insertions(+), 16 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 59117d2..c46b40b 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -933,6 +933,60 @@ namespace ps2x::iop::detail
+             }
+         }
+ 
++        // A module's start function gets (argc, argv) as loadcore passes them: argv[0] = the module's name or path,
++        // then each NUL-separated string of the argument block, argv[argc] = 0 (PCSX2 and Sony's loadcore; ps2sdk
++        // modules declare _start(int argc, char *argv[])). The block stays allocated: a module may keep argv pointers.
++        // Returns the start result; the module is resident on 0 (RESIDENT_END) or 2 (REMOVABLE_END).
++        int32_t startModule(int moduleId, const char *argv0, const void *arguments, uint32_t argumentSize)
++        {
++            const auto it = modules.find(moduleId);
++            if (it == modules.end())
++                return -1;
++            Module &module = it->second;
++            std::vector<std::string> args;
++            args.emplace_back(argv0 ? std::string(argv0) : module.path);
++            const auto *bytes = static_cast<const uint8_t *>(arguments);
++            for (uint32_t i = 0; bytes && i < argumentSize;)
++            {
++                uint32_t end = i;
++                while (end < argumentSize && bytes[end] != 0u)
++                    ++end;
++                if (end > i)
++                    args.emplace_back(reinterpret_cast<const char *>(bytes + i), end - i);
++                i = end + 1u;
++            }
++            uint32_t stringBytes = 0;
++            for (const std::string &a : args)
++                stringBytes += static_cast<uint32_t>(a.size()) + 1u;
++            const uint32_t argvBytes = static_cast<uint32_t>(args.size() + 1u) * 4u;
++            const uint32_t block = allocate(argvBytes + stringBytes, 16u);
++            uint32_t argv = 0u;
++            if (block)
++            {
++                argv = block;
++                uint32_t text = block + argvBytes;
++                for (size_t n = 0; n < args.size(); ++n)
++                {
++                    write32(argv + static_cast<uint32_t>(n) * 4u, text);
++                    writeRam(text, args[n].data(), args[n].size());
++                    write8(text + static_cast<uint32_t>(args[n].size()), 0u);
++                    text += static_cast<uint32_t>(args[n].size()) + 1u;
++                }
++                write32(argv + static_cast<uint32_t>(args.size()) * 4u, 0u);
++            }
++            if (args.size() > 1u)
++            {
++                std::string line = "[IOP] start " + module.name + " argc=" + std::to_string(args.size());
++                for (size_t n = 1; n < args.size(); ++n)
++                    line += " '" + args[n] + "'";
++                log(LogLevel::Info, line);
++            }
++            const uint32_t startResult =
++                callFunction(module.entry, block ? static_cast<uint32_t>(args.size()) : 0u, argv, 0u, 0u, module.gp);
++            module.resident = startResult == 0u || startResult == 2u;
++            return static_cast<int32_t>(startResult);
++        }
++
+         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
+         {
+             ModuleLoadResult result{true, -1, -1};
+@@ -959,24 +1013,9 @@ namespace ps2x::iop::detail
+             module.size = loaded.size;
+             module.entry = loaded.entry;
+             module.gp = loaded.gp;
+-
+-            uint32_t args = 0u;
+-            if (arguments && argumentSize)
+-            {
+-                args = allocate(argumentSize + 1u, 16u);
+-                if (args)
+-                {
+-                    writeRam(args, arguments, argumentSize);
+-                    write8(args + argumentSize, 0u);
+-                }
+-            }
+-            const uint32_t startResult = callFunction(module.entry, argumentSize, args, 0u, 0u, module.gp);
+-            if (args)
+-                freeAllocation(args);
+-            module.resident = startResult == 0u || startResult == 2u;
+             result.moduleId = module.id;
+-            result.startResult = static_cast<int32_t>(startResult);
+             modules[module.id] = std::move(module);
++            result.startResult = startModule(result.moduleId, nullptr, arguments, argumentSize);
+ 
+             std::ostringstream out;
+             out << "[IOP] loaded IRX id=" << result.moduleId
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 60d3c27..a5845e7 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -189,6 +189,37 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
+     }
+ 
++    // A module whose start returns (argc << 8) | argv[1][0] | (argv[0][0] << 16): the (argc, argv) loadcore passes.
++    void writeArgvIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00011000u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        const uint32_t code[] = {
++            0x8CA80004u, // lw   t0, 4(a1)      argv[1]
++            0x8CAA0000u, // lw   t2, 0(a1)      argv[0]
++            0x91090000u, // lbu  t1, 0(t0)
++            0x914B0000u, // lbu  t3, 0(t2)
++            0x00041200u, // sll  v0, a0, 8
++            0x00491021u, // addu v0, v0, t1
++            0x000B5C00u, // sll  t3, t3, 16
++            0x03E00008u, // jr   ra
++            0x004B1021u, // addu v0, v0, t3     (delay slot)
++        };
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = sizeof(code); program.memsz = sizeof(code); program.flags = 5u; program.align = 4u;
++        std::memset(host.guest.data() + address, 0, codeOffset + sizeof(code));
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
++    }
++
+     // writeMinimalIrx's module with a .iopmod header naming it.
+     void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name)
+     {
+@@ -1615,6 +1646,17 @@ int main()
+                     "sceSetSliceDMA + sceStartDMA must start DMA 11 with ps2sdk's MADR/BCR/CHCR")) return 1;
+     }
+ 
++    {
++        // A module's start gets (argc, argv) as loadcore passes them: argv[0] = its name, then each argument.
++        writeArgvIrx(host, 0x800u);
++        const char args[] = "xy\0z"; // two arguments: "xy", "z"
++        const ModuleLoadResult started = iop.loadModuleBuffer(0x800u, args, sizeof(args));
++        if (!expect(started.handled && ((started.startResult >> 8) & 0xFF) == 3 && (started.startResult & 0xFF) == 'x',
++                    "module start must get argc = 3 and argv[1] = the first argument")) return 1;
++        if (!expect(((started.startResult >> 16) & 0xFF) == 'b',
++                    "module start must get argv[0] = the module's name (buffer@0x800)")) return 1;
++    }
++
+     {
+         // External DEV9 device (network adapter): the 0x1000xxxx page at every width and the revision register
+         // (8/16-bit) go to it unsplit, DMA 8 hands it the transfer and waits for its DMA event, and the emulator runs
+-- 
+2.46.2.windows.1
+

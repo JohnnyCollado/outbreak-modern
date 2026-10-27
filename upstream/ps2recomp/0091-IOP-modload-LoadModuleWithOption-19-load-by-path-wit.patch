@@ -1,0 +1,233 @@
+From 811da28193114c9e065eed4c4e2b08409d1fc7ee Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 06:18:56 -0400
+Subject: [PATCH 91/92] IOP: modload LoadModuleWithOption (19: load by path
+ without starting; the option's position/access bytes ignored) and StartModule
+ (8: start with (argc, argv) from name and the NUL-separated args, *result =
+ the start result), for a module that loads another (Capcom's LOADHIGH.IRX in
+ Resident Evil Outbreak's network stack)
+
+---
+ ps2xIOP/src/emulator/iop_emulator.cpp | 70 +++++++++++++++++++--
+ ps2xIOP/tests/iop_emulator_tests.cpp  | 88 ++++++++++++++++++++++++++-
+ 2 files changed, 150 insertions(+), 8 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index c46b40b..526925e 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -402,6 +402,57 @@ namespace ps2x::iop::detail
+                     break;
+                 }
+             }
++            if (iequals(call.library, "modload") && (call.ordinal == 19u || call.ordinal == 8u))
++            {
++                // A module loading another (modload 1.6, e.g. Capcom's LOADHIGH.IRX for its network stack):
++                //   19 LoadModuleWithOption(path, option): load, don't start; the option's position/access bytes
++                //      (high/low memory) don't matter here (one module arena). Returns the module id or < 0.
++                //   8  StartModule(id, name, arglen, args, int *result): start it with (argc, argv) built from
++                //      name (argv[0], else its path) and the NUL-separated args; *result = its start result.
++                //      Returns the id, or < 0.
++                auto readString = [&](uint32_t address) {
++                    std::string text;
++                    for (uint32_t i = 0; address && i < 256u; ++i)
++                    {
++                        const char c = static_cast<char>(memory.read8(address + i));
++                        if (c == '\0')
++                            break;
++                        text.push_back(c);
++                    }
++                    return text;
++                };
++                if (call.ordinal == 19u)
++                {
++                    const std::string path = readString(a0);
++                    std::vector<uint8_t> image;
++                    const int id = IopModuleLoader::readWholeHostFile(host, path, image) ? loadImageOnly(path, image) : -1;
++                    log(id >= 0 ? LogLevel::Info : LogLevel::Warning,
++                        "[IOP] modload LoadModuleWithOption '" + path + "' -> " + std::to_string(id));
++                    setV0(static_cast<uint32_t>(id >= 0 ? id : -200)); // -200 = KE_LINKERR-style failure
++                    return ImportDisposition::Handled;
++                }
++                const int id = static_cast<int>(a0);
++                const std::string name = readString(a1);
++                std::vector<uint8_t> args(a2 <= 0x10000u ? a2 : 0u);
++                if (!args.empty() && !memory.readRam(a3, args.data(), args.size()))
++                    args.clear(); // arguments outside IOP RAM: start with none
++                const uint32_t resultAddress = memory.read32(cpu.gpr[29] + 16u);
++                if (modules.find(id) == modules.end())
++                {
++                    setV0(static_cast<uint32_t>(-202)); // unknown module id
++                    return ImportDisposition::Handled;
++                }
++                const int32_t started = startModule(id, name.empty() ? nullptr : name.c_str(), args.data(),
++                                                    static_cast<uint32_t>(args.size()));
++                if (resultAddress)
++                    write32(resultAddress, static_cast<uint32_t>(started));
++                std::ostringstream out;
++                out << "[IOP] loaded IRX id=" << id << " entry=0x" << std::hex << modules[id].entry << " base=0x"
++                    << modules[id].base << " start=" << std::dec << started << " (StartModule)";
++                log(LogLevel::Info, out.str());
++                setV0(static_cast<uint32_t>(id));
++                return ImportDisposition::Handled;
++            }
+             if (iequals(call.library, "modload") && call.ordinal == 13u)
+             {
+                 checkKelfPathCallback = {a0, cpu.gpr[28]};
+@@ -987,9 +1038,9 @@ namespace ps2x::iop::detail
+             return static_cast<int32_t>(startResult);
+         }
+ 
+-        ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
++        // Places an IRX in IOP memory and registers it, without starting it. Returns its module id, or -1.
++        int loadImageOnly(std::string path, std::span<const uint8_t> image)
+         {
+-            ModuleLoadResult result{true, -1, -1};
+             const IopImageLoadResult loaded = IopModuleLoader::load(image, memory, moduleCursor);
+             moduleCursor = loaded.nextModuleCursor;
+             if (!loaded)
+@@ -998,7 +1049,7 @@ namespace ps2x::iop::detail
+                     log(LogLevel::Error, "[IOP] rejected invalid/non-MIPS IRX ELF");
+                 else if (loaded.error == IopImageLoadError::ArenaExhausted)
+                     log(LogLevel::Error, "[IOP] module arena exhausted");
+-                return result;
++                return -1;
+             }
+             if (!loaded.relocationsComplete)
+                 log(LogLevel::Warning, "[IOP] one or more IRX relocations were unsupported");
+@@ -1013,8 +1064,17 @@ namespace ps2x::iop::detail
+             module.size = loaded.size;
+             module.entry = loaded.entry;
+             module.gp = loaded.gp;
+-            result.moduleId = module.id;
+-            modules[module.id] = std::move(module);
++            const int id = module.id;
++            modules[id] = std::move(module);
++            return id;
++        }
++
++        ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
++        {
++            ModuleLoadResult result{true, -1, -1};
++            result.moduleId = loadImageOnly(std::move(path), image);
++            if (result.moduleId < 0)
++                return result;
+             result.startResult = startModule(result.moduleId, nullptr, arguments, argumentSize);
+ 
+             std::ostringstream out;
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index a5845e7..5dafb5d 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -71,9 +71,33 @@ namespace
+             return kind == HostPathKind::CdRoot ? cdRoot : std::string{};
+         }
+         std::string translateGuestPath(std::string_view path) const override { return std::string(path); }
+-        uint64_t openHostFile(std::string_view) override { return 0u; }
+-        bool hostFileSize(uint64_t, uint64_t &) const override { return false; }
+-        bool readHostFile(uint64_t, uint64_t, void *, size_t, size_t &) override { return false; }
++        // Host files: `files` by exact path; handle = index + 1 into openFiles.
++        uint64_t openHostFile(std::string_view path) override
++        {
++            const auto it = files.find(std::string(path));
++            if (it == files.end())
++                return 0u;
++            openFiles.push_back(&it->second);
++            return openFiles.size();
++        }
++        bool hostFileSize(uint64_t handle, uint64_t &size) const override
++        {
++            if (handle == 0u || handle > openFiles.size())
++                return false;
++            size = openFiles[handle - 1u]->size();
++            return true;
++        }
++        bool readHostFile(uint64_t handle, uint64_t offset, void *destination, size_t size, size_t &read) override
++        {
++            if (handle == 0u || handle > openFiles.size() || offset > openFiles[handle - 1u]->size())
++                return false;
++            const std::vector<uint8_t> &file = *openFiles[handle - 1u];
++            read = std::min<size_t>(size, file.size() - static_cast<size_t>(offset));
++            std::memcpy(destination, file.data() + offset, read);
++            return true;
++        }
++        std::unordered_map<std::string, std::vector<uint8_t>> files;
++        std::vector<const std::vector<uint8_t> *> openFiles;
+         void closeHostFile(uint64_t) override {}
+         int32_t memoryCard(const MemoryCardRequest &) override { return 0; }
+         bool hasGuestFunction(uint32_t) const override { return false; }
+@@ -220,6 +244,55 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
+     }
+ 
++    // A module loading another as LOADHIGH.IRX does: LoadModuleWithOption("argv.irx", &option) (modload 19), then
++    // StartModule(id, NULL, 3, "xy", &result) (modload 8); returns result.
++    void writeLoadHighIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00013000u;
++        constexpr uint32_t tableAddress = loadAddress + 0x80u;
++        constexpr uint32_t stub8 = tableAddress + 20u;
++        constexpr uint32_t stub19 = stub8 + 8u;
++        constexpr uint32_t pathAddress = loadAddress + 0xC0u;
++        constexpr uint32_t argsAddress = loadAddress + 0xD0u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x100u; program.memsz = 0x100u; program.flags = 7u; program.align = 4u;
++        const uint32_t code[] = {
++            0x27BDFFD0u, 0xAFBF0028u,                                   // addiu sp,-48; sw ra,40(sp)
++            0x3C040000u | (pathAddress >> 16), 0x24840000u | (pathAddress & 0xFFFFu), // a0 = path
++            0x0C000000u | ((stub19 >> 2) & 0x03FFFFFFu), 0x27A50018u,   // jal LoadModuleWithOption; a1 = sp+24
++            0x00402025u,                                                // a0 = v0 (module id)
++            0x00002825u, 0x24060003u,                                   // a1 = NULL; a2 = 3
++            0x3C070000u | (argsAddress >> 16), 0x24E70000u | (argsAddress & 0xFFFFu), // a3 = args
++            0x27A80020u, 0xAFA80010u,                                   // t0 = sp+32; sw t0,16(sp)
++            0x0C000000u | ((stub8 >> 2) & 0x03FFFFFFu), 0x00000000u,    // jal StartModule
++            0x8FA20020u, 0x00000000u,                                   // lw v0,32(sp) (+ load delay)
++            0x8FBF0028u, 0x00000000u,                                   // lw ra,40(sp) (+ load delay: R3000)
++            0x03E00008u, 0x27BD0030u,                                   // jr ra; addiu sp,48
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000106u,
++            0x6C646F6Du, 0x0064616Fu, // "modload"
++            0x03E00008u, 0x24000008u, // 8 StartModule
++            0x03E00008u, 0x24000013u, // 19 LoadModuleWithOption
++            0u, 0u,
++        };
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
++        std::memcpy(host.guest.data() + address + codeOffset + 0x80u, imports, sizeof(imports));
++        std::memcpy(host.guest.data() + address + codeOffset + 0xC0u, "argv.irx", 9);
++        std::memcpy(host.guest.data() + address + codeOffset + 0xD0u, "xy", 3);
++    }
++
+     // writeMinimalIrx's module with a .iopmod header naming it.
+     void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name)
+     {
+@@ -1655,6 +1728,15 @@ int main()
+                     "module start must get argc = 3 and argv[1] = the first argument")) return 1;
+         if (!expect(((started.startResult >> 16) & 0xFF) == 'b',
+                     "module start must get argv[0] = the module's name (buffer@0x800)")) return 1;
++
++        // A module loading another through modload 19 + 8 (Capcom's LOADHIGH.IRX for its network stack).
++        writeArgvIrx(host, 0xA00u);
++        host.files["argv.irx"].assign(host.guest.begin() + 0xA00, host.guest.begin() + 0xA00 + 0x200);
++        writeLoadHighIrx(host, 0xC00u);
++        const ModuleLoadResult loader = iop.loadModuleBuffer(0xC00u);
++        if (!expect(loader.handled && loader.startResult == (('a' << 16) | (2 << 8) | 'x'),
++                    "LoadModuleWithOption + StartModule must load a module by path and start it with (argc, argv)"))
++            return 1;
+     }
+ 
+     {
+-- 
+2.46.2.windows.1
+

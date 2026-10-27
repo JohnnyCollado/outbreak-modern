@@ -1,7 +1,7 @@
-From 945beccce468d1f2f85198e53630a0d773c78730 Mon Sep 17 00:00:00 2001
+From ec5ddf496fb1928c1c3c6efc1534e91416b613a8 Mon Sep 17 00:00:00 2001
 From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 01:46:59 -0400
-Subject: [PATCH 82/83] Recompiler: a generated function source declares the
+Subject: [PATCH 88/92] Recompiler: a generated function source declares the
  recompiled functions and stubs it calls itself (every call is
  <name>_0x<addr>(rdram)) instead of including the module-wide function and
  stub headers, and the runner's PCH no longer holds those headers, so a change

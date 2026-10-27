@@ -273,7 +273,7 @@ Read in `C:\ob\splat\SLPM_654.28\en\main\text.s` and the overlays; [seen] = read
 - **Optional, not required.** With a network adapter the boot (0x1BB420) loads DEV9/ATAD/HDD/PFS, asks
   `sceDevctl("hdd0:", 0x4807)` (drive status) and tries `sceMount("pfs0:", "hdd0:PP.SLPM-65428..NETBIO,…")`. Only a
   status of **3 (no drive)** continues from DVD with no message; a negative error means "drive present, not
-  installed" [seen: 0x1BBA60 table]. PS2Recomp 0083 answers 3.
+  installed" [seen: 0x1BBA60 table]. PS2Recomp 0089 answers 3.
 - **What an install copies:** one file, the disc's `NETBIO00.DAT` (904,636,416 bytes) to `pfs0:netbio00.dat`, plus a
   PS2 browser icon and jacket images (`pfs0:/res/…`). NETBIO01/02 stay on the disc [seen].
 - **How it is used:** if mounted and the HDD copy's size equals the disc's (the only check found), the loader's

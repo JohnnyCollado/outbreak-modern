@@ -1,7 +1,7 @@
-From a1d57afe8f0a2f3292e01252a057c5a65aa39871 Mon Sep 17 00:00:00 2001
+From 0f79d7eae74dcf58b8301f915eeb1714b4d69962 Mon Sep 17 00:00:00 2001
 From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 01:46:59 -0400
-Subject: [PATCH 83/83] Runtime HLE: sceDevctl and sceMount answer as a PS2
+Subject: [PATCH 89/92] Runtime HLE: sceDevctl and sceMount answer as a PS2
  with no hard disk drive (hdd0: HDIOC_STATUS 0x4807 = 3, other HDD commands
  and mounts -19, dev9x:/pfs:/cdrom0: 0), instead of the game's code calling
  the IOP file service over an RPC client sceFsInit's HLE never binds

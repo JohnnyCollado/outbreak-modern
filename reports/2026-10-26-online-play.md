@@ -120,19 +120,19 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   ps2sdk `intrman.h`, from memory, not opened), so channel 8 = 0x29, 11 = 0x2C, 12 = 0x2D; 0071 uses 0x20 + channel
   (0x2B/0x2C).
 - **Effect:** none seen (memory cards work); sio2man probably doesn't wait on those interrupts.
-- **Action:** 0081 uses 0x29 for DEV9; 0071 left as is, noted here. Check against ps2sdk before changing it.
+- **Action:** 0087 uses 0x29 for DEV9; 0071 left as is, noted here. Check against ps2sdk before changing it.
 
 ### 11. A stub-list change rebuilt half the runner (21 minutes)
 
 - **Seen:** dropping one stub (entry 9) rebuilt 454 of 871 unity batches, 1,271 s; "headers: copied 1".
 - **Found by:** every generated function file included the module-wide `*_recompiled_functions.h` (5,369 lines) and
   `*_recompiled_stubs.h`; the unity batches are alphabetical, so main-ELF files sit in most batches.
-- **First fix, not enough:** PS2Recomp 0082's generator change (each file declares the functions it calls: calls are
+- **First fix, not enough:** PS2Recomp 0088's generator change (each file declares the functions it calls: calls are
   always `<name>_0x<addr>(rdram`; `branch_taken_0x…` locals are not functions, 99,711 of them, so matching on the
   call form matters). The same stub change still rebuilt 454 batches, 1,265 s.
 - **Cause:** the runner's precompiled header (`ps2xRuntime/CMakeLists.txt`, `PS2X_RUNNER_PCH_HEADERS`) also held
   both generated headers, so any change to them rebuilt every batch using the PCH.
-- **Fix:** 0082 also drops them from the PCH (only the registration files include them now, directly). Folded into
+- **Fix:** 0088 also drops them from the PCH (only the registration files include them now, directly). Folded into
   the same patch (amended in `C:\ob\net-up`, no interactive rebase).
 - **Evidence:** ps2x 557/557 with, 554/557 without. Measured (`.run/spike/net-measure.sh`, `_sceFsSemInit` stub on/off):
   after the PCH change's own full build (405 batches, 1,319 s), the first stub change still rebuilt 454 batches
@@ -148,7 +148,7 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Found by:** reading the game's sceDevctl (0x11B0E0-0x11B184: semaphore, RPC 0x17, wait) and its HDD check
   (0x1BB420, decision table 0x1BBA60; research 7.5): only status 3 ("no drive") continues silently; a negative error
   means "drive present".
-- **Fix:** PS2Recomp 0083: `sceDevctl` and `sceMount` as runtime HLE (`hdd*` 0x4807 = 3, other HDD commands and
+- **Fix:** PS2Recomp 0089: `sceDevctl` and `sceMount` as runtime HLE (`hdd*` 0x4807 = 3, other HDD commands and
   mounts -19, `dev9x:`/`pfs:`/`cdrom0:` 0); the analyzer makes them stubs because they are in `ps2_call_list.h`.
 - **Evidence:** adapter-on boot, 90 s: `[fileio] sceDevctl("hdd0:", 0x4807) = 3`, `sceMount(...) = -19 (no HDD)`,
   then USBD/USBKB load (17 modules) and the same disc files and overlays as single player; ps2x 558/558.
@@ -172,7 +172,7 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 
 - **Seen:** the rebuild for the DNAS patch copied 14,273 changed sources and took 1,288 s.
 - **Cause:** `.run/spike/net-env.sh` did not set `OB_T`, so `net-recompile.sh` used `C:\ob\t`'s analyzer and
-  recompiler (built before 0082/0083): every file got the old includes back, and `sceDevctl`/`sceMount` were not
+  recompiler (built before 0088/0089): every file got the old includes back, and `sceDevctl`/`sceMount` were not
   stubbed (the old analyzer doesn't know them).
 - **Fix:** `OB_T=C:/ob/net-t` in `net-env.sh`; rebuilt (one more full build, back to the new form).
 - **Take-away:** one environment file for every build of a line of work, including the tools tree.
@@ -221,11 +221,11 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 
 - S0.1-S0.3 done (research 7.4; plan P4 result).
 - S1 done: `native/pcsx2_dev9` builds; tests 15/15 (DHCP offer with address and DNS server, INTC 13 on receive,
-  DNS host override, DMA 8 refusal). S2 patch done: PS2Recomp 0081 (provisional number), IOP tests 5/5 suites; the
+  DNS host override, DMA 8 refusal). S2 patch done: PS2Recomp 0087 (renumbered from 0081 at the rebase onto main), IOP tests 5/5 suites; the
   runner with `PS2X_DEV9=pcsx2` finds the adapter ("dev9: CXD9611 detected").
 - Done: the boot's HDD check with an adapter (entry 12). Next: the network menu (S3). The gate not yet run in the
   net trees; ps2x 558/558 in `C:\ob\net-t`.
-- Build defect (entry 11): fixed by 0082; a stub change now rebuilds 2 batches in ~4 min (was 454, 21 min).
+- Build defect (entry 11): fixed by 0088; a stub change now rebuilds 2 batches in ~4 min (was 454, 21 min).
 - Reference decided (developer, 2026-10-27): the fan server's source is read, nothing installed (option B); spec in
   `research/2026-10-27-lobby-protocol.md`, design `docs/plans/2026-10-27-ob-server.md` (approved).
 - ob_server step A done: `native/ob_server` (packet header, lobby/relay stream splitting, string scrambling, session
