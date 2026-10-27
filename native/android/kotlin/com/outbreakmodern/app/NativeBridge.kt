@@ -30,4 +30,12 @@ object NativeBridge {
     @JvmStatic external fun widescreenEnabled(dir: String): Boolean
     /** 16:9 enables one (the player's own first) or writes ob-widescreen.pnach; 4:3 disables all. "" = done. */
     @JvmStatic external fun setWidescreen(dir: String, on: Boolean): String
+
+    // The touch controls (TouchOverlay; native/ob_ui/core/touch_pad.h): what the fingers hold, merged into the first
+    // pad at the game's next read. pressed = PS2 button bits (1 = held); sticks 0..255, 0x80 = centre.
+    @JvmStatic external fun touchPad(pressed: Int, rx: Int, ry: Int, lx: Int, ly: Int)
+    /** The game's pad reads with a controller or keyboard in use, since start (wraps): the overlay hides while it rises. */
+    @JvmStatic external fun physicalPadReads(): Int
+    /** Opens the in-game menu, as the Back button does. */
+    @JvmStatic external fun requestMenu()
 }

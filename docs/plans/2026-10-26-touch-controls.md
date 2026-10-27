@@ -4,6 +4,9 @@
 - **Status:** design final (developer, 2026-10-26: "This looks great. Finalize the design"), nothing built. One last
   update follows after research into the current state of the user controls (`input.ini`, the settings menu's
   Controls tab, the Android input path); that research waits for the developer's go.
+- **Built 2026-10-26** on branch `android-touch-controls` for the Classic camera (all of T1-T14 except the Modern
+  layout, T7 and T9, which waits for the Modern camera); awaiting the developer's device test. How it is wired:
+  `docs/ops/android.md` "Touch controls"; report `reports/2026-10-26-touch-controls.md`.
 - **Revised 2026-10-26:** the developer found that the left stick gives directional movement in the Classic camera
   too, and that aiming returns to tank-style aiming. Changed: T5, T6, 4.1, 4.3, 4.5, section 5; added T13, T14.
 - **Mockups:** shown in the Claude Code session of 2026-10-26 (v1 full overlay, v2 tank pad + minimal set, v3 Modern

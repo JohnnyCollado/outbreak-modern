@@ -37,6 +37,8 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
     val driverChanged get() = settings.get("gpu_driver", "system") != driverAtStart
     var inputChanged = false
     var settingsChanged = false
+    /** In game: opens the touch controls' Edit layout over the held game (OutbreakActivity). */
+    var editTouchLayout: (() -> Unit)? = null
 
     // The game disc (launcher).
     var disc by mutableStateOf(DiscCheck.NONE)
@@ -389,7 +391,63 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
                 note("Defaults restored")
             }))
         }
+        touchRows(rows)
         return SPage("Controls", rows)
+    }
+
+    // ---- touch controls (docs/plans/2026-10-26-touch-controls.md section 4.5; the overlay reads them as the menu
+    // closes: TouchOverlay.reload) ----
+    private fun touchRows(rows: MutableList<SRow>) {
+        val t = TouchSettings.load { k, d -> settings.ui(k, d) }
+        fun onOff(key: String, on: Boolean, what: String) {
+            settings.setUi(key, if (on) "on" else "off")
+            note("Saved: $what")
+        }
+        rows += SRow.Header("h-touch", "Touch controls")
+        rows += SRow.Choice("touch", "Show touch controls", listOf("Auto", "On", "Off"), t.show.ordinal) {
+            settings.setUi("touch", listOf("auto", "on", "off")[it])
+            note("Saved: touch controls")
+        }
+        rows += SRow.Info("touch-hint", when (t.show) {
+            TouchShow.AUTO -> "Auto: hidden while a controller is in use, back on the next touch."
+            TouchShow.ON -> "Always shown, even with a controller."
+            TouchShow.OFF -> "Never shown. For controller players and handhelds."
+        }, Tone.MUTED)
+        if (t.show == TouchShow.OFF) return
+        rows += SRow.Choice("touch_buttons", "Buttons", listOf("Minimal", "Full"), if (t.minimal) 0 else 1) {
+            settings.setUi("touch_buttons", if (it == 0) "minimal" else "full")
+            note("Saved: touch buttons")
+        }
+        rows += SRow.Choice("touch_move", "Movement", listOf("Directional", "Tank"), if (t.directional) 0 else 1) {
+            settings.setUi("touch_move", if (it == 0) "directional" else "tank")
+            note("Saved: touch movement")
+        }
+        rows += SRow.Info("touch-move-hint", if (t.directional) "Push where she should go on screen, as the game's left stick. Double tap = quick turn."
+            else "Tank controls, as the game's D-pad: forward, back, turn. Flick back = quick turn.", Tone.MUTED)
+        if (!t.directional) {
+            rows += SRow.Slider("touch_forward_zone", "Straight-ahead zone", t.forwardZone, 8, 40, 1, "°") {
+                settings.setUi("touch_forward_zone", it.toString())
+                bump()
+            }
+            rows += SRow.Slider("touch_steer_zone", "Steer-while-moving zone", t.steerZone, 15, 70, 1, "°") {
+                settings.setUi("touch_steer_zone", it.toString())
+                bump()
+            }
+        }
+        rows += SRow.Toggle("touch_run_edge", "Run at the stick's edge", t.runEdge) { onOff("touch_run_edge", it, "run at the edge") }
+        rows += SRow.Toggle("touch_quick_turn", "Quick turn gesture", t.quickTurn) { onOff("touch_quick_turn", it, "quick turn gesture") }
+        rows += SRow.Slider("touch_scale", "Size", t.scale, 60, 160, 5, "%") {
+            settings.setUi("touch_scale", it.toString())
+            bump()
+        }
+        rows += SRow.Slider("touch_opacity", "Opacity", t.opacity, 10, 100, 5, "%") {
+            settings.setUi("touch_opacity", it.toString())
+            bump()
+        }
+        rows += SRow.Toggle("touch_vibrate", "Vibrate on press", t.vibrate) { onOff("touch_vibrate", it, "vibrate on press") }
+        val edit = editTouchLayout
+        if (edit != null) rows += SRow.Action("touch-edit", "Edit layout", "over the game") { edit() }
+        else rows += SRow.Action("touch-edit", "Edit layout", "in game: menu > Controls", enabled = false) {}
     }
 
     private fun cameraPage(): SPage = SPage("Camera", listOf(

@@ -20,6 +20,7 @@
 #include "memory_card.h"
 #include "widescreen.h"
 #include "menu_trigger.h"
+#include "touch_pad.h"
 
 #include "ob_gs_bridge.h"
 
@@ -2617,6 +2618,9 @@ namespace obui
 			}
 			if (s->kotlinMenu)
 				return 1; // open: hold the game (a toggle while open is Kotlin's to handle)
+			// The touch controls' Menu > Settings (TouchOverlay): the same as the Back button.
+			if (obui::android::takeMenuRequest() && !s->menuOpen)
+				open = true;
 			if (open && !s->menuOpen && obui::android::showMenu())
 			{
 				s->kotlinMenu = true;
@@ -2667,10 +2671,14 @@ namespace obui
 		return s->menuOpen ? 1 : 0;
 	}
 
-	uint16_t filterPad(int, uint16_t buttons, uint8_t sticks[4], double now)
+	uint16_t filterPad(int port, uint16_t buttons, uint8_t sticks[4], double now)
 	{
 		if (!s)
 			return buttons;
+		// The touch controls (Android overlay, core/touch_pad.h) play as part of the first pad; merged first, so the
+		// menu's gate below hides them too while it is open and after it closes.
+		if (port == 0)
+			buttons = obui::touchPad().merge(buttons, sticks);
 		if (s->trigger.menuOpen())
 			for (int i = 0; i < 4; i++)
 				sticks[i] = 0x80;

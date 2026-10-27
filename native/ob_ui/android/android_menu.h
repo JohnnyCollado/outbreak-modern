@@ -4,7 +4,8 @@
 //
 // Also here: the JNI functions the Kotlin launcher (LauncherActivity, before the game) calls through
 // com.outbreakmodern.app.NativeBridge: the ini editor, the disc check and the card reader of native/ob_ui/core, so
-// Android and Windows share one implementation of each. NativeBridge loads libps2EntryRunner.so with
+// Android and Windows share one implementation of each; and the touch controls' pad (core/touch_pad.h: touchPad,
+// physicalPadReads, requestMenu; docs/plans/2026-10-26-touch-controls.md). NativeBridge loads libps2EntryRunner.so with
 // System.loadLibrary, so these are found by their Java_* names.
 #pragma once
 
@@ -26,6 +27,11 @@ namespace obui::android
 		bool closed = false, quit = false, inputChanged = false, settingsChanged = false;
 	};
 	MenuClose takeMenuClose();
+
+	// True once after the touch controls asked for the menu (NativeBridge.requestMenu: the overlay's Menu > Settings);
+	// main thread, read by hostFrame, which opens it as the Back button does.
+	bool takeMenuRequest();
+	void requestMenuFromTouch(); // any thread (JNI)
 
 	// Internal (android_picker.cpp init): finds showMenu on the activity class and registers nativeMenuClosed.
 	bool InitMenu(JNIEnv* env, jclass activityClass);

@@ -5,11 +5,14 @@
 //   game, not a disc image, no file), an extracted folder and a bare ELF;
 // - menu trigger: F1/Esc, the Back+Start combo after 1 s, hold-back of a lone Start, a combo hidden from the game,
 //   a late tap, the pad gate while open and after closing;
-// - memory cards: unformatted, a formatted card with one save, transfer never overwrites, backups keep N.
+// - memory cards: unformatted, a formatted card with one save, transfer never overwrites, backups keep N;
+// - touch pad: touch buttons press on top of the host pad, a pushed touch stick wins, a centred one leaves the
+//   physical stick, physical use is counted (buttons, a stick past its threshold) and touch alone is not.
 #include "disc_check.h"
 #include "ini_file.h"
 #include "memory_card.h"
 #include "menu_trigger.h"
+#include "touch_pad.h"
 #include "widescreen.h"
 
 #include <cstdio>
@@ -505,6 +508,46 @@ static void WidescreenTests()
 		"widescreen: file test by name or content");
 }
 
+static void TouchTests()
+{
+	obui::TouchPad t;
+	uint8_t sticks[4] = {0x80, 0x80, 0x80, 0x80};
+	Check(t.merge(0xFFFFu, sticks) == 0xFFFFu && t.physicalReads() == 0, "touch: idle passes, no physical use");
+
+	// Cross (0x4000) held by touch, Circle (0x2000) by the controller: both reach the game.
+	const uint8_t centre[4] = {0x80, 0x80, 0x80, 0x80};
+	t.set(0x4000u, centre);
+	const uint16_t both = t.merge(static_cast<uint16_t>(~0x2000u), sticks);
+	Check((both & 0x6000u) == 0 && (both | 0x6000u) == 0xFFFFu, "touch: touch and pad buttons both down, nothing else");
+	Check(t.physicalReads() == 1, "touch: a held pad button counts as physical use");
+
+	// Touch alone is not physical use.
+	t.merge(0xFFFFu, sticks);
+	Check(t.physicalReads() == 1, "touch: touch alone is not physical use");
+
+	// A pushed touch left stick axis (byte 2) replaces the pad's; a centred touch axis leaves the pad's.
+	const uint8_t left[4] = {0x80, 0x80, 0xFF, 0x80};
+	t.set(0, left);
+	uint8_t s2[4] = {0x10, 0x80, 0x80, 0x90};
+	t.merge(0xFFFFu, s2);
+	Check(s2[2] == 0xFF && s2[3] == 0x90, "touch: pushed axis wins, centred axis keeps the pad's");
+	Check(s2[0] == 0x10, "touch: the pad's right stick passes while touch leaves it centred");
+	Check(t.physicalReads() == 2, "touch: a pad stick past the threshold counts as physical use");
+
+	// A small touch offset (within kTouchStick) is centre; a small pad drift is not use.
+	const uint8_t nudge[4] = {0x80, 0x80, 0x85, 0x80};
+	t.set(0, nudge);
+	uint8_t s3[4] = {0x80, 0x80, 0x90, 0x80};
+	t.merge(0xFFFFu, s3);
+	Check(s3[2] == 0x90 && t.physicalReads() == 2, "touch: small touch offset ignored, small pad drift not counted");
+
+	// clear() lets everything go.
+	t.set(0xFFFFu, left);
+	t.clear();
+	uint8_t s4[4] = {0x80, 0x80, 0x80, 0x80};
+	Check(t.merge(0xFFFFu, s4) == 0xFFFFu && s4[2] == 0x80, "touch: clear releases buttons and sticks");
+}
+
 int main()
 {
 	IniTests();
@@ -512,6 +555,7 @@ int main()
 	TriggerTests();
 	CardTests();
 	WidescreenTests();
+	TouchTests();
 	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

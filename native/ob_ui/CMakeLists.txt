@@ -1,11 +1,13 @@
 # The settings menu (docs/plans/2026-10-26-settings-menu.md), included by native/pcsx2_gs/CMakeLists.txt.
-# ob_ui_core: the platform-free part (ini editing, the disc check, the menu trigger, memory card reading), std only, so
+# ob_ui_core: the platform-free part (ini editing, the disc check, the menu trigger, memory card reading, the touch
+# controls' pad), std only, so
 # it builds and tests without PCSX2 or the runtime.
 add_library(ob_ui_core STATIC
     core/ini_file.cpp
     core/disc_check.cpp
     core/menu_trigger.cpp
     core/memory_card.cpp
+    core/touch_pad.cpp
     core/widescreen.cpp)
 target_include_directories(ob_ui_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
 if(MSVC)

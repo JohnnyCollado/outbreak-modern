@@ -160,13 +160,21 @@ step_package() {
             -dname "CN=Android Debug,O=Android,C=US"
         (cd "$REPO/native/android" && JAVA_HOME="$jdk" ANDROID_HOME="$OB_ANDROID_SDK" ./gradlew --console=plain \
             "-PobStage=$(cygpath -m "$st")" "-PobBuildDir=$(cygpath -m "$gb")" "-PobKeystore=$(cygpath -m "$KEYS/debug.keystore")" \
-            assembleDebug) &&
+            testDebugUnitTest assembleDebug) &&
         cp "$gb/outputs/apk/debug/outbreak-modern-debug.apk" "$APK_DIR/outbreak-modern.apk" &&
         PATH="$OB_JDK/bin:$PATH" cmd //c "$(cygpath -w "$OB_ANDROID_BT/apksigner.bat")" verify -v "$(cygpath -w "$APK_DIR/outbreak-modern.apk")" &&
         "$OB_ANDROID_BT/aapt2.exe" dump badging "$(cygpath -w "$APK_DIR/outbreak-modern.apk")"
     } > "$log" 2>&1 || { echo "package: failed ($log)"; tail -15 "$log"; return 1; }
     v=$(grep -E "Verified using v[0-9.]+ scheme .*: true" "$log" | sed 's/Verified using \(v[0-9.]*\) scheme.*/\1/' | paste -sd,)
     echo "package: $APK_DIR/outbreak-modern.apk $(stat -c %s "$APK_DIR/outbreak-modern.apk") bytes, signature verified: ${v:-NONE} ($log)"
+    # The Kotlin unit tests (native/android/test, run above before assembleDebug) and the Kotlin compiler's warnings.
+    local tests=0 fails=0 f
+    for f in "$gb"/test-results/testDebugUnitTest/TEST-*.xml; do
+        [ -f "$f" ] || continue
+        tests=$((tests + $(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$f" | head -1)))
+        fails=$((fails + $(sed -n 's/.*<testsuite [^>]*failures="\([0-9]*\)".*/\1/p' "$f" | head -1)))
+    done
+    echo "kotlin tests: $((tests - fails))/$tests, kotlin warnings: $(grep -c '^w: ' "$log")"
     "$PY" -I -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); [print('  %10d %10d %s' % (i.file_size, i.compress_size, i.filename)) for i in z.infolist() if not i.filename.startswith('assets/resources/shaders/')]; print('  + %d shader files' % sum(1 for i in z.infolist() if i.filename.startswith('assets/resources/shaders/')))" "$APK_DIR/outbreak-modern.apk"
 }
 

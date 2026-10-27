@@ -4,6 +4,7 @@
 #include "disc_check.h"
 #include "ini_file.h"
 #include "memory_card.h"
+#include "touch_pad.h"
 #include "widescreen.h"
 
 #include <android_native_app_glue.h>
@@ -25,6 +26,7 @@ namespace obui::android
 		jobject s_activity = nullptr; // global ref
 		jmethodID s_showMenu = nullptr;
 		std::atomic<bool> s_open{false};
+		std::atomic<bool> s_menuRequest{false};
 		std::mutex s_mu;
 		MenuClose s_close;
 
@@ -105,6 +107,9 @@ namespace obui::android
 		s_close = MenuClose{};
 		return c;
 	}
+
+	bool takeMenuRequest() { return s_menuRequest.exchange(false); }
+	void requestMenuFromTouch() { s_menuRequest.store(true); }
 } // namespace obui::android
 
 // ---- com.outbreakmodern.app.NativeBridge (the Kotlin launcher) ----
@@ -214,6 +219,29 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_setWidescreen
 	std::string err;
 	const bool ok = obui::setWidescreen(std::filesystem::path(Str(env, dir)), on == JNI_TRUE, &err);
 	return env->NewStringUTF(ok ? "" : (err.empty() ? "could not change the aspect ratio" : err.c_str()));
+}
+
+// The touch controls (TouchOverlay, core/touch_pad.h). touchPad(pressed, rx, ry, lx, ly): PS2 button bits held (1 =
+// held) and the stick bytes (0x80 = centre), merged into the first pad at the game's next read.
+JNIEXPORT void JNICALL Java_com_outbreakmodern_app_NativeBridge_touchPad(JNIEnv*, jclass, jint pressed, jint rx, jint ry,
+	jint lx, jint ly)
+{
+	const uint8_t sticks[4] = {static_cast<uint8_t>(rx), static_cast<uint8_t>(ry), static_cast<uint8_t>(lx),
+		static_cast<uint8_t>(ly)};
+	obui::touchPad().set(static_cast<uint16_t>(pressed), sticks);
+}
+
+// physicalPadReads(): the game's pad reads on which a controller or keyboard was in use (wraps); the overlay hides
+// while it rises (setting "Auto").
+JNIEXPORT jint JNICALL Java_com_outbreakmodern_app_NativeBridge_physicalPadReads(JNIEnv*, jclass)
+{
+	return static_cast<jint>(obui::touchPad().physicalReads());
+}
+
+// requestMenu(): open the in-game menu, as the Back button does (the overlay's Menu > Settings).
+JNIEXPORT void JNICALL Java_com_outbreakmodern_app_NativeBridge_requestMenu(JNIEnv*, jclass)
+{
+	obui::android::requestMenuFromTouch();
 }
 
 } // extern "C"

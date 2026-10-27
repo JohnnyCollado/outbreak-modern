@@ -53,6 +53,10 @@ android {
             assets.directories += "$obStage/assets"
             res.directories += "res" // launcher icons (tools/ob/make_icons.py)
         }
+        // JVM unit tests of the Android-free Kotlin (the touch controls' rules, TouchLogic.kt): testDebugUnitTest.
+        getByName("test") {
+            kotlin.directories += "test/kotlin"
+        }
     }
 
     packaging {
@@ -75,4 +79,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    testImplementation("junit:junit:4.13.2") // in the local Gradle cache
 }

@@ -167,6 +167,22 @@ adb shell am force-stop com.outbreakmodern.app
 
 `adb uninstall com.outbreakmodern.app` deletes the app's files dir too, ISO included (4.7 GB to push again).
 
+## Touch controls (2026-10-26)
+
+Design: `docs/plans/2026-10-26-touch-controls.md`; report `reports/2026-10-26-touch-controls.md`. Classic camera only.
+- `TouchOverlay.kt`: a full-screen dialog window over `OutbreakActivity`, `FLAG_NOT_FOCUSABLE`, so the controller's
+  keys and Back still go to the game's NativeActivity input queue. Off = no window at all (touches reach the game as
+  before). Hidden while the in-game menu is open; Controls > Touch controls > Edit layout shows it over the held game.
+- `TouchLogic.kt`: zones, gestures, button sets, settings (no Android imports); tested by
+  `native/android/test/kotlin/.../TouchLogicTest.kt`, which `android.sh package` runs (`gradlew testDebugUnitTest
+  assembleDebug`) and reports as `kotlin tests: n/n, kotlin warnings: n`.
+- Into the game: `NativeBridge.touchPad(pressed, rx, ry, lx, ly)` -> `obui::touchPad()` (`native/ob_ui/core/touch_pad.h`,
+  one atomic), merged into port 0 by `obui::filterPad` before the menu gate (PS2Recomp patch 0078's pad hook; no new
+  runtime patch). Auto hides on `NativeBridge.physicalPadReads()` rising (reads with a pad button down or a stick past
+  0x30 from centre). Menu > Settings calls `NativeBridge.requestMenu()` (opened in `hostFrame` as by Back).
+- Settings: `[ui] touch*` keys (`native/outbreak.ini.example`); the dragged layout in `touch_layout.ini` in the files
+  dir (`[minimal]` / `[full]`, `id = x, y, scale, hidden`).
+
 ## What's installed (launcher, 2026-10-26)
 
 The Kotlin launcher lists what sits in the app's files dir, with its size (measured in the background, `Installed.kt`)

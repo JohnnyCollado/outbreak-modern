@@ -24,12 +24,15 @@ import kotlinx.coroutines.delay
  * it starts, the disc chosen in the launcher is opened here and handed to the runner as /proc/self/fd/<n>
  * (PS2X_GAME_PATH), and the runner's own launcher is off (PS2X_LAUNCHER=0, PS2Recomp patch 0078). The in-game menu is
  * a Compose dialog over the game, opened by the runner (native/ob_ui/android/android_menu.h: showMenu) while it holds
- * the game; nativeMenuClosed tells it how the menu closed.
+ * the game; nativeMenuClosed tells it how the menu closed. The touch controls (TouchOverlay) are a second window over
+ * the game, hidden while the menu is open.
  */
 class OutbreakActivity : NativeActivity() {
     private var discFd = -1
     private var menu: ComponentDialog? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    // The touch controls (TouchOverlay.kt): a window over the game, made once the game's window is attached.
+    private var touch: TouchOverlay? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val settings = Settings(this)
@@ -41,7 +44,19 @@ class OutbreakActivity : NativeActivity() {
         super.onCreate(savedInstanceState)
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (touch == null) touch = TouchOverlay(this, scope).also { it.attach() }
+    }
+
+    override fun onPause() {
+        touch?.releaseAll() // nothing stays pressed while the game is in the background
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        touch?.destroy()
+        touch = null
         scope.cancel()
         super.onDestroy()
     }
@@ -63,11 +78,15 @@ class OutbreakActivity : NativeActivity() {
         val model = SettingsModel(this, Settings(this), inGame = true, nav = nav)
         var closed = false
         lateinit var dialog: ComponentDialog
+        touch?.suspend(true)
+        // Controls > Touch controls > Edit layout: the menu steps aside (the game stays held) until Done.
+        model.editTouchLayout = touch?.let { t -> { dialog.hide(); t.startEdit { dialog.show() } } }
         fun close(quit: Boolean) {
             if (closed) return
             closed = true
             dialog.dismiss()
             menu = null
+            touch?.suspend(false) // reads the touch settings again
             nativeMenuClosed(quit, model.inputChanged, model.settingsChanged)
             // Quit leaves the way Android expects (developer, 2026-10-26: quitting disturbed the front end that started
             // us): finish this activity and its task, so the system returns to the caller cleanly, instead of only
