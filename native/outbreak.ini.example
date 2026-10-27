@@ -92,5 +92,7 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 ; touch_scale = 100            60..160 (%)
 ; touch_opacity = 60           10..100 (%)
 ; touch_vibrate = on | off
+; perf_hint = on | off         Android 13+: tell the system the game needs a frame every 16.7 ms (its performance hint),
+;                              so it raises the CPU clocks for the game's threads; off = leave it to the phone
 ; [ui]
 ; launcher = on

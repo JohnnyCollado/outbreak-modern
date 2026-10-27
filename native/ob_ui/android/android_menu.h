@@ -39,4 +39,11 @@ namespace obui::android
 	// fast_unwind.cpp: turns on the quicker library lookup for C++ exception unwinding (once; InitMenu calls it,
 	// before the game runs).
 	void installFastUnwind();
+
+	// perf_hint.cpp: Android's performance hint for the game. perfHintGameThread on the game thread (its pad read,
+	// once); perfHintFrame on the main thread each host frame (starts the session, then reports the game thread's CPU
+	// time); perfHintEnable([ui] perf_hint) before the game.
+	void perfHintGameThread();
+	void perfHintFrame();
+	void perfHintEnable(bool on);
 } // namespace obui::android

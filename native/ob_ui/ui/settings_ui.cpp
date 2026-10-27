@@ -2506,6 +2506,9 @@ namespace obui
 		const std::string vs = Ui("vsync", "on");
 		ob_gs_set_vsync(vs == "strict" ? 2 : vs == "off" ? 0 : 1);
 		ob_gs_set_fps_overlay(Ui("show_fps", "off") == "on");
+#if defined(__ANDROID__)
+		obui::android::perfHintEnable(Ui("perf_hint", "on") != "off");
+#endif
 
 		s->gamePath = gamePath;
 #if defined(__ANDROID__)
@@ -2594,6 +2597,7 @@ namespace obui
 		// Android: the menu is Kotlin + Compose (android_menu.h, decision A14), a dialog window over the game; the
 		// game is held while it is open. An APK without it falls back to the ImGui menu below.
 		{
+			obui::android::perfHintFrame(); // the game thread's CPU time this frame, to Android's performance hint
 			const obui::android::MenuClose c = obui::android::takeMenuClose();
 			if (c.closed && s->kotlinMenu)
 			{
@@ -2679,6 +2683,9 @@ namespace obui
 		// menu's gate below hides them too while it is open and after it closes.
 		if (port == 0)
 			buttons = obui::touchPad().merge(buttons, sticks);
+#if defined(__ANDROID__)
+		obui::android::perfHintGameThread(); // the game thread, for Android's performance hint (once)
+#endif
 		if (s->trigger.menuOpen())
 			for (int i = 0; i < 4; i++)
 				sticks[i] = 0x80;
