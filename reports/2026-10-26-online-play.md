@@ -209,6 +209,16 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Reached so far:** title → NETWORK PLAY → NET file created on the card → CONNECTION → notice → NET CONNECTION
   (the network modules all load: AVE-TCP, LOADHIGH/USBSRCH, NETCNF, NETCNFIF).
 
+### 18. The gate after the rebase (and its first, false red)
+
+- **Seen:** first gate run on the rebased net build: 0/3 gated green (savedata/access/capcom 2-5% of pixels off).
+- **Cause:** my run used the runner's default CPU renderer (`[gs] backend=cpu`); the project's green gate runs use
+  PCSX2's software renderer (`PS2X_GS=pcsx2-sw`; earlier reports "gate 3/3 pcsx2-sw"). Not patch 0090.
+- **Result:** with `PS2X_GS=pcsx2-sw`: **3/3 gated green** (max delta 0), advisory screens as before
+  (`.run/spike/net-gate.sh`).
+- **Not covered:** sound. With 0090 the CRI ADX driver now reads its arguments (`thpri=39 spucore=1 debug=0`, it prints
+  them: "SPU CORE Number = 1"); before it ran on its defaults. Pictures are identical; audio needs a listen.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
