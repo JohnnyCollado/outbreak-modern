@@ -168,6 +168,47 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   `jr $ra` + `v0 = 1`. Not yet seen in the running game (needs the network menu: step C).
 - **Take-away:** skip a protection at the caller's state step, not inside the protected code.
 
+### 14. A rebuild with the old recompiler (21 minutes lost)
+
+- **Seen:** the rebuild for the DNAS patch copied 14,273 changed sources and took 1,288 s.
+- **Cause:** `.run/spike/net-env.sh` did not set `OB_T`, so `net-recompile.sh` used `C:\ob\t`'s analyzer and
+  recompiler (built before 0082/0083): every file got the old includes back, and `sceDevctl`/`sceMount` were not
+  stubbed (the old analyzer doesn't know them).
+- **Fix:** `OB_T=C:/ob/net-t` in `net-env.sh`; rebuilt (one more full build, back to the new form).
+- **Take-away:** one environment file for every build of a line of work, including the tools tree.
+
+### 15. First drive of the real game to its network menu: LOADHIGH and module arguments
+
+- **Seen:** NETWORK PLAY → black screen forever; `unhandled import modload:19`, `modload:8` from `LOADHIGH.IRX`.
+- **Found by:** decoding LOADHIGH (scratch decoder, no capstone): modload 19 = LoadModuleWithOption(argv[1], option
+  {position 1, access 1}) → id, then 8 = StartModule(id, name, arglen, args, &result). PS2Recomp had neither, and
+  started every module with (argument size, raw buffer) instead of loadcore's (argc, argv).
+- **Fix:** PS2Recomp patches: (a) module start with (argc, argv) (argv[0] = name/path, block kept allocated);
+  (b) modload 19 + 8. Tests fail without (IOP 4/5 each). LOADHIGH then loads and starts `USBSRCH.IRX`.
+- **Side effect to gate:** modules that take arguments now get them, e.g. the CRI ADX driver `thpri=39 spucore=1
+  debug=0` (it got garbage before). Single player's sound path changes: the gate must run before merging.
+- **Test-writing trap:** my first test module did `lw ra` then `jr ra` at once; the R3000 load delay (correctly
+  emulated) used the old `ra`. Real IRX code never does that; one `nop` fixes the test.
+
+### 16. sysclib's isdigit never matched
+
+- **Seen:** `NETCNFIF.IRX thpri=123 thstack=8KB` printed its usage and returned 1 (not resident).
+- **Cause:** PS2Recomp's sysclib `look_ctype_table` (8) and `get_ctype_table` (9) returned 0, so `isdigit` (=
+  `look_ctype_table(c) & 0x04`, ps2sdk ctype.h) was always false.
+- **Fix:** PS2Recomp patch: the real class flags (and a 256-entry table). Test fails without. NETCNFIF resident.
+
+### 17. The game's network settings editor is a separate program
+
+- **Seen:** NET CONNECTION → "In order to play online you need to configure the network settings" → Edit → YES:
+  the game runs its power-off devctls, then EE syscall 6 (unimplemented) and stays on the dialog.
+- **Found by:** the lobby code at 0x5CDC04: `LoadExecPS2("cdrom0:\NTGUI2\YN_FILEJ.BIN;1", 2, ...)`: Sony's network
+  configuration utility, a separate PS2 executable that reboots back into the game when done.
+- **Consequence:** our port can't run it (not recompiled; a different program). Plan P16 becomes required: the app
+  writes the network configuration (`BWNETCNF` on the memory card: Ethernet, DHCP, DNS automatic) itself, so the
+  editor is never needed. The file's format (Sony netcnf; possibly scrambled) is the next research item.
+- **Reached so far:** title → NETWORK PLAY → NET file created on the card → CONNECTION → notice → NET CONNECTION
+  (the network modules all load: AVE-TCP, LOADHIGH/USBSRCH, NETCNF, NETCNFIF).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
