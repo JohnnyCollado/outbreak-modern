@@ -1,0 +1,171 @@
+From aca5422fff36f6c1e3bc30c145da2979be072a86 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 00:46:30 -0400
+Subject: [PATCH] IOP ISO 9660: an image held as /proc/self/fd/<n> is opened
+ and measured through a duplicate of that descriptor, never reopened by name
+ (Android refuses reopening a picker-granted file by its path)
+
+---
+ ps2xIOP/src/iso9660.cpp                | 63 ++++++++++++++++++++++++--
+ ps2xTest/src/ps2_game_source_tests.cpp | 37 +++++++++++++++
+ 2 files changed, 95 insertions(+), 5 deletions(-)
+
+diff --git a/ps2xIOP/src/iso9660.cpp b/ps2xIOP/src/iso9660.cpp
+index e8f391e..fd56463 100644
+--- a/ps2xIOP/src/iso9660.cpp
++++ b/ps2xIOP/src/iso9660.cpp
+@@ -4,9 +4,13 @@
+ #include <cctype>
+ #include <cstring>
+ #include <limits>
++#include <string_view>
+ 
+-#if !defined(_WIN32)
++#if defined(_WIN32)
++#include <io.h>
++#else
+ #include <sys/types.h>
++#include <unistd.h>
+ #endif
+ 
+ namespace ps2x::iop
+@@ -64,8 +68,53 @@ namespace ps2x::iop
+ #endif
+         }
+ 
++        // An open file's size (its end), the position left at the start; 0 when it cannot be told.
++        uint64_t sizeOfOpen(std::FILE *file)
++        {
++#if defined(_WIN32)
++            const int64_t end = _fseeki64(file, 0, SEEK_END) == 0 ? _ftelli64(file) : -1;
++#else
++            const int64_t end = fseeko(file, 0, SEEK_END) == 0 ? static_cast<int64_t>(ftello(file)) : -1;
++#endif
++            return (end > 0 && seekTo(file, 0u)) ? static_cast<uint64_t>(end) : 0u;
++        }
++
++        // "/proc/self/fd/<n>": a descriptor the process already holds (an Android app hands over a disc the player picked
++        // through the system picker). Used through a duplicate, never reopened by name: reopening re-checks access to
++        // the file's real location, which such an app does not have (patch 0084). -1 for any other path.
++        int heldDescriptor(const std::filesystem::path &path)
++        {
++            const std::string s = path.generic_string();
++            constexpr std::string_view kPrefix = "/proc/self/fd/";
++            if (s.size() <= kPrefix.size() || s.compare(0u, kPrefix.size(), kPrefix) != 0)
++                return -1;
++            int n = 0;
++            for (size_t i = kPrefix.size(); i < s.size(); ++i)
++            {
++                if (s[i] < '0' || s[i] > '9' || n > 100000)
++                    return -1;
++                n = n * 10 + (s[i] - '0');
++            }
++            return n;
++        }
++
+         std::FILE *openRead(const std::filesystem::path &path)
+         {
++            if (const int fd = heldDescriptor(path); fd >= 0)
++            {
++#if defined(_WIN32)
++                const int d = ::_dup(fd);
++                std::FILE *f = d >= 0 ? ::_fdopen(d, "rb") : nullptr;
++                if (!f && d >= 0)
++                    ::_close(d);
++#else
++                const int d = ::dup(fd);
++                std::FILE *f = d >= 0 ? ::fdopen(d, "rb") : nullptr;
++                if (!f && d >= 0)
++                    ::close(d);
++#endif
++                return f;
++            }
+ #if defined(_WIN32)
+             return ::_wfopen(path.c_str(), L"rb");
+ #else
+@@ -162,19 +211,23 @@ namespace ps2x::iop
+                 *error = why;
+             return nullptr;
+         };
++        // A held descriptor (patch 0084) is measured through itself: its name may not be statable.
++        const bool held = heldDescriptor(path) >= 0;
+         std::error_code ec;
+-        const uint64_t size = std::filesystem::file_size(path, ec);
++        uint64_t size = held ? 0u : std::filesystem::file_size(path, ec);
+         if (ec)
+             return fail("cannot stat " + path.string() + ": " + ec.message());
+-        if (size < static_cast<uint64_t>(kPrimaryVolumeDescriptorLsn + 1u) * kSectorSize)
+-            return fail(path.string() + " is too small for an ISO 9660 image");
+ 
+         std::shared_ptr<IsoImage> image(new IsoImage());
+         image->m_path = path;
+-        image->m_sizeBytes = size;
+         image->m_file = openRead(path);
+         if (!image->m_file)
+             return fail("cannot open " + path.string());
++        if (held)
++            size = sizeOfOpen(image->m_file);
++        if (size < static_cast<uint64_t>(kPrimaryVolumeDescriptorLsn + 1u) * kSectorSize)
++            return fail(path.string() + " is too small for an ISO 9660 image");
++        image->m_sizeBytes = size;
+         // Large reads go straight to the destination; the buffer serves the small sequential ones (directory
+         // records, file headers) without a host call each.
+         std::setvbuf(image->m_file, nullptr, _IOFBF, 64u * 1024u);
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 20c19a2..2fa6558 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -10,6 +10,12 @@
+ 
+ #include <chrono>
+ #include <cstring>
++#include <fcntl.h>
++#if defined(_WIN32)
++#include <io.h>
++#else
++#include <unistd.h>
++#endif
+ #include <filesystem>
+ #include <fstream>
+ #include <string>
+@@ -211,6 +217,37 @@ void register_ps2_game_source_tests()
+             t.Equals(iso->hostSeeks() - seeks, uint64_t{1}, "one seek for three consecutive sector reads");
+         });
+ 
++        tc.Run("ISO 9660: an image held as /proc/self/fd/<n> is read through the descriptor (patch 0084)", [](TestCase &t)
++        {
++            // Android hands the runner a picked disc as /proc/self/fd/<n>; reopening that name is refused for files the
++            // app may not open by path. On Windows the name does not exist at all, so a pass proves the descriptor is used.
++            TempDir dir;
++#if defined(_WIN32)
++            const int fd = ::_wopen(dir.iso.c_str(), _O_RDONLY | _O_BINARY);
++#else
++            const int fd = ::open(dir.iso.c_str(), O_RDONLY);
++#endif
++            t.IsTrue(fd >= 0, "test descriptor opened");
++            const std::filesystem::path held("/proc/self/fd/" + std::to_string(fd));
++            const auto iso = ps2x::iop::IsoImage::open(held);
++            t.IsTrue(iso != nullptr, "the image opens through the descriptor");
++            if (iso)
++            {
++                ps2x::iop::IsoEntry e{};
++                t.IsTrue(iso->find("\\SYSTEM.CNF;1", e), "its directory is read");
++                std::vector<uint8_t> buf(kSector, 0u);
++                t.IsTrue(iso->readSectors(kBigLsn, 1u, buf.data()) && buf[5] == bigByte(5u), "its sectors are read");
++            }
++            const auto again = ps2x::iop::IsoImage::open(held);
++            ps2x::iop::IsoEntry e2{};
++            t.IsTrue(again != nullptr && again->find("\\SYSTEM.CNF;1", e2), "the same descriptor opens twice (each open is a duplicate)");
++#if defined(_WIN32)
++            ::_close(fd);
++#else
++            ::close(fd);
++#endif
++        });
++
+         tc.Run("SYSTEM.CNF: BOOT2 path and serial", [](TestCase &t)
+         {
+             t.Equals(ps2x::iop::systemCnfBootPath(kCnfText), std::string("cdrom0:\\SLUS_123.45;1"), "BOOT2 value");
+-- 
+2.46.2.windows.1
+

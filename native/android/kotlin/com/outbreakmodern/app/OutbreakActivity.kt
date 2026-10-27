@@ -42,6 +42,12 @@ class OutbreakActivity : NativeActivity() {
         }
         Os.setenv("PS2X_LAUNCHER", "0", true)
         super.onCreate(savedInstanceState)
+        window.immersive(underCutout = true)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) window.immersive(underCutout = true) // after the menu, another app or a swipe: bars hidden again
     }
 
     override fun onAttachedToWindow() {
@@ -80,7 +86,7 @@ class OutbreakActivity : NativeActivity() {
         lateinit var dialog: ComponentDialog
         touch?.suspend(true)
         // Touch controls > Edit layout: the menu steps aside (the game stays held) until Done.
-        model.editTouchLayout = touch?.let { t -> { dialog.hide(); t.startEdit { dialog.show() } } }
+        model.editTouchLayout = touch?.let { t -> { dialog.hide(); t.startEdit { dialog.show(); dialog.window?.immersive() } } }
         fun close(quit: Boolean) {
             if (closed) return
             closed = true
@@ -133,5 +139,6 @@ class OutbreakActivity : NativeActivity() {
         })
         menu = dialog
         dialog.show()
+        dialog.window?.immersive() // a dialog has its own bar state: keep them hidden over the game
     }
 }

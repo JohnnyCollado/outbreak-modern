@@ -21,6 +21,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -256,6 +262,31 @@ static void DiscTests()
 	Check(r.verdict == obui::DiscVerdict::Ok && r.stepsPassed == 3, "disc: extracted folder verified");
 	r = obui::checkDisc(dir / "folder" / "SLPM_654.28", expected);
 	Check(r.verdict == obui::DiscVerdict::Ok && r.stepsPassed == 3, "disc: bare boot ELF verified");
+
+	// A disc held as a descriptor ("/proc/self/fd/<n>", Android's picker): checked through the descriptor, never
+	// reopened by name (which Android 16 refuses for picker-granted files). On Windows no such path exists, so a
+	// pass here proves the descriptor is used.
+	{
+#if defined(_WIN32)
+		const int fd = ::_wopen((dir / "good.iso").c_str(), _O_RDONLY | _O_BINARY);
+#else
+		const int fd = ::open((dir / "good.iso").c_str(), O_RDONLY);
+#endif
+		Check(fd >= 0, "disc: test descriptor opened");
+		r = obui::checkDisc(fs::path("/proc/self/fd/" + std::to_string(fd)), expected);
+		Check(r.verdict == obui::DiscVerdict::Ok && r.stepsPassed == 3, "disc: a held descriptor (/proc/self/fd/<n>) verified");
+		r = obui::checkDisc(fs::path("/proc/self/fd/" + std::to_string(fd)), expected);
+		Check(r.verdict == obui::DiscVerdict::Ok, "disc: the same descriptor checks twice (offset shared, reads seek)");
+#if defined(_WIN32)
+		::_close(fd);
+#else
+		::close(fd);
+#endif
+#if !defined(_WIN32) // the MSVC CRT's _dup of a closed descriptor calls the invalid-parameter handler (ends the run)
+		r = obui::checkDisc(fs::path("/proc/self/fd/99999"), expected);
+		Check(r.verdict == obui::DiscVerdict::ReadError, "disc: a descriptor that isn't open = can't be opened");
+#endif
+	}
 
 	obui::DiscCache cache;
 	cache.remember(dir / "good.iso", obui::checkDisc(dir / "good.iso", expected));

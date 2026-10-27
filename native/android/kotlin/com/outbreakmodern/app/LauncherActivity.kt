@@ -34,6 +34,7 @@ class LauncherActivity : ComponentActivity(), PickHost {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.immersive()
         settings = Settings(this)
         model = SettingsModel(this, settings, inGame = false, nav = nav)
         model.host = this
@@ -71,6 +72,11 @@ class LauncherActivity : ComponentActivity(), PickHost {
 
     private fun onNav(a: Nav) {
         nav.handle(a, model.pages(), footerActions = { if (it == 0) askQuit() else play() }, onBackFromList = ::askQuit, onStart = ::play)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) window.immersive() // back from the file picker or another app: hide the bars again
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {

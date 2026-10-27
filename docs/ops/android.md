@@ -167,6 +167,14 @@ adb shell am force-stop com.outbreakmodern.app
 
 `adb uninstall com.outbreakmodern.app` deletes the app's files dir too, ISO included (4.7 GB to push again).
 
+## Fullscreen and picked discs (2026-10-27)
+
+- Immersive mode (`Immersive.kt`): no status or navigation bar in the launcher, the game, the in-game menu or the
+  touch overlay; a swipe from the screen's edge shows them for a moment. Re-applied when a window regains focus.
+- A disc picked through the system picker reaches C++ as `/proc/self/fd/<n>`; the disc check (`disc_check.cpp`) and
+  the runtime's ISO reader (PS2Recomp patch 0084) use that descriptor (`dup`), never reopen the name: Android 16
+  refuses that for picker-granted files.
+
 ## Touch controls (2026-10-26)
 
 Design: `docs/plans/2026-10-26-touch-controls.md`; report `reports/2026-10-26-touch-controls.md`. Classic camera only.

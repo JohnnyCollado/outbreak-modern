@@ -204,7 +204,11 @@ class TouchOverlay(private val activity: Activity, private val scope: CoroutineS
 
     private fun applyWindowVisibility() {
         val d = dialog ?: return
-        if (suspended && !editing) d.hide() else if (!d.isShowing) d.show()
+        if (suspended && !editing) d.hide()
+        else if (!d.isShowing) {
+            d.show()
+            d.window?.immersive(underCutout = true) // its own bar state: a shown dialog must not bring the bars back
+        }
     }
 
     private fun gamepadConnected(): Boolean = InputDevice.getDeviceIds().any { id ->

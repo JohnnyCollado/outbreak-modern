@@ -10,7 +10,13 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <string_view>
 #include <system_error>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #ifndef OB_UI_ELF_SHA256
 #define OB_UI_ELF_SHA256 "975dd77d1e1c81f0d8f5f072b35c487c5ad6befbb99b339641a4c9573a334480"
@@ -165,8 +171,43 @@ namespace obui
 			}
 		};
 
+		// "/proc/self/fd/<n>": a descriptor the app already holds (Android: a disc picked through the system picker). It is
+		// used through a duplicate, never reopened by that name: reopening re-checks access to the file's real location,
+		// which a picker-granted app does not have (Android 16 on a OnePlus: "This file can't be opened"). Reads always
+		// seek first (ReadAt), so sharing the descriptor's offset is harmless.
+		int FdPath(const std::filesystem::path& p)
+		{
+			const std::string s = p.generic_string();
+			constexpr std::string_view kPrefix = "/proc/self/fd/";
+			if (s.size() <= kPrefix.size() || s.compare(0, kPrefix.size(), kPrefix) != 0)
+				return -1;
+			int n = 0;
+			for (size_t i = kPrefix.size(); i < s.size(); i++)
+			{
+				if (s[i] < '0' || s[i] > '9' || n > 100000)
+					return -1;
+				n = n * 10 + (s[i] - '0');
+			}
+			return n;
+		}
+
 		std::FILE* OpenRead(const std::filesystem::path& p)
 		{
+			if (const int fd = FdPath(p); fd >= 0)
+			{
+#if defined(_WIN32)
+				const int d = ::_dup(fd);
+				std::FILE* f = d >= 0 ? ::_fdopen(d, "rb") : nullptr;
+				if (!f && d >= 0)
+					::_close(d);
+#else
+				const int d = ::dup(fd);
+				std::FILE* f = d >= 0 ? ::fdopen(d, "rb") : nullptr;
+				if (!f && d >= 0)
+					::close(d);
+#endif
+				return f;
+			}
 #if defined(_WIN32)
 			return ::_wfopen(p.c_str(), L"rb");
 #else
@@ -301,13 +342,14 @@ namespace obui
 	{
 		DiscReport r;
 		std::error_code ec;
-		if (path.empty() || !std::filesystem::exists(path, ec))
+		const bool held = FdPath(path) >= 0; // a held descriptor: always a file; opening it says whether it is valid
+		if (path.empty() || (!held && !std::filesystem::exists(path, ec)))
 		{
 			r.verdict = DiscVerdict::NoFile;
 			r.message = path.empty() ? "Choose your game disc to play." : "This file can't be found. Choose your disc again.";
 			return r;
 		}
-		if (std::filesystem::is_directory(path, ec))
+		if (!held && std::filesystem::is_directory(path, ec))
 		{
 			// An extracted folder (outbreak.ini / command line only): SYSTEM.CNF and the boot file in it.
 			r.stepsPassed = 1;

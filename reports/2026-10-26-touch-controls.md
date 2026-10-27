@@ -84,6 +84,29 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
 - **Take-away:** to claim "no warnings", force a recompile of the touched libraries once; incremental counts miss old
   warnings.
 
+### 6. OnePlus (Android 16): a picked disc fails "This file can't be opened"
+
+- **Seen:** the developer's screenshot (2026-10-27): the disc picked in the launcher failed step 1, "This file can't be
+  opened. Check that it isn't in use, then choose it again."; no `game-uri.txt` was written (only verified discs are).
+- **Found by:** reading the path: Kotlin opens the content URI (it worked, so `checkDiscUri` was not null) and hands C++
+  `/proc/self/fd/<n>`; `checkDisc` passed `exists()` (a stat follows the link) and failed at `fopen`. The runtime's
+  `IsoImage::open` does the same `fopen` (and a `file_size` by name), so the game would have failed next.
+- **Cause:** reopening `/proc/self/fd/<n>` opens the target by its path again; on Android 16 an app given a file by the
+  system picker has no access to that path, only the descriptor.
+- **Fix:** use the held descriptor through `dup` + `fdopen` (and measure it from the open file): `native/ob_ui/core/
+  disc_check.cpp` (ob_ui test "a held descriptor verified", 118/118) and PS2Recomp patch 0084 (`iso9660.cpp`, test
+  fails without). The earlier Odin runs used a disc in the app's own files dir, which never takes this path.
+- **Take-away:** never reopen `/proc/self/fd/<n>` by name on Android; use the descriptor.
+
+### 7. The navigation bar covered the launcher's right edge
+
+- **Seen:** the same screenshot: Android's three-button bar over the Play button and the page's right side.
+- **Cause:** the theme `Theme.Material.NoActionBar.Fullscreen` hides only the status bar.
+- **Fix:** immersive mode (`Immersive.kt`: bars hidden, a swipe from the edge shows them for a moment), on the
+  launcher, the game window (under the cutout), the in-game menu and the touch overlay; again whenever a window
+  regains focus (the file picker and other dialogs bring the bars back).
+- **Take-away:** every dialog window has its own system-bar state; hide the bars on each one.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
