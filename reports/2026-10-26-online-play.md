@@ -192,7 +192,14 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   string into "0311172218" (ten digits: strong evidence the formula is right).
 - ob_server step B done: login pages with quick login over SSL 3.0 / TLS 1.0 with RSA and DHE-RSA 3DES (tests 40/40,
   mbedTLS 2.28.10 pinned), and the DNAS skip patch (entry 13). Not yet tried with the game itself: that needs the game
-  to reach its network menu and our adapter's DNS pointing at the server (step C). Next: step C (lobby).
+  to reach its network menu and our adapter's DNS pointing at the server (step C).
+- ob_server step C (server side) done: `net` (sockets, poll), `accounts` (sessions, handles, game numbers), `lobby`
+  (minimal path + fixed answers; unknown questions answered empty and logged), `Server` (login pages + lobby on one
+  account list), `ob_server.exe`. Tests 70/70: two scripted game clients log in, create/open/join/start, both get
+  GETREADY, game number 2 and the relay address; quick login over TLS → lobby login. Not yet with the real game.
+- Trick for the first real-game test on one PC: PCSX2's DNS rewrites an answer of 127.0.0.1 to the PC's LAN address
+  (`DNS_Server.cpp:210`), which makes Windows ask about the firewall; `PS2X_NET_HOSTS=www01.kddi-mmbb.jp=127.0.0.2`
+  stays on loopback (any 127.x reaches this PC) with `ob_server --bind 127.0.0.2`. Unverified.
 - Faking an installed HDD: not now (research 7.5: only for HDD-only rooms).
 - mbedTLS on a real device and against the PS2's actual ClientHello: S3 / S6.
 

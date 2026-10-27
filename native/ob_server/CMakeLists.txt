@@ -23,7 +23,8 @@ set(CMAKE_POLICY_DEFAULT_CMP0057 NEW) # mbedTLS 2.28's old cmake_minimum_require
 add_compile_definitions("MBEDTLS_USER_CONFIG_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls_config_ob.h\"")
 add_subdirectory("${OB_MBEDTLS}" "${CMAKE_CURRENT_BINARY_DIR}/mbedtls" EXCLUDE_FROM_ALL)
 
-add_library(ob_server STATIC src/protocol.cpp src/web.cpp src/tls_server.cpp)
+add_library(ob_server STATIC src/protocol.cpp src/web.cpp src/tls_server.cpp src/net.cpp src/accounts.cpp src/lobby.cpp
+    src/ob_server.cpp)
 target_include_directories(ob_server PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(ob_server PUBLIC mbedtls mbedx509 mbedcrypto)
 if(WIN32)
@@ -36,6 +37,10 @@ else()
 endif()
 
 if(NOT ANDROID)
-    add_executable(ob_server_tests tests/ob_server_tests.cpp)
+    add_executable(ob_server_tests tests/ob_server_tests.cpp tests/lobby_tests.cpp)
     target_link_libraries(ob_server_tests PRIVATE ob_server)
+    # ob_server.exe: the same server as a console program for a dedicated PC (plan N6).
+    add_executable(ob_server_exe tools/ob_server_main.cpp)
+    set_target_properties(ob_server_exe PROPERTIES OUTPUT_NAME ob_server)
+    target_link_libraries(ob_server_exe PRIVATE ob_server)
 endif()
