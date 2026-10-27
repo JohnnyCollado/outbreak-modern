@@ -36,6 +36,7 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 
 ## Still open
 
+- S0.3 done (research section 7.4).
 - S0.1 (recompile NETWK, NETAQ, NETHTTP, NETDNAS) and S0.2 (TLS spike) need work outside the repo (`C:\ob`) and a
   library download: waiting for the developer's "proceed".
 
