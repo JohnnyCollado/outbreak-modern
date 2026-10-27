@@ -36,8 +36,12 @@
                 <category android:name="android.intent.category.GAME" />
             </intent-filter>
         </activity>
+        <!-- The game runs in its own process (":game", developer 2026-10-27): Quit game ends that process completely
+             and returns to the launcher, and each Play starts from a fresh process (no runner state left over from the
+             last game; a leftover froze the relaunch). -->
         <activity
             android:name="com.outbreakmodern.app.OutbreakActivity"
+            android:process=":game"
             android:exported="false"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"

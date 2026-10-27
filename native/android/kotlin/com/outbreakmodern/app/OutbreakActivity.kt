@@ -1,10 +1,12 @@
 package com.outbreakmodern.app
 
 import android.app.NativeActivity
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Process
 import android.system.Os
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -79,6 +81,25 @@ class OutbreakActivity : NativeActivity() {
 
     private external fun nativeMenuClosed(quit: Boolean, inputChanged: Boolean, settingsChanged: Boolean)
 
+    /**
+     * Quit game (developer, 2026-10-27): the game stops completely and the player is back in the launcher. The launcher
+     * is started first (it lives in the app's main process), then the runner is told to quit (it ends this ":game"
+     * process with _Exit once its loop has stopped); should it not end within [QUIT_GRACE_MS], this process is ended
+     * here, so the next Play always starts from a fresh process.
+     */
+    private fun quitToLauncher(model: SettingsModel) {
+        touch?.destroy()
+        touch = null
+        startActivity(Intent(this, LauncherActivity::class.java).putExtra(LauncherActivity.EXTRA_FROM_GAME, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        nativeMenuClosed(true, model.inputChanged, model.settingsChanged)
+        finish()
+        Thread {
+            Thread.sleep(QUIT_GRACE_MS)
+            Process.killProcess(Process.myPid())
+        }.apply { isDaemon = true }.start()
+    }
+
     private fun openMenu() {
         val nav = MenuNav()
         val model = SettingsModel(this, Settings(this), inGame = true, nav = nav)
@@ -92,13 +113,12 @@ class OutbreakActivity : NativeActivity() {
             closed = true
             dialog.dismiss()
             menu = null
+            if (quit) {
+                quitToLauncher(model)
+                return
+            }
             touch?.suspend(false) // reads the touch settings again
-            nativeMenuClosed(quit, model.inputChanged, model.settingsChanged)
-            // Quit leaves the way Android expects (developer, 2026-10-26: quitting disturbed the front end that started
-            // us): finish this activity and its task, so the system returns to the caller cleanly, instead of only
-            // the runner ending the process with _Exit underneath a live activity.
-            if (quit)
-                finishAndRemoveTask()
+            nativeMenuClosed(false, model.inputChanged, model.settingsChanged)
         }
         val footer = { i: Int -> if (i == 0) nav.ask(Confirm("Quit the game?", "Progress since your last save is lost.", "Quit game", "Cancel", { close(true) })) else close(false) }
         val input = GamepadInput(scope) { a ->
@@ -140,5 +160,10 @@ class OutbreakActivity : NativeActivity() {
         menu = dialog
         dialog.show()
         dialog.window?.immersive() // a dialog has its own bar state: keep them hidden over the game
+    }
+
+    companion object {
+        /** How long the runner gets to end this process by itself after Quit game (it _Exits once its loop stops). */
+        private const val QUIT_GRACE_MS = 1500L
     }
 }

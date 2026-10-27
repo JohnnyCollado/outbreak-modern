@@ -107,6 +107,21 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
   regains focus (the file picker and other dialogs bring the bars back).
 - **Take-away:** every dialog window has its own system-bar state; hide the bars on each one.
 
+### 8. Quit game left the game half-closed and the relaunch froze
+
+- **Seen:** the developer (2026-10-27): after Quit game in the in-game menu "the game does not fully close", and the
+  next launch froze.
+- **Found by:** reading the quit path: Kotlin finished the activity and its task while the runner was told to quit;
+  the runner reaches its `_Exit(0)` only after `run()` has stopped the game thread and closed the window. The launcher
+  and the game shared one process, so anything left of a half-ended runner was still there when Play started the
+  NativeActivity again in that process. The exact stuck step was not seen (no phone log of it).
+- **Fix:** the game runs in its own process (`android:process=":game"`). Quit game starts the launcher (developer:
+  back to the launch menu, not out of the app), tells the runner to quit, finishes the activity and ends the
+  `:game` process itself if the runner has not after 1.5 s. Play first ends any `:game` process still alive, so every
+  game starts fresh. The launcher's Quit closes the whole app (task, any game process, then its own process).
+  "Skip the launcher" does not start the game again when the player has just quit it.
+- **Take-away:** a NativeActivity whose native code keeps process-wide state belongs in a process of its own.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

@@ -167,6 +167,13 @@ adb shell am force-stop com.outbreakmodern.app
 
 `adb uninstall com.outbreakmodern.app` deletes the app's files dir too, ISO included (4.7 GB to push again).
 
+## Quitting (2026-10-27)
+
+- The game runs in its own process (`:game`, `AndroidManifest.xml`). Quit game (in-game menu) returns to the launcher:
+  the launcher is started, the runner told to quit, the activity finished, and the `:game` process ended after 1.5 s
+  if the runner has not ended it (`OutbreakActivity.quitToLauncher`). Play ends any `:game` process still alive first.
+- The launcher's Quit closes the whole app: its task, any `:game` process, then the main process.
+
 ## Fullscreen and picked discs (2026-10-27)
 
 - Immersive mode (`Immersive.kt`): no status or navigation bar in the launcher, the game, the in-game menu or the

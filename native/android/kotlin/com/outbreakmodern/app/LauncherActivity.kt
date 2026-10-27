@@ -3,6 +3,7 @@ package com.outbreakmodern.app
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Process
 import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.activity.ComponentActivity
@@ -46,8 +47,10 @@ class LauncherActivity : ComponentActivity(), PickHost {
 
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { model.refreshDisc() }
-            // "Show this screen at start-up" off: straight into the game when the disc checks out.
-            if (settings.ui("launcher", "on") == "off" && model.disc.verified && savedInstanceState == null) play()
+            // "Show this screen at start-up" off: straight into the game when the disc checks out (not when the player
+            // just quit the game to get here).
+            if (settings.ui("launcher", "on") == "off" && model.disc.verified && savedInstanceState == null &&
+                !intent.getBooleanExtra(EXTRA_FROM_GAME, false)) play()
         }
         setContent {
             AppTheme {
@@ -88,7 +91,12 @@ class LauncherActivity : ComponentActivity(), PickHost {
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean =
         (!model.capturing && input.onMotionEvent(ev)) || super.dispatchGenericMotionEvent(ev)
 
-    private fun askQuit() = nav.ask(Confirm("Quit Outbreak Modern?", "Your settings are saved.", "Quit", "Cancel", { finishAndRemoveTask() }))
+    // Quit here closes the whole app (developer, 2026-10-27): the task goes, any game process ends, then this one.
+    private fun askQuit() = nav.ask(Confirm("Quit Outbreak Modern?", "Your settings are saved.", "Quit", "Cancel", {
+        endGameProcess()
+        finishAndRemoveTask()
+        window.decorView.postDelayed({ Process.killProcess(Process.myPid()) }, 300)
+    }))
 
     private fun play() {
         if (nav.progress != null) return
@@ -102,8 +110,15 @@ class LauncherActivity : ComponentActivity(), PickHost {
             val card = File(settings.memcardsDir(), "Mcd001.ps2")
             if (card.isFile) NativeBridge.backupCard(card.path, 5)
         }
+        endGameProcess() // a game that did not end cleanly must not be reused: Play always starts a fresh one
         startActivity(Intent(this, OutbreakActivity::class.java))
         finish()
+    }
+
+    /** Ends the game's own process (":game", the manifest) if one is still alive; same app, so it may be ended. */
+    private fun endGameProcess() {
+        val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+        am.runningAppProcesses?.filter { it.processName == "$packageName:game" }?.forEach { Process.killProcess(it.pid) }
     }
 
     // ---- PickHost ----
@@ -156,5 +171,10 @@ class LauncherActivity : ComponentActivity(), PickHost {
                 model.note(message)
             }
         })
+    }
+
+    companion object {
+        /** Set when Quit game brings the player back here (OutbreakActivity.quitToLauncher): no auto-start. */
+        const val EXTRA_FROM_GAME = "fromGame"
     }
 }
