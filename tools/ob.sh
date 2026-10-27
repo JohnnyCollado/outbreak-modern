@@ -5,7 +5,8 @@
 #
 #   tools/ob.sh tools                        configure + build the tools tree ($OB_T)
 #   tools/ob.sh test                         ps2x_tests, IOP, gs_cache, ob_diag, pcsx2_vu/gs/spu2/ipu/sio2 tests: "<suite>: <pass>/<total>"
-#   tools/ob.sh recompile                    main ELF + overlays demo submain netdnas, then the runner
+#   tools/ob.sh recompile                    main ELF + overlays ($OB_OVERLAYS: demo submain netdnas game single, plus
+#                                            the online ones netwk netaq nethttp), then the runner
 #                                            (OB_PROFILE=1: host libraries with debug info, copy in $OB_ROOT/r-profile)
 #   tools/ob.sh boot [--secs N] [--tag T]    boot the runner (opens a window), kill after N s (200)
 #                    [--no-diag] [--hidden]  --no-diag: without the ob_diag plugin (a play build; no script, dumps,
@@ -29,7 +30,7 @@
 #   tools/ob.sh android [shaderc|configure|build|package|verify|all]  Android arm64 .so + APK (tools/ob/android.sh,
 #                                            docs/ops/android.md); never touches a device
 #
-# Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it;
+# Env (defaults): OB_ROOT=C:/ob, OB_SRC, OB_T, OB_R, OB_WORK, OB_OVL, OB_LOGS, OB_SPLAT under it; OB_OVERLAYS (above);
 # OB_RUN=<repo>/game_files (read only; recompile input); OB_GAME=$OB_RUN/SLPM_654.28 (what boot/gate run: the
 # ELF, an extracted folder or an ISO image); OB_VCVARS=VS2022 Community vcvars64.bat;
 # OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build,
@@ -42,6 +43,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 : "${OB_SRC:=$OB_ROOT/src}" "${OB_T:=$OB_ROOT/t}" "${OB_R:=$OB_ROOT/r}" "${OB_WORK:=$OB_ROOT/work}"
 : "${OB_OVL:=$OB_ROOT/ovl}" "${OB_LOGS:=$OB_ROOT/logs}" "${OB_SPLAT:=$OB_ROOT/splat/SLPM_654.28}"
 : "${OB_RUN:=$REPO/game_files}"
+: "${OB_OVERLAYS:=demo submain netdnas game single netwk netaq nethttp}"
 # The game the runner boots (patch 0043): the boot ELF in the extracted folder (default, as before), the folder
 # itself, or an ISO 9660 disc image, e.g. OB_GAME="$REPO/ps2_emu/roms/Biohazard - Outbreak (English v2.1).iso".
 : "${OB_GAME:=$OB_RUN/SLPM_654.28}"
@@ -185,6 +187,17 @@ cmd_test() {
     else
         echo "pcsx2_sio2: 0/0 (build failed: $OB_LOGS/ob-pcsx2-sio2-tests-build.log)"; red=1
     fi
+    # PCSX2's DEV9 + SMAP + Sockets adapter (native/pcsx2_dev9/tests): DHCP and DNS through the SMAP registers.
+    log="$OB_LOGS/ob-test-pcsx2_dev9.log"
+    if vc cmake --build "$gsb" --target ob_pcsx2_dev9_tests > "$OB_LOGS/ob-pcsx2-dev9-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./pcsx2_dev9/ob_pcsx2_dev9_tests.exe) > "$log" 2>&1
+        r=$(grep -o 'pcsx2_dev9: [0-9]*/[0-9]*' "$log" | tail -1)
+        echo "${r:-pcsx2_dev9: 0/0 (no result: $log)}"
+        grep -a '^SKIP' "$log" | head -3
+        if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
+    else
+        echo "pcsx2_dev9: 0/0 (build failed: $OB_LOGS/ob-pcsx2-dev9-tests-build.log)"; red=1
+    fi
     # The settings menu's core (native/ob_ui/tests): ini editing, the disc check, the menu trigger, memory cards.
     log="$OB_LOGS/ob-test-ob_ui.log"
     if vc cmake --build "$gsb" --target ob_ui_tests > "$OB_LOGS/ob-ui-tests-build.log" 2>&1; then
@@ -212,10 +225,13 @@ cmd_recompile() {
     # libpad2 HLE no-ops them (patch 0016), which leaves that client unbound. main-functions.csv names them, so
     # dropping them from the stubs list is not enough (the runtime stub's name matches): [general] recompile keeps
     # the game's code (patch 0073). The pads stay on the scePad2 HLE.
+    # And libkernl's _sceFsSemInit (online play, reports/2026-10-26-online-play.md): with a network adapter the boot's
+    # HDD check reaches the EE file I/O's semaphore setup (CreateSema once), a PS2Recomp stub left as a TODO.
     sed -e 's|^ghidra_output = ""|ghidra_output = "main-functions.csv"|' \
         -e '/^ *"_\{0,1\}sce\(Mpeg\|Ipu\)[A-Za-z0-9_]*@0x[0-9A-Fa-f]*",\{0,1\}$/d' \
         -e '/^ *"sceDbc\(Init\|End\)@0x[0-9A-Fa-f]*",\{0,1\}$/d' \
-        -e '/^\[general\]$/a recompile = ["sceDbcInit", "sceDbcEnd"]' analyzed.toml > decomp.toml
+        -e '/^ *"_sceFsSemInit@0x[0-9A-Fa-f]*",\{0,1\}$/d' \
+        -e '/^\[general\]$/a recompile = ["sceDbcInit", "sceDbcEnd", "_sceFsSemInit"]' analyzed.toml > decomp.toml
     grep -c "instructions = \[" decomp.toml | sed 's/^/instruction patch blocks: /'
     grep -c '"_\{0,1\}sce\(Mpeg\|Ipu\)' decomp.toml | sed 's/^/libmpeg\/libipu stubs left in config: /'
     grep -c '"sceDbc\(Init\|End\)@' decomp.toml | sed 's/^/sceDbcInit\/End stubs left in config: /'
@@ -230,9 +246,11 @@ cmd_recompile() {
     # an identical file keeps its mtime, so ninja rebuilds only what changed.
     local w; w=$(cygpath -w "$OB_WORK/output")
     local srcs=("$w\\*.cpp") hdrs=("$w\\ps2_recompiled_functions.h" "$w\\ps2_recompiled_stubs.h") out
-    # Overlays (ovl-cycle.sh demo submain netdnas).
+    # Overlays (ovl-cycle.sh demo submain netdnas). NETWK (lobby), NETAQ (in-game messages) and NETHTTP (the game's
+    # HTTPS client) are online play (docs/plans/2026-10-26-online-play.md S0.1). NETDNAS keeps splat's 30 functions:
+    # the rest has code scrambled at rest (reports/2026-10-26-online-play.md entry 3); our client skips DNAS.
     cd "$OB_OVL" || return 1
-    for o in demo submain netdnas game single; do
+    for o in $OB_OVERLAYS; do
         up=$(echo "$o" | tr a-z A-Z)
         asm="$OB_SPLAT/en/$o"; [ -d "$asm" ] || asm="$OB_SPLAT/$o"
         "$PY" -I "$REPO/tools/mwo3_to_elf.py" "$OB_RUN/PROG/$up.BIN" "$o.elf" || return 1

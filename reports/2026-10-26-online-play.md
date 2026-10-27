@@ -67,6 +67,61 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Evidence:** `.run/spike/mbedtls-android.sh`, `C:\ob\logs\mbedtls-android-build.log`.
 - **Take-away:** old CMake projects under the NDK toolchain: set CMP0057 NEW.
 
+### 6. Separate build trees so the touch-controls work keeps its builds
+
+- **Seen:** `ob.sh recompile` copies generated code into `C:\ob\src` and builds `C:\ob\r`, both shared with the
+  touch-controls session; `C:\ob\up` already had that session's commit b70986b past patch 0080.
+- **Fix:** `C:\ob\net-up` = git worktree of `C:\ob\up`, branch `net-online` at 58145be (= 0080); `C:\ob\net-src`,
+  `net-r`, `net-work`, `net-ovl`, `net-logs`, `net-pcsx2-gs-build`, `net-diag-build`, `net-ioptests` through ob.sh's
+  `OB_*` variables (`.run/spike/net-env.sh`). `ob.sh` overlay list is `OB_OVERLAYS` (default adds netwk netaq nethttp).
+- **Evidence:** first runner build 1,422 s (once, CPU shared with the GS library build); the next runner-only build
+  after the DEV9 patch 88 s with 0 game units rebuilt.
+- **Take-away:** for parallel work, give each line of work its own `OB_*` trees, not its own copy of everything.
+
+### 7. Test bugs while bringing up the DEV9 tests
+
+- **Seen:** the TX descriptor was never taken; then DHCP answered without a DNS server; then DMA 8 "accepted" a CHCR
+  meant to be refused.
+- **Cause:** (a) EMAC3 registers start at SMAP + 0x1F00, not + 0x2000 (`DEV9.h:240`); (b) the DHCP server sends only
+  the options asked for (option 55); (c) `0x01000202 & 0x01000201` is the valid DEV9-to-RAM mode.
+- **Fix:** the test's constants and request; `native/pcsx2_dev9/tests/dev9_tests.cpp` 15/15.
+- **Take-away:** take register bases from the header, not from a neighbouring block.
+
+### 8. PCSX2's internal DNS fails upper-case questions
+
+- **Seen:** a listed host asked as `GATE1.JP...` came back SERVFAIL with no answer.
+- **Found by:** dumping the reply, then `DNS_Server.cpp` 125-200.
+- **Cause:** `CheckHostList` stores the answer under the lowered name, `FinaliseDNS` looks it up under the name as
+  asked.
+- **Fix:** none needed for the game (its strings are lower case); the test asks in lower case and documents it;
+  `ob_dev9_open` lowers configured names (`DNS_Server.cpp:183`).
+- **Take-away:** a candidate upstream PCSX2 fix (not sent; leaving the machine needs the developer's OK).
+
+### 9. With an adapter, the boot's HDD check reaches an unwritten stub
+
+- **Seen:** adapter on: "dev9: CXD9611 detected", "ATA: error: there is no device0", HDD/PFS start, then
+  `Unimplemented PS2 stub called: sceFsSemInit` and the runner stops (`C:\ob\net-logs\boot-dev9-on.err`).
+- **Cause:** a real PS2 always has the adapter, so the game checks for an HDD install at boot; without an adapter that
+  path never ran here. `_sceFsSemInit` (CreateSema once for the EE file I/O) is in PS2Recomp's stub list as a TODO.
+- **Fix (part 1):** recompile the game's own `_sceFsSemInit` (`ob.sh` `[general] recompile`, as 0073 did for
+  sceDbcInit). Single player is unchanged: the adapter is off there and this path is not reached. The boot then runs
+  its full 60 s at 60 fps.
+- **Still stuck (part 2, open):** the HDD check's `sceDevctl("hdd0:", ...)` (recompiled game code) calls the IOP file
+  service over an RPC client that was never bound (`[IOP/RPC trace:unhandled] sid=0x0 rpc=0x17 ... "hdd0"`): PS2Recomp's
+  `sceFsInit` HLE returns 0 without binding SID 0x80000001. USBD/USBKB then never load. On a PS2/PCSX2 the reply is
+  "no such device" and the boot goes on.
+- **Cost found:** dropping one stub changed `ps2_recompiled_stubs.h`, which every generated unit includes: the runner
+  rebuilt all game units, 1,271 s. Against the 5-minute rule; to fix in the build setup.
+- **Evidence:** `C:\ob\net-logs\boot-dev9-on.err`, `ob-runner-build.log`; ob.sh.
+
+### 10. PS2Recomp 0071's DMA interrupt numbers for SIO2 may be one low (unverified)
+
+- **Seen:** intrman numbers DMA channels 7 and up from 0x28 (SPU2 core 1 = 0x28 in PS2Recomp's own constants;
+  ps2sdk `intrman.h`, from memory, not opened), so channel 8 = 0x29, 11 = 0x2C, 12 = 0x2D; 0071 uses 0x20 + channel
+  (0x2B/0x2C).
+- **Effect:** none seen (memory cards work); sio2man probably doesn't wait on those interrupts.
+- **Action:** 0081 uses 0x29 for DEV9; 0071 left as is, noted here. Check against ps2sdk before changing it.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
@@ -77,8 +132,13 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 
 ## Still open
 
-- S0.1-S0.3 done (research 7.4; plan P4 result). The overlays are recompiled but not booted: needs a runner tree
-  apart from `C:\ob\src` (shared with the touch-controls work).
+- S0.1-S0.3 done (research 7.4; plan P4 result).
+- S1 done: `native/pcsx2_dev9` builds; tests 15/15 (DHCP offer with address and DNS server, INTC 13 on receive,
+  DNS host override, DMA 8 refusal). S2 patch done: PS2Recomp 0081 (provisional number), IOP tests 5/5 suites; the
+  runner with `PS2X_DEV9=pcsx2` finds the adapter ("dev9: CXD9611 detected").
+- Open: the boot's HDD check with an adapter (entry 9 part 2); then the network menu (S3). ps2x_tests and the gate
+  not yet run in the net trees (ps2x_tests needs a tools tree from `C:\ob\net-src`).
+- Open: a stub-list change rebuilds every game unit (21 min): build-setup defect (entry 9).
 - mbedTLS on a real device and against the PS2's actual ClientHello: S3 / S6.
 
 ## Useful for other developers

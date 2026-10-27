@@ -1,0 +1,610 @@
+From fbad8bd380988492156340342f1acc6eed4491c7 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:30:28 -0400
+Subject: [PATCH] IOP: optional external DEV9 device (the 0x1000xxxx page and
+ the revision register at their access widths, DMA 8 ended by the device, its
+ interrupt INTC line 13, run with the IOP clock), dmacman slice DMA on channel
+ 8 through it; runtime: PS2X_DEV9=pcsx2|off (default off) from the external
+ library, PS2X_NET_IF, PS2X_NET_HOSTS
+
+---
+ ps2xIOP/include/ps2x/iop/iop_dev9.h           | 48 +++++++++++
+ ps2xIOP/src/emulator/core/iop_memory.cpp      | 56 ++++++++++++
+ ps2xIOP/src/emulator/core/iop_memory.h        |  9 ++
+ ps2xIOP/src/emulator/iop_emulator.cpp         | 41 +++++++--
+ ps2xIOP/src/emulator/iop_emulator_const.h     |  2 +
+ ps2xIOP/tests/iop_emulator_tests.cpp          | 86 +++++++++++++++++--
+ .../include/runtime/ps2_dev9_external.h       | 27 ++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 54 ++++++++++++
+ 8 files changed, 313 insertions(+), 10 deletions(-)
+ create mode 100644 ps2xIOP/include/ps2x/iop/iop_dev9.h
+ create mode 100644 ps2xRuntime/include/runtime/ps2_dev9_external.h
+
+diff --git a/ps2xIOP/include/ps2x/iop/iop_dev9.h b/ps2xIOP/include/ps2x/iop/iop_dev9.h
+new file mode 100644
+index 0000000..2a785ea
+--- /dev/null
++++ b/ps2xIOP/include/ps2x/iop/iop_dev9.h
+@@ -0,0 +1,48 @@
++#pragma once
++
++#include <cstdint>
++
++namespace ps2x::iop
++{
++    // Optional external DEV9 (the expansion bay: network adapter). Unset (the default), the DEV9 page is plain
++    // storage and nothing answers, so a DEV9 driver finds no hardware. Set, the IOP hands it every access to the
++    // SPEED/SMAP/flash page 0x10000000..0x1000FFFF and to the revision register 0x1F80146E (8 and 16 bits), each at
++    // the width the guest used (a 32-bit read of the SMAP receive FIFO pops data: no width is built from another), and
++    // every transfer on DMA channel 8, as PCSX2's IopMem.cpp, ps2/Iop/IopHwRead.cpp / IopHwWrite.cpp (HW_DEV9_DATA)
++    // and IopDma.cpp psxDma8 do. The device raises its interrupt (INTC line 13, PCSX2 dev9Interrupt) and ends channel-8
++    // transfers (psxDMA8Interrupt) at any time, as a network card does when a frame arrives, so the IOP runs it with
++    // its clock like the SPU2 device. Time is the IOP cycle count; all calls come from the thread running the IOP.
++    class Dev9Device
++    {
++    public:
++        enum Event : uint32_t
++        {
++            EventIrq = 1u,  // DEV9 interrupt (INTC line 13)
++            EventDma8 = 2u, // channel-8 transfer done
++        };
++
++        virtual ~Dev9Device() = default;
++        virtual uint8_t read8(uint32_t phys) = 0;
++        virtual uint16_t read16(uint32_t phys) = 0;
++        virtual uint32_t read32(uint32_t phys) = 0;
++        virtual void write8(uint32_t phys, uint8_t value) = 0;
++        virtual void write16(uint32_t phys, uint16_t value) = 0;
++        virtual void write32(uint32_t phys, uint32_t value) = 0;
++        // A transfer started on channel 8 (CHCR 0x01000201, IOP RAM to DEV9, or 0x01000200, DEV9 to IOP RAM); bcr =
++        // block size in words (low 16 bits) and block count (high 16), as psxDma8. The device moves the bytes now;
++        // false for a CHCR psxDma8 does not take (the channel stays busy). The end comes as EventDma8.
++        virtual bool dma(uint8_t *iopRam, uint32_t ramSize, uint32_t madr, uint32_t bcr, uint32_t chcr) = 0;
++        virtual void advance(uint64_t cycle) = 0;           // run the device up to cycle
++        [[nodiscard]] virtual uint64_t nextEventCycle() = 0; // when advance is next due; UINT64_MAX = never
++        virtual uint32_t takeEvents() = 0;                  // Event bits raised since the last call
++    };
++
++    constexpr uint32_t kDev9DeviceBase = 0x10000000u;
++    constexpr uint32_t kDev9DeviceEnd = 0x10010000u;
++    constexpr uint32_t kDev9Revision = 0x1F80146Eu; // PCSX2 HW_DEV9_DATA
++    constexpr uint32_t kDmaDev9Chcr = 0x1F801518u;  // channel 8
++    constexpr int kDev9Irq = 13;
++
++    void setDev9Device(Dev9Device *device); // startup and tests; null = none
++    [[nodiscard]] Dev9Device *dev9Device();
++}
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.cpp b/ps2xIOP/src/emulator/core/iop_memory.cpp
+index cb03efa..31cb23e 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.cpp
++++ b/ps2xIOP/src/emulator/core/iop_memory.cpp
+@@ -9,6 +9,17 @@ namespace ps2x::iop
+     {
+         Spu2Device *g_spu2Device = nullptr;
+         Sio2Device *g_sio2Device = nullptr;
++        Dev9Device *g_dev9Device = nullptr;
++    }
++
++    void setDev9Device(Dev9Device *device)
++    {
++        g_dev9Device = device;
++    }
++
++    Dev9Device *dev9Device()
++    {
++        return g_dev9Device;
+     }
+ 
+     void setSpu2Device(Spu2Device *device)
+@@ -45,6 +56,7 @@ namespace ps2x::iop::detail
+         constexpr uint32_t kDmaSio2InChcr = 0x1F801548u;  // channel 11
+         constexpr uint32_t kDmaSio2OutChcr = 0x1F801558u; // channel 12
+         constexpr int kSio2Irq = 17;                       // INTC line 17 (PCSX2 Sio2::Interrupt)
++        constexpr int kDmaDev9Irq = 0x29;                  // channel 8 (intrman numbers channels 7.. from 0x28)
+ 
+         uint32_t alignUp(uint32_t value, uint32_t alignment)
+         {
+@@ -79,6 +91,8 @@ namespace ps2x::iop::detail
+             return m_ram[phys];
+         if (phys >= ScratchBase && phys < ScratchBase + ScratchSize)
+             return m_scratch[phys - ScratchBase];
++        if (Dev9Device *dev9 = dev9At(phys, true))
++            return dev9->read8(phys);
+         if (Spu2Device *spu2 = spu2At(phys))
+             return static_cast<uint8_t>(spu2->read16(phys & ~1u, now()) >> ((phys & 1u) * 8u));
+         if (Sio2Device *sio2 = sio2At(phys))
+@@ -97,6 +111,8 @@ namespace ps2x::iop::detail
+             std::memcpy(&value, m_ram.data() + phys, sizeof(value));
+             return value;
+         }
++        if (Dev9Device *dev9 = dev9At(phys, true); dev9 && (phys & 1u) == 0u)
++            return dev9->read16(phys);
+         if (Spu2Device *spu2 = spu2At(phys); spu2 && (phys & 1u) == 0u)
+             return spu2->read16(phys, now());
+         if (Sio2Device *sio2 = sio2At(phys); sio2 && (phys & 1u) == 0u && phys != kSio2Fifo)
+@@ -119,6 +135,8 @@ namespace ps2x::iop::detail
+             std::memcpy(&value, m_scratch.data() + (phys - ScratchBase), sizeof(value));
+             return value;
+         }
++        if (Dev9Device *dev9 = dev9At(phys, false); dev9 && (phys & 3u) == 0u)
++            return dev9->read32(phys);
+         if (Spu2Device *spu2 = spu2At(phys); spu2 && (phys & 3u) == 0u) // two halfwords, as PCSX2's iopMemRead32
+             return spu2->read16(phys, now()) | (static_cast<uint32_t>(spu2->read16(phys + 2u, now())) << 16u);
+         if (Sio2Device *sio2 = sio2At(phys); sio2 && (phys & 3u) == 0u)
+@@ -146,6 +164,11 @@ namespace ps2x::iop::detail
+             m_scratch[phys - ScratchBase] = value;
+             return;
+         }
++        if (Dev9Device *dev9 = dev9At(phys, true))
++        {
++            dev9->write8(phys, value);
++            return;
++        }
+         if (Spu2Device *spu2 = spu2At(phys))
+         {
+             const uint32_t half = phys & ~1u, shift = (phys & 1u) * 8u;
+@@ -180,6 +203,11 @@ namespace ps2x::iop::detail
+             markOwned(phys, sizeof(value));
+             return;
+         }
++        if (Dev9Device *dev9 = dev9At(phys, true); dev9 && (phys & 1u) == 0u)
++        {
++            dev9->write16(phys, value);
++            return;
++        }
+         if (Spu2Device *spu2 = spu2At(phys); spu2 && (phys & 1u) == 0u)
+         {
+             spu2->write16(phys, value, now());
+@@ -209,6 +237,11 @@ namespace ps2x::iop::detail
+             std::memcpy(m_scratch.data() + (phys - ScratchBase), &value, sizeof(value));
+             return;
+         }
++        if (Dev9Device *dev9 = dev9At(phys, false); dev9 && (phys & 3u) == 0u)
++        {
++            dev9->write32(phys, value);
++            return;
++        }
+         if (Spu2Device *spu2 = spu2At(phys); spu2 && (phys & 3u) == 0u) // two halfwords, as PCSX2's iopMemWrite32
+         {
+             spu2->write16(phys, static_cast<uint16_t>(value), now());
+@@ -328,6 +361,12 @@ namespace ps2x::iop::detail
+         }
+ 
+         m_hardware[address] = value;
++        if (address == kDmaDev9Chcr && (value & kDmaStart) != 0u)
++        {
++            if (Dev9Device *dev9 = dev9Device())
++                startDev9Dma(*dev9, value);
++            return;
++        }
+         if ((address == kDmaSio2InChcr || address == kDmaSio2OutChcr) && (value & kDmaStart) != 0u)
+         {
+             if (Sio2Device *sio2 = sio2Device())
+@@ -418,6 +457,23 @@ namespace ps2x::iop::detail
+         m_dmaStart = DmaStart{static_cast<int>(0x20u + channel), delay, channelBase, madr + bytes};
+     }
+ 
++    void IopMemory::startDev9Dma(Dev9Device &dev9, uint32_t chcr)
++    {
++        // PCSX2 IopDma.cpp psxDma8: the bytes move at the CHCR write; DEV9 ends the transfer itself
++        // (psxDMA8Interrupt, Dev9Device::EventDma8), then MADR points past it and the channel interrupt follows.
++        // A CHCR psxDma8 does not take stays busy with no interrupt, as there.
++        const uint32_t channelBase = kDmaDev9Chcr - 8u; // MADR
++        const uint32_t madr = readHardware32(channelBase) & (RamSize - 1u);
++        const uint32_t bcr = readHardware32(channelBase + 4u);
++        const uint32_t bytes = (bcr >> 16u) * (bcr & 0xFFFFu) * 4u;
++        if (!dev9.dma(m_ram.data(), RamSize, madr, bcr, chcr))
++            return;
++        m_hardware[kDmaDev9Chcr] = chcr & ~kDmaStart;
++        if ((chcr & 1u) == 0u) // DEV9 to IOP RAM
++            markOwned(madr, std::min<uint32_t>(bytes, RamSize - madr));
++        m_dmaStart = DmaStart{kDmaDev9Irq, 0u, channelBase, madr + bytes, true};
++    }
++
+     void IopMemory::completeDma(const DmaStart &dma)
+     {
+         if (dma.channelBase != 0u)
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index 278d723..ae8a6b2 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -9,6 +9,7 @@
+ #include <unordered_map>
+ #include <vector>
+ 
++#include "ps2x/iop/iop_dev9.h"
+ #include "ps2x/iop/iop_sio2.h"
+ #include "ps2x/iop/iop_spu2.h"
+ 
+@@ -108,6 +109,14 @@ namespace ps2x::iop::detail
+         {
+             return phys >= kSio2DeviceBase && phys < kSio2DeviceEnd ? sio2Device() : nullptr;
+         }
++        // The external Dev9Device when one is set and phys is on its page, or (8 and 16-bit accesses) its revision
++        // register 0x1F80146E, else null.
++        [[nodiscard]] static Dev9Device *dev9At(uint32_t phys, bool revision) noexcept
++        {
++            const bool mine = (phys >= kDev9DeviceBase && phys < kDev9DeviceEnd) || (revision && phys == kDev9Revision);
++            return mine ? dev9Device() : nullptr;
++        }
++        void startDev9Dma(Dev9Device &dev9, uint32_t chcr);
+         void writeSio2(Sio2Device &sio2, uint32_t phys, uint32_t value);
+         void startSio2Dma(Sio2Device &sio2, uint32_t chcrAddress, uint32_t chcr);
+ 
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 8ba047d..59117d2 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -138,6 +138,7 @@ namespace ps2x::iop::detail
+             pendingDmaInterrupts.clear();
+             nextDmaCompletionCycle = UINT64_MAX;
+             nextSpu2Cycle = 0;
++            nextDev9Cycle = 0;
+             pendingGuestCallbacks.clear();
+             nextModuleId = 1;
+             moduleCursor = kModuleLoadBase;
+@@ -198,6 +199,9 @@ namespace ps2x::iop::detail
+                 // An external SPU2 device ends its own transfers (serviceSpu2): no completion cycle until it does.
+                 pendingDmaInterrupts[dma->irq] =
+                     PendingDma{dma->deviceCompletes ? UINT64_MAX : totalCycles + dma->delayCycles, *dma};
++                // An external DEV9 ends its transfer inside it (psxDMA8Interrupt): service it at once to see that.
++                if (dma->irq == kDev9DmaIrq && dev9Device())
++                    nextDev9Cycle = totalCycles;
+                 updateNextDmaCompletion();
+             }
+         }
+@@ -211,6 +215,22 @@ namespace ps2x::iop::detail
+                 nextDmaCompletionCycle = std::min(nextDmaCompletionCycle, pending.completionCycle);
+             if (spu2Device())
+                 nextDmaCompletionCycle = std::min(nextDmaCompletionCycle, nextSpu2Cycle);
++            if (dev9Device())
++                nextDmaCompletionCycle = std::min(nextDmaCompletionCycle, nextDev9Cycle);
++        }
++
++        // External DEV9: run it to now, end the channel-8 transfer it finished, note when it is next due. Returns
++        // whether it raised its interrupt (INTC line 13), dispatched with the DMA interrupts.
++        bool serviceDev9(Dev9Device &dev9)
++        {
++            dev9.advance(totalCycles);
++            const uint32_t events = dev9.takeEvents();
++            if ((events & Dev9Device::EventDma8) != 0u)
++                if (const auto it = pendingDmaInterrupts.find(kDev9DmaIrq); it != pendingDmaInterrupts.end() && it->second.dma.deviceCompletes)
++                    it->second.completionCycle = totalCycles;
++            nextDev9Cycle = dev9.nextEventCycle();
++            updateNextDmaCompletion();
++            return (events & Dev9Device::EventIrq) != 0u;
+         }
+ 
+         // External SPU2 (patch 0056): run it to now, end the transfers it finished, note when it is next due.
+@@ -415,9 +435,9 @@ namespace ps2x::iop::detail
+             {
+                 // sio2man programs the SIO2 channels 11/12 through sceSetSliceDMA / sceStartDMA (ps2sdk
+                 // iop/system/dmacman: MADR, BCR = count << 16 | size, CHCR = dir | 0x200 (| 0x40000000 when dir is
+-                // 0); start = CHCR | 0x01000000). With an external SIO2 (patch 0071) they reach the registers;
+-                // everything else stays a no-op returning 0, as before.
+-                const bool sio2Channel = sio2Device() && (a0 == 11u || a0 == 12u);
++                // 0); start = CHCR | 0x01000000). With an external SIO2 (patch 0071) they reach the registers, and so
++                // does the DEV9 driver's channel 8 with an external DEV9; everything else stays a no-op returning 0.
++                const bool sio2Channel = (sio2Device() && (a0 == 11u || a0 == 12u)) || (dev9Device() && a0 == 8u);
+                 const uint32_t channelBase = 0x1F801500u + (a0 - 7u) * 0x10u;
+                 if (sio2Channel && call.ordinal == 28u) // sceSetSliceDMA(chan, addr, size, count, dir)
+                 {
+@@ -528,7 +548,8 @@ namespace ps2x::iop::detail
+                         servicePendingGuestCallbacks();
+                     continue;
+                 }
+-                if (!servicingDmaInterrupts && (!pendingDmaInterrupts.empty() || (spu2Device() && totalCycles >= nextSpu2Cycle)))
++                if (!servicingDmaInterrupts && (!pendingDmaInterrupts.empty() || (spu2Device() && totalCycles >= nextSpu2Cycle) ||
++                                                (dev9Device() && totalCycles >= nextDev9Cycle)))
+                     servicePendingDmaInterrupts();
+                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                     servicePendingGuestCallbacks();
+@@ -663,7 +684,10 @@ namespace ps2x::iop::detail
+             bool spu2Irq = false;
+             if (Spu2Device *spu2 = spu2Device(); spu2 && totalCycles >= nextSpu2Cycle)
+                 spu2Irq = serviceSpu2(*spu2);
+-            if (!spu2Irq && pendingDmaInterrupts.empty())
++            bool dev9Irq = false;
++            if (Dev9Device *dev9 = dev9Device(); dev9 && totalCycles >= nextDev9Cycle)
++                dev9Irq = serviceDev9(*dev9);
++            if (!spu2Irq && !dev9Irq && pendingDmaInterrupts.empty())
+                 return;
+ 
+             servicingDmaInterrupts = true;
+@@ -683,6 +707,8 @@ namespace ps2x::iop::detail
+             updateNextDmaCompletion();
+             if (spu2Irq)
+                 completed.push_back(kSpu2Irq);
++            if (dev9Irq)
++                completed.push_back(kDev9Irq);
+             try
+             {
+                 for (const int irq : completed)
+@@ -746,6 +772,8 @@ namespace ps2x::iop::detail
+                 next = std::min(next, pending.completionCycle);
+             if (spu2Device())
+                 next = std::min(next, nextSpu2Cycle);
++            if (dev9Device())
++                next = std::min(next, nextDev9Cycle);
+             if (!pendingGuestCallbacks.empty())
+                 next = std::min(next, pendingGuestCallbacks.begin()->first);
+             return timrman.nextEventCycle(next);
+@@ -875,6 +903,8 @@ namespace ps2x::iop::detail
+                             nextWake = std::min(nextWake, pending.completionCycle);
+                         if (spu2Device())
+                             nextWake = std::min(nextWake, nextSpu2Cycle);
++                        if (dev9Device())
++                            nextWake = std::min(nextWake, nextDev9Cycle);
+                         if (!pendingGuestCallbacks.empty())
+                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
+                         nextWake = timrman.nextEventCycle(nextWake);
+@@ -1026,6 +1056,7 @@ namespace ps2x::iop::detail
+         std::map<int, PendingDma> pendingDmaInterrupts;
+         uint64_t nextDmaCompletionCycle = UINT64_MAX; // earliest completionCycle above (patch 0049), and nextSpu2Cycle
+         uint64_t nextSpu2Cycle = 0;
++        uint64_t nextDev9Cycle = 0; // when an external Dev9Device is next due (serviceDev9)
+         std::vector<uint32_t> freeRpcStacks; // RPC handler thread stacks, allocated once and reused (patch 0075)                   // when the external SPU2 is next due (patch 0056); 0 = at once
+         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
+         uint32_t nextModuleId = 1;
+diff --git a/ps2xIOP/src/emulator/iop_emulator_const.h b/ps2xIOP/src/emulator/iop_emulator_const.h
+index b06c5b5..3ab1423 100644
+--- a/ps2xIOP/src/emulator/iop_emulator_const.h
++++ b/ps2xIOP/src/emulator/iop_emulator_const.h
+@@ -17,6 +17,8 @@ constexpr uint32_t kStackGuardBytes = 64u;
+ constexpr int kSpu2Irq = 9;
+ constexpr int kSpu2Dma4Irq = 0x24;
+ constexpr int kSpu2Dma7Irq = 0x28;
++// DMA channel 8 (DEV9): intrman numbers channels 7 and up from 0x28 (ps2sdk intrman.h IOP_IRQ_DMA_DEV9).
++constexpr int kDev9DmaIrq = 0x29;
+ // RPC handlers run as IOP threads (patch 0075): stack, scheduler step and budget (one IOP second at 36.864 MHz).
+ constexpr uint32_t kRpcThreadStackSize = 0x2000u;
+ constexpr uint64_t kRpcThreadStepCycles = 64u;
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 1a559bd..60d3c27 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -1,4 +1,5 @@
+ #include "ps2x/iop/iop_spu2.h"
++#include "ps2x/iop/iop_dev9.h"
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+@@ -606,10 +607,11 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset + 0x40u, importTable, sizeof(importTable));
+     }
+ 
+-    // Start function: sceSetSliceDMA(11, 0x2000, 4, 1, 1), sceStartDMA(11), then returns
+-    // SecrAuthCard(2, 0, 0) | sceSetSliceDMA's result << 4 (patch 0071).
+-    void writeSio2DriverIrx(TestHost &host, uint32_t address)
++    // Start function: sceSetSliceDMA(channel, 0x2000, 4, 1, 1), sceStartDMA(channel), then returns
++    // SecrAuthCard(2, 0, 0) | sceSetSliceDMA's result << 4 (patch 0071; channel 8 for the DEV9 test).
++    void writeSio2DriverIrx(TestHost &host, uint32_t address, uint32_t channel = 11u)
+     {
++        const uint32_t loadChannel = 0x34040000u | channel; // ori a0, zero, channel
+         constexpr uint32_t codeOffset = 0x100u;
+         constexpr uint32_t loadAddress = 0x00012000u;
+         constexpr uint32_t dmacTableAddress = loadAddress + 0x80u;
+@@ -631,11 +633,11 @@ namespace
+ 
+         const uint32_t code[] = {
+             0x27BDFFE0u, 0xAFBF001Cu,                         // addiu sp,-32; sw ra,28(sp)
+-            0x3404000Bu, 0x34052000u, 0x34060004u, 0x34070001u, // a0 = 11, a1 = 0x2000, a2 = 4, a3 = 1
++            loadChannel, 0x34052000u, 0x34060004u, 0x34070001u, // a0 = channel, a1 = 0x2000, a2 = 4, a3 = 1
+             0x34080001u, 0xAFA80010u,                         // dir = 1 at 16(sp)
+             0x0C000000u | ((sliceStub >> 2u) & 0x03FFFFFFu), 0x00000000u,
+             0xAFA20014u,                                      // sw v0,20(sp)
+-            0x3404000Bu,
++            loadChannel,
+             0x0C000000u | ((startStub >> 2u) & 0x03FFFFFFu), 0x00000000u,
+             0x34040002u, 0x00002825u,                         // a0 = 2, a1 = 0
+             0x0C000000u | ((authStub >> 2u) & 0x03FFFFFFu), 0x00003025u, // a2 = 0 (delay slot)
+@@ -1613,6 +1615,80 @@ int main()
+                     "sceSetSliceDMA + sceStartDMA must start DMA 11 with ps2sdk's MADR/BCR/CHCR")) return 1;
+     }
+ 
++    {
++        // External DEV9 device (network adapter): the 0x1000xxxx page at every width and the revision register
++        // (8/16-bit) go to it unsplit, DMA 8 hands it the transfer and waits for its DMA event, and the emulator runs
++        // it with its clock, ending the transfer on EventDma8.
++        struct FakeDev9 final : ps2x::iop::Dev9Device
++        {
++            std::vector<std::pair<uint32_t, int>> reads, writes; // (phys, width in bits)
++            uint32_t dmaMadr = 0u, dmaBcr = 0u, dmaChcr = 0u;
++            uint64_t advances = 0u, lastAdvance = 0u;
++            uint32_t pending = 0u;
++            uint8_t read8(uint32_t phys) override { reads.emplace_back(phys, 8); return 0x32u; }
++            uint16_t read16(uint32_t phys) override { reads.emplace_back(phys, 16); return 0x1234u; }
++            uint32_t read32(uint32_t phys) override { reads.emplace_back(phys, 32); return 0xCAFEF00Du; }
++            void write8(uint32_t phys, uint8_t) override { writes.emplace_back(phys, 8); }
++            void write16(uint32_t phys, uint16_t) override { writes.emplace_back(phys, 16); }
++            void write32(uint32_t phys, uint32_t) override { writes.emplace_back(phys, 32); }
++            bool dma(uint8_t *ram, uint32_t, uint32_t madr, uint32_t bcr, uint32_t chcr) override
++            {
++                dmaMadr = madr;
++                dmaBcr = bcr;
++                dmaChcr = chcr;
++                if ((chcr & 1u) == 0u)
++                    ram[madr] = 0x77u;
++                pending |= EventDma8;
++                return (chcr & 0x01000200u) == 0x01000200u;
++            }
++            void advance(uint64_t cycle) override
++            {
++                ++advances;
++                lastAdvance = cycle;
++            }
++            uint64_t nextEventCycle() override { return lastAdvance + 512u; }
++            uint32_t takeEvents() override { return std::exchange(pending, 0u); }
++        } fake;
++
++        ps2x::iop::setDev9Device(&fake);
++        ps2x::iop::detail::IopMemory memory;
++        const uint32_t fifo = memory.read32(0xB0001200u);   // kseg1 address of a SMAP register
++        const uint16_t half = memory.read16(0x1000002Au);
++        const uint8_t revision = memory.read8(0x1F80146Eu);
++        memory.write32(0x10002008u, 0x8000u);
++        memory.write16(0x10003F00u, 0x8000u);
++        memory.write8(0x1F80146Eu, 1u);
++        const bool unsplit = fifo == 0xCAFEF00Du && half == 0x1234u && revision == 0x32u &&
++                             fake.reads == std::vector<std::pair<uint32_t, int>>{{0x10001200u, 32}, {0x1000002Au, 16}, {0x1F80146Eu, 8}} &&
++                             fake.writes == std::vector<std::pair<uint32_t, int>>{{0x10002008u, 32}, {0x10003F00u, 16}, {0x1F80146Eu, 8}};
++        memory.write32(0x1F801510u, 0x4000u);            // channel 8 MADR
++        memory.write32(0x1F801514u, (3u << 16) | 0x10u); // BCR: 3 blocks of 16 words
++        memory.write32(0x1F801518u, 0x01000200u);        // CHCR: start, DEV9 to RAM
++        const auto dma8 = memory.takeDmaStart();
++        const uint32_t chcrAfter = memory.read32(0x1F801518u);
++        ps2x::iop::setDev9Device(nullptr);
++        if (!expect(unsplit, "DEV9 page and revision register accesses must reach the external device at their width")) return 1;
++        if (!expect(fake.dmaMadr == 0x4000u && fake.dmaBcr == ((3u << 16) | 0x10u) && fake.dmaChcr == 0x01000200u &&
++                        memory.read8(0x4000u) == 0x77u,
++                    "a DMA 8 start must hand the device its RAM address, BCR and CHCR")) return 1;
++        if (!expect(dma8.has_value() && dma8->deviceCompletes && dma8->irq == 0x29 && dma8->endAddress == 0x4000u + 192u &&
++                        (chcrAfter & 0x01000000u) == 0u,
++                    "a DMA 8 transfer must wait for the device and end with the channel 8 interrupt (0x29)")) return 1;
++
++        // The DEV9 driver's way in: dmacman sceSetSliceDMA(8, ...) + sceStartDMA(8), then the IOP's clock.
++        fake.advances = 0u;
++        ps2x::iop::setDev9Device(&fake);
++        writeSio2DriverIrx(host, 0x600u, 8u);
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x600u);
++        iop.runEeCycles(8u * 4096u);
++        iop.syncEe();
++        ps2x::iop::setDev9Device(nullptr);
++        if (!expect(driver.handled && (driver.startResult >> 4) == 1 && fake.dmaMadr == 0x2000u &&
++                        fake.dmaBcr == ((1u << 16) | 4u) && (fake.dmaChcr & 0x01000201u) == 0x01000201u,
++                    "sceSetSliceDMA + sceStartDMA on channel 8 must start the external DEV9's DMA")) return 1;
++        if (!expect(fake.advances > 0u, "the emulator must run the external DEV9 with its clock")) return 1;
++    }
++
+     iop.reset();
+     writeVblankSchedulingIrx(host, 0x100u);
+     const ModuleLoadResult vblankModule = iop.loadModuleBuffer(0x100u);
+diff --git a/ps2xRuntime/include/runtime/ps2_dev9_external.h b/ps2xRuntime/include/runtime/ps2_dev9_external.h
+new file mode 100644
+index 0000000..d5166fb
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_dev9_external.h
+@@ -0,0 +1,27 @@
++#ifndef PS2_DEV9_EXTERNAL_H
++#define PS2_DEV9_EXTERNAL_H
++
++#include <array>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "ps2x/iop/iop_dev9.h"
++
++// Optional external DEV9 (network adapter) from the same external library as the GS (PS2X_EXTERNAL_GS_DIR):
++// PS2X_DEV9 = pcsx2 | off (the default: the disc's DEV9 driver loads at boot in single player too, and finds no
++// adapter, as before). Started in PS2Runtime::initialize and installed as the IOP's Dev9Device. The adapter reaches
++// the network through host sockets on interfaceName ("" = automatic) and answers the game's DHCP and DNS itself; a
++// name in hosts resolves to its address (the game's fixed server names pointed at the chosen server).
++struct PS2Dev9Host
++{
++    std::string name;
++    std::array<uint8_t, 4> address{};
++};
++
++#ifdef PS2X_EXTERNAL_GS
++ps2x::iop::Dev9Device *ps2CreateExternalDev9(const std::string &interfaceName, const std::vector<PS2Dev9Host> &hosts,
++                                             std::string *error); // null = failure, reason in *error
++#endif
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 9fb4db9..9fd7120 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -9,6 +9,7 @@
+ #include "runtime/gs/gs_external.h"
+ #include "runtime/ps2_ui_external.h"
+ #include "runtime/ps2_spu2_external.h"
++#include "runtime/ps2_dev9_external.h"
+ #include "runtime/ps2_sio2_external.h"
+ #include "runtime/ps2_ipu_external.h"
+ #include "runtime/ee_scheduler.h"
+@@ -31,6 +32,7 @@
+ #include <fstream>
+ #include <algorithm>
+ #include <array>
++#include <cstdio>
+ #include <cstring>
+ #include <cstdlib>
+ #include <limits>
+@@ -59,6 +61,7 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
+ static AudioStream s_spu2Stream{}; // the external SPU2's output (patch 0056)
+ static ps2x::iop::Spu2Device *s_externalSpu2 = nullptr; // from the external library (patch 0056); null = none
+ static ps2x::iop::Sio2Device *s_externalSio2 = nullptr; // from the external library (patch 0071); null = none
++static ps2x::iop::Dev9Device *s_externalDev9 = nullptr; // from the external library (PS2X_DEV9); null = none
+ static ps2x::IpuDevice *s_externalIpu = nullptr; // from the external library (patch 0060); null = none
+ #endif
+ #if defined(PLATFORM_VITA)
+@@ -647,6 +650,12 @@ PS2Runtime::~PS2Runtime()
+             delete s_externalSio2;
+             s_externalSio2 = nullptr;
+         }
++        if (s_externalDev9)
++        {
++            ps2x::iop::setDev9Device(nullptr);
++            delete s_externalDev9;
++            s_externalDev9 = nullptr;
++        }
+ #endif
+         m_iopSubsystem.reset();
+         m_iopHost.reset();
+@@ -1078,6 +1087,51 @@ bool PS2Runtime::initialize(const char *title)
+         }
+         else
+             std::cout << "[sio2] off" << (sio2Mode == "off" ? "" : " (unknown PS2X_SIO2, pcsx2|off)") << std::endl;
++#endif
++    }
++    {
++        // PS2X_DEV9 selects the network adapter: unset or "off" = none (the disc's DEV9 driver finds no hardware, as
++        // before; single player never starts the network); "pcsx2" = the external library's DEV9 (PCSX2's, Sockets
++        // adapter) as the IOP's Dev9Device, on interface PS2X_NET_IF ("" = automatic), with PS2X_NET_HOSTS =
++        // "name=a.b.c.d;..." answered by its DNS. An adapter that cannot start leaves it off with one log line.
++#ifdef PS2X_EXTERNAL_GS
++        const char *dev9Env = std::getenv("PS2X_DEV9");
++        const std::string dev9Mode = (dev9Env && *dev9Env) ? dev9Env : "off";
++        if (dev9Mode == "pcsx2")
++        {
++            std::vector<PS2Dev9Host> hosts;
++            const char *hostsEnv = std::getenv("PS2X_NET_HOSTS");
++            std::string list = hostsEnv ? hostsEnv : "";
++            for (size_t start = 0; start < list.size();)
++            {
++                size_t end = list.find(';', start);
++                if (end == std::string::npos)
++                    end = list.size();
++                const std::string entry = list.substr(start, end - start);
++                start = end + 1;
++                const size_t eq = entry.find('=');
++                unsigned a = 0, b = 0, c = 0, d = 0;
++                char tail = 0;
++                if (eq == std::string::npos ||
++                    std::sscanf(entry.c_str() + eq + 1, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 || (a | b | c | d) > 255)
++                {
++                    std::cout << "[dev9] PS2X_NET_HOSTS: ignored '" << entry << "' (name=a.b.c.d)" << std::endl;
++                    continue;
++                }
++                hosts.push_back(PS2Dev9Host{entry.substr(0, eq), {static_cast<uint8_t>(a), static_cast<uint8_t>(b),
++                                                                  static_cast<uint8_t>(c), static_cast<uint8_t>(d)}});
++            }
++            const char *ifEnv = std::getenv("PS2X_NET_IF");
++            std::string error;
++            ps2x::iop::Dev9Device *dev9 = ps2CreateExternalDev9(ifEnv ? ifEnv : "", hosts, &error);
++            ps2x::iop::setDev9Device(dev9);
++            s_externalDev9 = dev9;
++            std::cout << "[dev9] " << (dev9 ? "pcsx2 network adapter, " + std::to_string(hosts.size()) + " host name(s)"
++                                            : "pcsx2 failed to start (" + error + "): off")
++                      << std::endl;
++        }
++        else
++            std::cout << "[dev9] off" << (dev9Mode == "off" ? "" : " (unknown PS2X_DEV9, pcsx2|off)") << std::endl;
+ #endif
+     }
+     {
+-- 
+2.46.2.windows.1
+

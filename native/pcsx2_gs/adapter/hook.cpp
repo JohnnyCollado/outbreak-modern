@@ -1,4 +1,4 @@
-// hook: the PS2Recomp half of the runner's external GS, SPU2, IPU, SIO2 and settings UI. Implements PS2ExternalGS (runtime/gs/gs_external.h)
+// hook: the PS2Recomp half of the runner's external GS, SPU2, IPU, SIO2, DEV9 and settings UI. Implements PS2ExternalGS (runtime/gs/gs_external.h)
 // over the plain-types bridge (ob_gs_bridge.h); PCSX2 itself lives behind pcsx2_side.cpp.
 #include "runtime/gs/gs_external.h"
 #include "runtime/ps2_game_source.h"
@@ -7,15 +7,20 @@
 #include "runtime/ps2_spu2_external.h"
 #include "runtime/ps2_ipu_external.h"
 #include "runtime/ps2_sio2_external.h"
+#include "runtime/ps2_dev9_external.h"
 
 #include "ob_gs_bridge.h"
+#include "ob_dev9_bridge.h"
 #include "ob_spu2_bridge.h"
 #include "ob_ipu_bridge.h"
 #include "ob_sio2_bridge.h"
 #include "ob_ui.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -188,4 +193,63 @@ ps2x::iop::Sio2Device* ps2CreateExternalSio2(const std::string& cardFolder, bool
 	if (!ob_sio2_open(cardFolder.c_str(), createSlot1))
 		return nullptr;
 	return new Pcsx2Sio2();
+}
+
+// ---- DEV9 network adapter (PS2X_DEV9): PCSX2's DEV9 + Sockets adapter behind native/pcsx2_dev9/adapter/ob_dev9_bridge.h ----
+namespace
+{
+	class Pcsx2Dev9 final : public ps2x::iop::Dev9Device
+	{
+	public:
+		~Pcsx2Dev9() override { ob_dev9_close(); }
+		uint8_t read8(uint32_t phys) override { return ob_dev9_read8(phys); }
+		uint16_t read16(uint32_t phys) override { return ob_dev9_read16(phys); }
+		uint32_t read32(uint32_t phys) override { return ob_dev9_read32(phys); }
+		void write8(uint32_t phys, uint8_t value) override { ob_dev9_write8(phys, value); }
+		void write16(uint32_t phys, uint16_t value) override { ob_dev9_write16(phys, value); }
+		void write32(uint32_t phys, uint32_t value) override { ob_dev9_write32(phys, value); }
+		bool dma(uint8_t* iopRam, uint32_t ramSize, uint32_t madr, uint32_t bcr, uint32_t chcr) override
+		{
+			return ob_dev9_dma(iopRam, ramSize, madr, bcr, chcr) != OB_DEV9_DMA_IGNORED;
+		}
+		void advance(uint64_t cycle) override
+		{
+			if (cycle > m_cycle)
+				ob_dev9_advance(static_cast<uint32_t>(std::min<uint64_t>(cycle - m_cycle, UINT32_MAX)));
+			m_cycle = std::max(m_cycle, cycle);
+		}
+		// Frames arrive from the adapter's own thread at any time (PCSX2 checks on every IOP counter update): look
+		// every kPollCycles of IOP time, ~0.25 ms; DEV9's own interrupt delays (0-100 cycles) land on the next look.
+		uint64_t nextEventCycle() override { return m_cycle + kPollCycles; }
+		uint32_t takeEvents() override
+		{
+			uint32_t events = 0;
+			if (ob_dev9_take_interrupt())
+				events |= EventIrq;
+			if (ob_dev9_take_dma_done())
+				events |= EventDma8;
+			return events;
+		}
+
+	private:
+		static constexpr uint64_t kPollCycles = 9216; // 36,864,000 IOP cycles per second / 4000
+		uint64_t m_cycle = 0;
+	};
+} // namespace
+
+ps2x::iop::Dev9Device* ps2CreateExternalDev9(const std::string& interfaceName, const std::vector<PS2Dev9Host>& hosts,
+	std::string* error)
+{
+	std::vector<ob_dev9_host> list;
+	for (const PS2Dev9Host& h : hosts)
+		list.push_back(ob_dev9_host{h.name.c_str(), {h.address[0], h.address[1], h.address[2], h.address[3]}});
+	const ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size())};
+	if (!ob_dev9_open(&config))
+	{
+		ob_dev9_close();
+		if (error)
+			*error = "no usable network interface" + (interfaceName.empty() ? std::string() : " named '" + interfaceName + "'");
+		return nullptr;
+	}
+	return new Pcsx2Dev9();
 }

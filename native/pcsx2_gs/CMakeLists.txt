@@ -217,6 +217,8 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_spu2" "${CMAKE_BINARY_DIR
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_ipu" "${CMAKE_BINARY_DIR}/pcsx2_ipu")
 # PCSX2's SIO2 and PS2 memory cards, on ob_pcsx2_gs: native/pcsx2_sio2.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_sio2" "${CMAKE_BINARY_DIR}/pcsx2_sio2")
+# PCSX2's DEV9 (network adapter, Sockets mode) for online play, on ob_pcsx2_gs: native/pcsx2_dev9.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_dev9" "${CMAKE_BINARY_DIR}/pcsx2_dev9")
 
 # Settings menu core and its tests without the runner (the GS tree, ob.sh test); with it, added below.
 if(NOT TARGET ps2_runtime)
@@ -265,6 +267,9 @@ if(TARGET ps2_runtime)
     # The external SIO2 + memory cards (PS2Recomp 0071): PCSX2's SIO2 behind native/pcsx2_sio2/adapter/ob_sio2_bridge.h.
     target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_sio2/adapter")
     target_link_libraries(ps2x_external_gs PRIVATE ob_pcsx2_sio2)
+    # The external DEV9 (network adapter, PS2X_DEV9): PCSX2's DEV9 behind native/pcsx2_dev9/adapter/ob_dev9_bridge.h.
+    target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_dev9/adapter")
+    target_link_libraries(ps2x_external_gs PRIVATE ob_pcsx2_dev9)
     # The settings UI (PS2Recomp 0078): native/ob_ui's launcher and menu behind ob_ui.h, fed by adapter/ui_hook.cpp.
     target_link_libraries(ps2x_external_gs PRIVATE ob_ui)
     if(ANDROID)
