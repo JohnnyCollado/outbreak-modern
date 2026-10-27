@@ -60,7 +60,7 @@ alignas(16) psxRegisters psxRegs;
 psxCounter psxCounters[NUM_COUNTERS];
 s32 psxNextDeltaCounter;
 u64 psxNextStartCounter;
-alignas(16) u8 iopHw[Ps2MemSize::IopHardware];
+alignas(__pagealignsize) u8 iopHw[Ps2MemSize::IopHardware]; // as declared in MemoryTypes.h (Android: clang checks it)
 IopVM_MemoryAllocMess* iopMem = nullptr;
 
 void spu2Irq()

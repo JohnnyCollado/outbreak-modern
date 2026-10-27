@@ -68,3 +68,16 @@ game = D:\Games\PS2\Biohazard - Outbreak (English v2.1).iso
 ; Windows, mvu on Android. The PS2X_VU1 environment variable wins over this. If mvu cannot load or start, the log
 ; says why and the interpreter runs.
 ; vu1 = mvu
+
+; [ui]: the settings menu's own keys (docs/plans/2026-10-26-settings-menu.md). The menu writes them as you change
+; them; the runner skips everything under a [section] header (PS2Recomp patch 0079), so keep the runner's keys above.
+; launcher = on | off          the launcher at start-up (off: straight into the game when the disc checks out)
+; window_mode = windowed | borderless | fullscreen
+; vsync = on | strict | off    on = Mailbox (default), strict = FIFO, off = may tear
+; show_fps = off | on          a small fps readout in the corner
+; widescreen = off | on        writes <mods>/SLPM-65428/ob-widescreen.pnach (the gameplay 16:9 patch)
+; volume = 100                 0..100
+; card_backup = on | off       copy slot 1 into memcards/backups at each launch (the newest 5 kept)
+; text_size = normal | large | larger   menu text size (x1, x1.15, x1.3)
+; [ui]
+; launcher = on

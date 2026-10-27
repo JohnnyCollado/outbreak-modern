@@ -1,0 +1,5 @@
+# Gradle's local files (the build itself goes to C:\ob\android-apk\gradle-build, tools/ob/android.sh).
+.gradle/
+.kotlin/
+build/
+local.properties

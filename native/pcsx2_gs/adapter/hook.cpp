@@ -1,4 +1,4 @@
-// hook: the PS2Recomp half of the runner's external GS, SPU2, IPU and SIO2. Implements PS2ExternalGS (runtime/gs/gs_external.h)
+// hook: the PS2Recomp half of the runner's external GS, SPU2, IPU, SIO2 and settings UI. Implements PS2ExternalGS (runtime/gs/gs_external.h)
 // over the plain-types bridge (ob_gs_bridge.h); PCSX2 itself lives behind pcsx2_side.cpp.
 #include "runtime/gs/gs_external.h"
 #include "runtime/ps2_game_source.h"
@@ -12,6 +12,7 @@
 #include "ob_spu2_bridge.h"
 #include "ob_ipu_bridge.h"
 #include "ob_sio2_bridge.h"
+#include "ob_ui.h"
 
 #include <cstring>
 #include <string>
@@ -50,7 +51,34 @@ namespace
 			ob_gs_attach_window(nativeHandle, w, h, visible);
 		}
 		void windowResized(uint32_t w, uint32_t h) override { ob_gs_window_resized(w, h); }
+		void settingsChanged() override; // after the settings UI's launcher (PS2Recomp patch 0078)
 	};
+
+	// The outbreak.ini options PCSX2's GS opens with (patches 0046-0055), before its first open or a reopen.
+	void ApplyGsSettings()
+	{
+		ob_gs_set_gpu_driver(ps2game::activeSettings().gpuDriver.c_str()); // outbreak.ini, PS2Recomp patch 0046
+		ob_gs_set_self_read(ps2game::activeSettings().gsSelfRead.c_str());  // outbreak.ini, PS2Recomp patch 0054
+		ob_gs_set_scaling(ps2game::activeSettings().scaling.c_str());       // outbreak.ini, PS2Recomp patch 0055
+		// outbreak.ini upscale (PS2Recomp 0050); pnach gsaspectratio (0051), read before the runtime opens the GS.
+		const std::string& aspect = ps2game::activePnach().aspect;
+		ob_gs_set_display(ps2game::activeSettings().upscale,
+			aspect == "16:9" ? ObGsAspect::R16_9 : aspect == "4:3" ? ObGsAspect::R4_3 : ObGsAspect::Auto);
+		// outbreak.ini textures + the game's serial (0052): PCSX2 texture replacement, <textures>/<serial>/replacements.
+		ob_gs_set_textures(ps2game::activeSettings().textures.string().c_str(), ps2game::activeGameSerial().c_str());
+	}
+
+	void Pcsx2ExternalGS::settingsChanged()
+	{
+		// The launcher opened the GS with the settings it started with; the game's first frame opens it again when
+		// one it changed is among them (resolution, scaling, aspect via mods, textures).
+		// The launcher opened the GS before the game, its mods (pnach aspect) and its serial (texture pack) were known:
+		// reopen whenever what it opened with differs from what the game now asks for, not only after a change in
+		// the launcher (a 4:3 picture and no replacements otherwise, 2026-10-26).
+		ApplyGsSettings();
+		obui::gsOptionsChanged(); // consumed: the comparison below covers it
+		ob_gs_reopen_if_changed();
+	}
 } // namespace
 
 PS2ExternalGS* ps2CreateExternalGS(const char* mode)
@@ -62,15 +90,7 @@ PS2ExternalGS* ps2CreateExternalGS(const char* mode)
 		ob_gs_init(ObGsRenderer::VK);
 	else
 		return nullptr;
-	ob_gs_set_gpu_driver(ps2game::activeSettings().gpuDriver.c_str()); // outbreak.ini, PS2Recomp patch 0046
-	ob_gs_set_self_read(ps2game::activeSettings().gsSelfRead.c_str());  // outbreak.ini, PS2Recomp patch 0054
-	ob_gs_set_scaling(ps2game::activeSettings().scaling.c_str());       // outbreak.ini, PS2Recomp patch 0055
-	// outbreak.ini upscale (PS2Recomp 0050); pnach gsaspectratio (0051), read before the runtime opens the GS.
-	const std::string& aspect = ps2game::activePnach().aspect;
-	ob_gs_set_display(ps2game::activeSettings().upscale,
-		aspect == "16:9" ? ObGsAspect::R16_9 : aspect == "4:3" ? ObGsAspect::R4_3 : ObGsAspect::Auto);
-	// outbreak.ini textures + the game's serial (0052): PCSX2 texture replacement, <textures>/<serial>/replacements.
-	ob_gs_set_textures(ps2game::activeSettings().textures.string().c_str(), ps2game::activeGameSerial().c_str());
+	ApplyGsSettings();
 	return new Pcsx2ExternalGS();
 }
 

@@ -95,6 +95,13 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
   (patches 0043-0050; `docs/ops/gs.md` "High resolution, widescreen, texture packs"). A bad line is logged once as
   `[settings] line N: ...`. Example and format: `native/outbreak.ini.example`. `ob.sh` stages none and passes the game
   on the command line; `PS2X_SETTINGS=<path>` points a scripted boot at a test file.
+- Settings menu (`native/ob_ui`, PS2Recomp patches 0077-0079, plan `docs/plans/2026-10-26-settings-menu.md`): with the
+  external GS (`PS2X_GS=pcsx2-sw|pcsx2-vk`) a launcher opens in the game window before the game: the disc is
+  required and checked (ISO 9660, SYSTEM.CNF boots SLPM_654.28, the ELF's SHA-256 = the build's), textures and mods
+  optional, settings pages. In game F1 or Esc, on Windows also Back + Start held for 2 s (a gear ring fills top left), on Android the Back
+  button, opens the menu and holds the game
+  (`EeScheduler::setHeld`, sound paused). `PS2X_LAUNCHER=0` skips the launcher (`ob.sh boot` sets it), as does a
+  hidden window. Its keys: `[ui]` in `outbreak.ini`. stderr `[ui] ...` lines (disc check, menu open/closed, play).
 - `PS2X_FPS_LOG=1` (engine, patch 0044): `[fps]` lines with a visible window too (always on Android: logcat).
 - `OB_*` variables override the `C:\ob` paths (`workspace.md`).
 

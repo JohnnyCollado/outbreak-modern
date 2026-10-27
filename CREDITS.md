@@ -24,3 +24,7 @@
 - **ARM Limited and the VIXL authors** -- [VIXL](https://github.com/Linaro/vixl) (BSD-3-Clause, its `LICENCE` file), the
   AArch64 assembler PCSX2 vendors in `3rdparty/vixl`: behind the Android GS's software-renderer JIT and ARMSX2's
   ARM64 microVU.
+
+## PlayFieldPortal
+
+- The Android menu's controller handling (`native/android/kotlin/com/outbreakmodern/app/GamepadInput.kt`: dead zone with hysteresis, accelerating held-direction repeat, D-pad duplicate suppression, newest-axis diagonal rule) and its row-focus / footer-prompt pattern (`SettingsUi.kt`) are adapted from PlayFieldPortal (`GamepadInputHandler.kt`, `SettingsScaffold.kt`), the developer's own project.

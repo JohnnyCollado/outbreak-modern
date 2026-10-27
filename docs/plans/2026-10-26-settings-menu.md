@@ -1,9 +1,8 @@
 # Settings menu: launcher and in-game overlay (plan)
 
 - **Date:** 2026-10-26
-- **Status:** plan only, nothing built. All decisions A1-A10 and P1-P12 approved, and the open questions in
-  section 7 answered (2026-10-26). Step 1 (research) done the same day; building
-  (step 2 on) waits for the developer's go.
+- **Status:** built 2026-10-26 (report `reports/2026-10-26-settings-menu.md`): Windows ImGui and Android Kotlin +
+  Compose, PS2Recomp 0077-0080. Decisions A11-A15 and the later changes in the report supersede parts of this plan.
 - **Mockups:** shown in the Claude Code session of 2026-10-26 (settings tabs, launcher + overlay, disc verification).
 
 ## 1. What it is
@@ -34,6 +33,11 @@ vsync), and the memory card save location.
 | A8 | Texture pack and mods folder are **optional**. |
 | A9 | The launcher accepts only `.iso` files. An extracted folder or a bare boot ELF stays possible through `outbreak.ini` only. |
 | A10 | Android only: a Graphics driver section where the player picks the Vulkan driver the game draws with (section 5.7). |
+| A11 | The menu is 100% controller-navigable (developer, 2026-10-26, after the first build): an in-app file/folder browser replaces Windows' own dialogs (A open / pick, B up, Y use this folder), L1/R1 switch pages, the page list and page share one navigation scope (B lands back on the list), focus on the current page when the menu opens, Start = Play in the launcher, a binding capture ignores the press that started it and times out after 6 s, button hints in the footer. |
+| A12 | The Android APK is built with Gradle (Gradle 9.7.1, AGP 9.4.0, as PlayFieldPortal; JDK 17). The C++ stays in CMake; Gradle builds the Java and packages the `.so` CMake made. Replaces "still no Gradle" in section 5.8. |
+| A14 | (developer, 2026-10-26, after trying the first build: "horrible") Android: the launcher and the in-game menu are Kotlin + Jetpack Compose, with PlayFieldPortal's controller handling copied and adapted (`GamepadInputHandler`: dead zone with hysteresis, accelerating repeat, duplicate D-pad suppression; `SettingsScaffold`: explicit row focus, footer prompts), credited. SAF picks and imports in Kotlin. The disc check stays the C++ core (JNI). The in-game menu is a Compose dialog window over the game (the game held through JNI). |
+| A15 | Windows: ImGui stays (in-process, pauses the game), restyled (bundled font, icons, cards, clear Play; mockup 2026-10-26), mouse first, with natural controller navigation for Windows handhelds: rows (up/down), values (left/right), A act, B back to the page list, L1/R1 pages, accelerating repeat and stick hysteresis as PlayFieldPortal; prompts and the focus highlight only after controller input; Browse = Windows' dialog with the mouse, the in-app browser with a controller. |
+| A13 | Android texture packs, mods and drivers import from a folder (system folder picker, copied by Java on a background thread) or a `.zip`, both with a progress bar and Cancel; replacing an existing pack asks first. Replaces question 5's "zip only". |
 
 ### Approved proposals (developer, 2026-10-26: "Approve P1-P12 as written")
 
@@ -42,7 +46,7 @@ Kept under their P numbers, which the sections below refer to.
 | # | Decision | Why |
 |---|---|---|
 | P1 | Keyboard: **F1** and **Esc** open/close the overlay; both are reserved (the binding screen refuses them). | No default game binding uses an F-key or Esc (`native/input.ini.example:16-34`); Esc no longer quits (`SetExitKey(KEY_NULL)`, patch 0035). |
-| P2 | Controller: **hold Back + Start for 1 s**, with hold-back (section 5.3). | The game uses every PS2 button, so only a held combo is free. Different from the Modern camera's own Select + R3 (`legacy/README.md:32`). |
+| P2 | ~~Controller: hold Back + Start for 1 s, with hold-back (section 5.3).~~ **Changed 2026-10-26 (developer): Start/Select go straight to the game (no hold-back). Windows: Back (View) + Start held together for 2 s opens the menu (5 s at first; shortened 2026-10-26 by the developer), with a gear ring filling top left (below the FPS readout). Android: no combo; the Back button opens the menu. F1/Esc everywhere.** | The 100 ms hold-back felt laggy in play; on Windows the long hold keeps the combo from firing by accident. |
 | P3 | Xbox Guide button as an opt-in extra, off by default. | Probably not readable through standard XInput, and Steam / Game Bar take it. Unverified. |
 | P4 | Android: short press of the system Back button opens the overlay. | Android convention. How the Odin's Back button reaches raylib is unverified. |
 | P5 | The game pauses fully while the overlay is open (game thread, sound, timers); all buttons released on resume. | No lost time or stuck buttons. |
@@ -165,11 +169,16 @@ hand-edited `outbreak.ini` survives. Bad values keep today's rule: logged once a
   pad read that feeds the game (`PSPadBackend`, patches 0020/0038).
 - Online play (milestone M7) cannot pause. The overlay then only stops sending input.
 
-### 5.3 The controller combo with hold-back (P2)
+### 5.3 The controller combo (P2) - changed 2026-10-26
 
-- When Back or Start goes down, the runner holds it back from the game for up to ~6 frames (100 ms).
-- If the other button arrives in that time and both stay down 1 s: the overlay opens and the game never sees either.
-- If not: the press is passed to the game late, which a player should not notice. To check in play.
+- **No hold-back:** Start and Select reach the game on their first read (the 100 ms hold-back felt laggy).
+- **Windows:** Back (View) + Start held together for 5 s opens (and closes) the menu. While both are held a ring fills
+  clockwise around a gear (Segoe Fluent Icons U+E713) top left, below the FPS readout when it is on, sized from the
+  display; it disappears when either is let go. `obui::MenuTrigger` `Config{5.0, 0.0, false, true}`;
+  `comboProgress(now)` -> `ob_gs_set_hold_progress` each host frame; drawn on the GS thread in the present
+  (`pcsx2_side.cpp` `ExecVsync`, as the FPS readout).
+- **Android:** no combo (`Config{5.0, 0.0, false, false}`); the Back button (system or the Odin's) opens the menu.
+- The core keeps the hold-back mechanism (default on) and its tests; the menu turns it off.
 
 ### 5.4 Display
 

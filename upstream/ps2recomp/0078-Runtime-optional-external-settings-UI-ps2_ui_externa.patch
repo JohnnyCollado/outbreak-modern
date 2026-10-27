@@ -1,0 +1,479 @@
+From 623b24438f1a2d669f161fd7844c77340e43053a Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 15:36:56 -0400
+Subject: [PATCH 78/79] Runtime: optional external settings UI
+ (ps2_ui_external.h): launcher in the runner's window before the game is
+ resolved (openLauncherWindow; initialize reuses the window and GS,
+ PS2ExternalGS::settingsChanged), per-frame menu hold (EeScheduler::setHeld,
+ SPU2 stream paused) or quit, host pad filter; Esc is not the exit key with a
+ UI
+
+---
+ ps2xRuntime/CMakeLists.txt                    |   1 +
+ ps2xRuntime/include/ps2_runtime.h             |   3 +
+ ps2xRuntime/include/runtime/gs/gs_external.h  |   3 +
+ ps2xRuntime/include/runtime/ps2_ui_external.h |  39 ++++
+ ps2xRuntime/src/lib/ps2_pad.cpp               |   5 +
+ ps2xRuntime/src/lib/ps2_runtime.cpp           | 170 +++++++++++++-----
+ ps2xRuntime/src/lib/ps2_ui_external.cpp       |  18 ++
+ ps2xRuntime/src/main.cpp                      |  36 +++-
+ ps2xTest/src/pad_input_tests.cpp              |  40 +++++
+ 9 files changed, 265 insertions(+), 50 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_ui_external.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_ui_external.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index f090d67..e890d2f 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -386,6 +386,7 @@ endfunction()
+ add_library(ps2_runtime STATIC
+     src/lib/game_overrides.cpp
+     src/lib/gs/gs_external.cpp
++    src/lib/ps2_ui_external.cpp
+     src/lib/gs/ps2_gif_arbiter.cpp
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 28e91a7..5269a33 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -64,6 +64,9 @@ public:
+     ~PS2Runtime();
+ 
+     bool initialize(const char *title = "PS2 Game");
++    // Patch 0078: opens the host window and the external GS early, for an external UI's launcher (ps2_ui_external.h)
++    // before the game is resolved; initialize then reuses both. False = no external GS, or a hidden window.
++    static bool openLauncherWindow(const char *title);
+     bool syncCoreSubsystems();
+     bool loadELF(const std::string &elfPath);
+     // The boot ELF as bytes (read from a disc image); unlike loadELF it keeps the I/O paths already set.
+diff --git a/ps2xRuntime/include/runtime/gs/gs_external.h b/ps2xRuntime/include/runtime/gs/gs_external.h
+index ce602d2..4cd5302 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_external.h
++++ b/ps2xRuntime/include/runtime/gs/gs_external.h
+@@ -22,6 +22,9 @@ public:
+   virtual bool snapshot(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) = 0; // VBlankStart, only when ps2ExternalGSFrameWanted(tick); RGBA8
+   virtual void attachWindow(void *nativeHandle, uint32_t w, uint32_t h, bool visible) {} // main thread, after InitWindow; the GS presents into it
+   virtual void windowResized(uint32_t w, uint32_t h) {} // main thread, on a host window resize
++  // Main thread, after an external UI's launcher (patch 0078): the settings file was read again; apply what changed
++  // (resolution, textures, aspect) before the game's first GS call.
++  virtual void settingsChanged() {}
+ };
+ PS2ExternalGS *ps2ExternalGS();           // null = CPU GS
+ void ps2SetExternalGS(PS2ExternalGS *gs); // tests and startup
+diff --git a/ps2xRuntime/include/runtime/ps2_ui_external.h b/ps2xRuntime/include/runtime/ps2_ui_external.h
+new file mode 100644
+index 0000000..6de85e7
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_ui_external.h
+@@ -0,0 +1,39 @@
++#pragma once
++
++// Optional external settings UI (patch 0078): a launcher before the game and a menu over it, provided by the library
++// that provides the external GS (outbreak-modern: native/ob_ui, drawn by its GS). Null (the default, and every build
++// without one) = the runner as before. One pointer, one null check per site, as PS2ExternalGS.
++
++#include <cstdint>
++#include <filesystem>
++
++class PS2ExternalUi
++{
++public:
++    virtual ~PS2ExternalUi() = default;
++
++    // Main thread, before the game is resolved. interactive: the runner has opened its window and the external GS
++    // (PS2Runtime::openLauncherWindow) and the UI runs its launcher there until the player picks Play (true) or Quit
++    // (false); it may rewrite the settings file, which the runner reads again afterwards. Not interactive (hidden
++    // window, PS2X_LAUNCHER=0, no external GS): no window, the UI may still check or translate the game.
++    // gamePath: in = the game the runner would boot (command line or settings), out = the one to boot.
++    virtual bool launch(std::filesystem::path &gamePath, bool interactive) = 0;
++
++    enum class HostAction : int
++    {
++        Run,  // the game runs
++        Hold, // the menu is open: the runner holds the game (EeScheduler::setHeld) and pauses its sound
++        Quit, // the player chose Quit: the runner stops as at a window close
++    };
++    // Main thread, once per host frame while the game runs (PS2Runtime::run), after input was polled.
++    virtual HostAction hostFrame() = 0;
++
++    // Game thread, at each host pad read (PSPadBackend::readState): may hide buttons (the menu's own button combo,
++    // or everything while the menu is open). buttons: PS2 active-low mask; sticks: rx, ry, lx, ly (0x80 = centre).
++    virtual uint16_t filterPad(int port, uint16_t buttons, uint8_t sticks[4]) = 0;
++};
++
++PS2ExternalUi *ps2ExternalUi();
++void ps2SetExternalUi(PS2ExternalUi *ui);
++// Defined by the external library (with PS2X_EXTERNAL_GS); null = it has no UI.
++PS2ExternalUi *ps2CreateExternalUi();
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index d8e9c08..dc0bd52 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_pad.h"
+ #include "runtime/ps2_diag_hooks.h"
+ #include "runtime/ps2_input_bindings.h"
++#include "runtime/ps2_ui_external.h"
+ #include <cstring>
+ 
+ namespace
+@@ -43,6 +44,10 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+     uint16_t btns = 0xFFFFu;
+     ps2input::evaluateInput(ps2input::activeInputBindings(), s_hostInput, btns, data + 4);
+ 
++    // An external settings UI (patch 0078) may hide buttons: its menu combo, or everything while its menu is open.
++    if (PS2ExternalUi *ui = ps2ExternalUi())
++        btns = ui->filterPad(port, btns, data + 4);
++
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
+     return true;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index ceb7b0f..9fb4db9 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -7,6 +7,7 @@
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_external.h"
++#include "runtime/ps2_ui_external.h"
+ #include "runtime/ps2_spu2_external.h"
+ #include "runtime/ps2_sio2_external.h"
+ #include "runtime/ps2_ipu_external.h"
+@@ -929,43 +930,112 @@ bool PS2Runtime::syncCoreSubsystems()
+     return true;
+ }
+ 
+-bool PS2Runtime::initialize(const char *title)
++// The host window (InitWindow) and the external GS's child in it; once: the launcher may have opened it already
++// (patch 0078), then only the title and the start-up size follow the settings read since.
++static bool s_launcherWindow = false;
++static void OpenHostWindow(const char *title)
+ {
++    if (IsWindowReady())
+     {
+-        // PS2X_GS selects the GS: unset or "cpu" = the built-in CPU GS (Android: the external Vulkan GS when
+-        // built, ps2_platform_defaults.h); the external modes need a build with PS2X_EXTERNAL_GS_DIR.
+-        const char *gsEnv = std::getenv("PS2X_GS");
+-#ifdef PS2X_EXTERNAL_GS
+-        constexpr bool kBuildHasExternalGs = true;
+-#else
+-        constexpr bool kBuildHasExternalGs = false;
+-#endif
+-        const std::string gsMode = (gsEnv && *gsEnv) ? gsEnv : ps2platform::defaultGsMode(kBuildHasExternalGs);
+-        if (gsMode == "pcsx2-sw" || gsMode == "pcsx2-vk")
++        s_windowTitle = title ? title : "";
++        SetWindowTitle(s_windowTitle.c_str());
++        const ps2game::Settings &settings = ps2game::activeSettings();
++        if (settings.windowWidth && settings.windowHeight && !IsWindowFullscreen() &&
++            (GetScreenWidth() != static_cast<int>(settings.windowWidth) || GetScreenHeight() != static_cast<int>(settings.windowHeight)))
+         {
++            SetWindowSize(static_cast<int>(settings.windowWidth), static_cast<int>(settings.windowHeight));
++            ps2ExternalGSWindowResized(settings.windowWidth, settings.windowHeight);
++        }
++        return;
++    }
++    const char *hiddenEnv = std::getenv("PS2X_HIDDEN");
++    const bool hidden = hiddenEnv != nullptr && std::strcmp(hiddenEnv, "1") == 0;
++    const unsigned int windowFlags = hidden ? (FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN) : FLAG_WINDOW_RESIZABLE;
++    SetConfigFlags(windowFlags);
++    // outbreak.ini window = WxH (patch 0050), else the built-in size; a pnach gsaspectratio=16:9 (patch 0051)
++    // widens the built-in size to 16:9 at the same height.
++    const ps2game::Settings &settings = ps2game::activeSettings();
++    const int builtInWidth = ps2game::activePnach().aspect == "16:9" ? (HOST_WINDOW_HEIGHT * 16 + 8) / 9
++                                                                     : HOST_WINDOW_WIDTH;
++    const int windowWidth = settings.windowWidth ? static_cast<int>(settings.windowWidth) : builtInWidth;
++    const int windowHeight = settings.windowHeight ? static_cast<int>(settings.windowHeight) : HOST_WINDOW_HEIGHT;
++    InitWindow(windowWidth, windowHeight, title);
++    s_windowTitle = title ? title : "";
++    s_windowHidden = hidden;
++    if (hidden)
++    {
++        SetExitKey(KEY_NULL); // a hidden window is never closed by input
++        std::cout << "[run] window hidden=" << (IsWindowHidden() ? 1 : 0) << " flags=0x" << std::hex << windowFlags
++                  << std::dec << std::endl;
++    }
++    ps2ExternalGSAttachWindow(GetWindowHandle(), static_cast<uint32_t>(GetScreenWidth()),
++                              static_cast<uint32_t>(GetScreenHeight()), !IsWindowHidden());
++    // Esc and F1 belong to an external UI's menu (patch 0078): raylib's Esc-closes-the-window is off with one.
++    if (ps2ExternalUi())
++        SetExitKey(KEY_NULL);
++}
++
++// PS2X_GS (once: the launcher may have chosen it already, patch 0078).
++static bool s_gsSelected = false;
++static void SelectGs()
++{
++    if (s_gsSelected)
++        return;
++    s_gsSelected = true;
++    // PS2X_GS selects the GS: unset or "cpu" = the built-in CPU GS (Android: the external Vulkan GS when
++    // built, ps2_platform_defaults.h); the external modes need a build with PS2X_EXTERNAL_GS_DIR.
++    const char *gsEnv = std::getenv("PS2X_GS");
+ #ifdef PS2X_EXTERNAL_GS
+-            PS2ExternalGS *externalGS = ps2CreateExternalGS(gsMode.c_str());
+-            if (!externalGS)
+-            {
+-                std::cerr << "[gs] backend " << gsMode << " failed to start" << std::endl;
+-                std::cerr.flush();
+-                std::_Exit(2);
+-            }
+-            ps2SetExternalGS(externalGS);
+-            m_gs.useNullBackendForExternalGS();
++    constexpr bool kBuildHasExternalGs = true;
+ #else
+-            std::cerr << "[gs] backend " << gsMode << " needs a build with PS2X_EXTERNAL_GS_DIR" << std::endl;
+-            std::cerr.flush();
+-            std::_Exit(2);
++    constexpr bool kBuildHasExternalGs = false;
+ #endif
+-        }
+-        else if (gsMode != "cpu")
++    const std::string gsMode = (gsEnv && *gsEnv) ? gsEnv : ps2platform::defaultGsMode(kBuildHasExternalGs);
++    if (gsMode == "pcsx2-sw" || gsMode == "pcsx2-vk")
++    {
++#ifdef PS2X_EXTERNAL_GS
++        PS2ExternalGS *externalGS = ps2CreateExternalGS(gsMode.c_str());
++        if (!externalGS)
+         {
+-            std::cerr << "[gs] unknown PS2X_GS=" << gsMode << " (cpu|pcsx2-sw|pcsx2-vk)" << std::endl;
++            std::cerr << "[gs] backend " << gsMode << " failed to start" << std::endl;
+             std::cerr.flush();
+             std::_Exit(2);
+         }
+-        std::cout << "[gs] backend=" << gsMode << std::endl;
++        ps2SetExternalGS(externalGS);
++#else
++        std::cerr << "[gs] backend " << gsMode << " needs a build with PS2X_EXTERNAL_GS_DIR" << std::endl;
++        std::cerr.flush();
++        std::_Exit(2);
++#endif
++    }
++    else if (gsMode != "cpu")
++    {
++        std::cerr << "[gs] unknown PS2X_GS=" << gsMode << " (cpu|pcsx2-sw|pcsx2-vk)" << std::endl;
++        std::cerr.flush();
++        std::_Exit(2);
++    }
++    std::cout << "[gs] backend=" << gsMode << std::endl;
++}
++
++bool PS2Runtime::openLauncherWindow(const char *title)
++{
++    SelectGs();
++    if (!ps2ExternalGS())
++        return false; // the UI draws through the external GS
++    OpenHostWindow(title);
++    SetTargetFPS(60);
++    s_launcherWindow = true;
++    return !IsWindowHidden();
++}
++
++bool PS2Runtime::initialize(const char *title)
++{
++    SelectGs();
++    if (PS2ExternalGS *gs = ps2ExternalGS())
++    {
++        m_gs.useNullBackendForExternalGS();
++        if (s_launcherWindow)
++            gs->settingsChanged(); // the launcher may have changed the settings file, read again since (patch 0078)
+     }
+     {
+         // PS2X_SPU2 selects the sound chip (patch 0056): unset or "pcsx2" = the external library's SPU2 when built
+@@ -1099,28 +1169,7 @@ bool PS2Runtime::initialize(const char *title)
+ #if defined(PLATFORM_VITA)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+-        const char *hiddenEnv = std::getenv("PS2X_HIDDEN");
+-        const bool hidden = hiddenEnv != nullptr && std::strcmp(hiddenEnv, "1") == 0;
+-        const unsigned int windowFlags = hidden ? (FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN) : FLAG_WINDOW_RESIZABLE;
+-        SetConfigFlags(windowFlags);
+-        // outbreak.ini window = WxH (patch 0050), else the built-in size; a pnach gsaspectratio=16:9 (patch 0051)
+-        // widens the built-in size to 16:9 at the same height.
+-        const ps2game::Settings &settings = ps2game::activeSettings();
+-        const int builtInWidth = ps2game::activePnach().aspect == "16:9" ? (HOST_WINDOW_HEIGHT * 16 + 8) / 9
+-                                                                         : HOST_WINDOW_WIDTH;
+-        const int windowWidth = settings.windowWidth ? static_cast<int>(settings.windowWidth) : builtInWidth;
+-        const int windowHeight = settings.windowHeight ? static_cast<int>(settings.windowHeight) : HOST_WINDOW_HEIGHT;
+-        InitWindow(windowWidth, windowHeight, title);
+-        s_windowTitle = title ? title : "";
+-        s_windowHidden = hidden;
+-        if (hidden)
+-        {
+-            SetExitKey(KEY_NULL); // a hidden window is never closed by input
+-            std::cout << "[run] window hidden=" << (IsWindowHidden() ? 1 : 0) << " flags=0x" << std::hex << windowFlags
+-                      << std::dec << std::endl;
+-        }
+-        ps2ExternalGSAttachWindow(GetWindowHandle(), static_cast<uint32_t>(GetScreenWidth()),
+-                                  static_cast<uint32_t>(GetScreenHeight()), !IsWindowHidden());
++        OpenHostWindow(title);
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+ #ifdef PS2X_EXTERNAL_GS
+@@ -2989,6 +3038,29 @@ void PS2Runtime::run()
+             }
+         }
+ 
++        // External settings UI (patch 0078): its menu holds the game and pauses its sound, or ends the run.
++        if (PS2ExternalUi *ui = ps2ExternalUi())
++        {
++            static bool s_uiHold = false;
++            const PS2ExternalUi::HostAction action = ui->hostFrame();
++            const bool hold = action == PS2ExternalUi::HostAction::Hold;
++            if (hold != s_uiHold)
++            {
++                s_uiHold = hold;
++                m_eeScheduler->setHeld(hold);
++#ifdef PS2X_EXTERNAL_GS
++                if (IsAudioStreamValid(s_spu2Stream))
++                    hold ? PauseAudioStream(s_spu2Stream) : ResumeAudioStream(s_spu2Stream);
++#endif
++            }
++            if (action == PS2ExternalUi::HostAction::Quit)
++            {
++                RUNTIME_LOG("[run] settings UI quit, breaking out of loop");
++                requestStop();
++                break;
++            }
++        }
++
+         if (WindowShouldClose())
+         {
+             RUNTIME_LOG("[run] window close requested, breaking out of loop");
+diff --git a/ps2xRuntime/src/lib/ps2_ui_external.cpp b/ps2xRuntime/src/lib/ps2_ui_external.cpp
+new file mode 100644
+index 0000000..b954baa
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_ui_external.cpp
+@@ -0,0 +1,18 @@
++#include "runtime/ps2_ui_external.h"
++
++#include <atomic>
++
++namespace
++{
++    std::atomic<PS2ExternalUi *> s_externalUi{nullptr};
++}
++
++PS2ExternalUi *ps2ExternalUi()
++{
++    return s_externalUi.load(std::memory_order_acquire);
++}
++
++void ps2SetExternalUi(PS2ExternalUi *ui)
++{
++    s_externalUi.store(ui, std::memory_order_release);
++}
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index 41fd2a3..ce31d73 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -1,3 +1,5 @@
++#include "runtime/ps2_ui_external.h"
++#include <cstring>
+ #include "ps2_runtime.h"
+ #include "games_database.h"
+ #include "runtime/ps2_game_source.h"
+@@ -190,7 +192,39 @@ int main(int argc, char *argv[])
+     try
+     {
+         ps2game::loadSettingsAtStartup();
+-        std::filesystem::path pathObj = getExecutablePath(argc, argv);
++        std::filesystem::path pathObj;
++#if defined(PS2X_EXTERNAL_GS)
++        // An external settings UI (patch 0078): its launcher runs in the runner's window before the game is resolved,
++        // unless the window is hidden or PS2X_LAUNCHER=0 (then it may still check the game, without a window).
++        if (PS2ExternalUi *ui = ps2CreateExternalUi())
++        {
++            ps2SetExternalUi(ui);
++            try
++            {
++                pathObj = getExecutablePath(argc, argv);
++            }
++            catch (const std::exception &)
++            {
++                // no game yet: the launcher asks for one
++            }
++            const char *hiddenEnv = std::getenv("PS2X_HIDDEN");
++            const char *launcherEnv = std::getenv("PS2X_LAUNCHER");
++            const bool wanted = !(hiddenEnv && std::strcmp(hiddenEnv, "1") == 0) &&
++                                !(launcherEnv && std::strcmp(launcherEnv, "0") == 0);
++            const bool interactive = wanted && PS2Runtime::openLauncherWindow("PS2-Recomp");
++            if (!ui->launch(pathObj, interactive))
++            {
++                std::cout << "[ui] quit from the launcher" << std::endl;
++                std::cout.flush();
++                std::cerr.flush();
++                std::_Exit(0);
++            }
++            if (interactive)
++                ps2game::loadSettingsAtStartup(); // the launcher may have rewritten the settings file
++        }
++#endif
++        if (pathObj.empty())
++            pathObj = getExecutablePath(argc, argv);
+         ps2game::GameSource source;
+         if (!ps2game::resolveGameSource(pathObj, source))
+         {
+diff --git a/ps2xTest/src/pad_input_tests.cpp b/ps2xTest/src/pad_input_tests.cpp
+index 0316807..31bc05d 100644
+--- a/ps2xTest/src/pad_input_tests.cpp
++++ b/ps2xTest/src/pad_input_tests.cpp
+@@ -3,6 +3,8 @@
+ #include "ps2_syscalls.h"
+ #include "Stubs/Pad.h"
+ #include "ps2_runtime_calls.h"
++#include "runtime/ps2_pad.h"
++#include "runtime/ps2_ui_external.h"
+ 
+ #include <cstring>
+ #include <vector>
+@@ -600,5 +602,43 @@ void register_pad_input_tests()
+             t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), 0u, "a deleted socket is disconnected");
+             ps2_stubs::scePad2End(rdram.data(), &ctx, nullptr);
+         });
++
++        tc.Run("an external settings UI filters the host pad (patch 0078)", [](TestCase &t)
++               {
++            // Presses Cross, hides Start (were it held) and centres the left stick: proves the filter's result is what
++            // the game reads.
++            struct FakeUi final : PS2ExternalUi
++            {
++                int calls = 0;
++                int lastPort = -1;
++                bool launch(std::filesystem::path &, bool) override { return true; }
++                HostAction hostFrame() override { return HostAction::Run; }
++                uint16_t filterPad(int port, uint16_t buttons, uint8_t sticks[4]) override
++                {
++                    ++calls;
++                    lastPort = port;
++                    sticks[2] = 0x80u;
++                    sticks[3] = 0x80u;
++                    return static_cast<uint16_t>((buttons & ~kPadBtnCross) | kPadBtnStart);
++                }
++            } fake;
++            PSPadBackend pad;
++            uint8_t data[32] = {};
++
++            ps2SetExternalUi(nullptr);
++            t.IsTrue(pad.readState(1, 0, data, sizeof(data)), "readState without a UI");
++            const uint16_t plain = static_cast<uint16_t>(data[2] | (data[3] << 8));
++            t.IsTrue((plain & kPadBtnCross) != 0u, "no UI: Cross released (no host input in the test)");
++
++            ps2SetExternalUi(&fake);
++            t.IsTrue(pad.readState(1, 0, data, sizeof(data)), "readState with a UI");
++            ps2SetExternalUi(nullptr);
++            const uint16_t filtered = static_cast<uint16_t>(data[2] | (data[3] << 8));
++            t.Equals(fake.calls, 1, "the filter ran once per read");
++            t.Equals(fake.lastPort, 1, "with the read's port");
++            t.IsTrue((filtered & kPadBtnCross) == 0u, "the game reads the UI's Cross (active low)");
++            t.IsTrue((filtered & kPadBtnStart) != 0u, "and Start released");
++            t.Equals(static_cast<uint32_t>(data[6]), 0x80u, "lx from the filter");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

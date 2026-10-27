@@ -54,6 +54,9 @@ namespace obgpu
 	};
 	// Empty = load the custom driver. Otherwise the reason it is not loaded (for FallbackLine). library = the file.
 	std::string CustomDriverBlocker(const CustomDriverCheck& c, std::string& library);
+	// Non-empty when the package states a newer Android (meta minApi) than the device: not a blocker (the driver is
+	// loaded anyway, with the usual fall-back), only a warning for the log and the launcher.
+	std::string MinApiWarning(const CustomDriverCheck& c);
 
 	// "[gpu] custom driver <name> unavailable (<reason>); using system driver"
 	std::string FallbackLine(std::string_view name, std::string_view reason);

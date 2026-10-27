@@ -1,0 +1,243 @@
+From 288dedb51a8293f4610437726876836e97ae162b Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 15:31:06 -0400
+Subject: [PATCH 77/79] EE scheduler: setHeld parks the executor for a host
+ pause (no guest code, events, timers or IOP cycles while held); paced host
+ deadlines move forward by the time held, so no vsync burst after
+
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h | 12 ++++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp | 57 ++++++++++++++++--
+ ps2xTest/src/ps2_gs_external_tests.cpp     | 69 ++++++++++++++++++++++
+ 3 files changed, 133 insertions(+), 5 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 4c9a2ae..1d35c83 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -284,6 +284,12 @@ public:
+     // GS's frame queue) allow. A test-speed switch; default true. Set before reset.
+     void setPaced(bool paced) noexcept { m_paced = paced; }
+     [[nodiscard]] bool paced() const noexcept { return m_paced; }
++    // Patch 0077: the host's pause (a menu over the game). setHeld(true), from any thread, parks the EE executor at
++    // its next checkpoint or wait: no guest code, events, EE timers or IOP cycles run, so guest time stands still.
++    // setHeld(false) resumes it, with the paced host deadlines moved forward by the time held (no burst of vsyncs to
++    // catch up). Returns once the executor has parked or resumed, or is not running; false after timeout.
++    bool setHeld(bool held, std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
++    [[nodiscard]] bool held() const noexcept { return m_heldAck.load(std::memory_order_acquire); }
+     void run();
+     void requestStop();
+     void postEvent(EeEvent event);
+@@ -468,4 +474,10 @@ private:
+     PS2DiagHooks *m_diag = nullptr;
+     uint64_t m_pacingWaitNs = 0;
+     bool m_paced = true; // setPaced
++
++    // setHeld (patch 0077): requested by the host, acknowledged by the executor in parkIfHeld (both under m_eventMutex).
++    void parkIfHeld();
++    std::atomic<bool> m_holdRequested{false};
++    std::atomic<bool> m_heldAck{false};
++    std::condition_variable m_holdCv;
+ };
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index ff19f9a..97290cf 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -358,7 +358,49 @@ void EeScheduler::requestStop()
+ {
+     m_stopRequested.store(true, std::memory_order_release);
+     m_checkpointPending.store(true, std::memory_order_release);
++    {
++        std::lock_guard lock(m_eventMutex);
++    }
+     m_eventCv.notify_all();
++    m_holdCv.notify_all();
++}
++
++bool EeScheduler::setHeld(bool held, std::chrono::milliseconds timeout)
++{
++    std::unique_lock lock(m_eventMutex);
++    m_holdRequested.store(held, std::memory_order_release);
++    if (held)
++        m_checkpointPending.store(true, std::memory_order_release); // a running guest returns to the scheduler
++    m_eventCv.notify_all();                                         // a waiting one wakes
++    m_holdCv.notify_all();
++    return m_holdCv.wait_for(lock, timeout, [this, held]()
++                             { return m_heldAck.load(std::memory_order_acquire) == held ||
++                                      m_stopRequested.load(std::memory_order_acquire) ||
++                                      !m_running.load(std::memory_order_acquire); });
++}
++
++void EeScheduler::parkIfHeld()
++{
++    if (!m_holdRequested.load(std::memory_order_acquire))
++        return;
++    std::unique_lock lock(m_eventMutex);
++    if (!m_holdRequested.load(std::memory_order_acquire))
++        return;
++    const auto start = std::chrono::steady_clock::now();
++    m_heldAck.store(true, std::memory_order_release);
++    m_holdCv.notify_all();
++    m_holdCv.wait(lock, [this]()
++                  { return !m_holdRequested.load(std::memory_order_acquire) ||
++                           m_stopRequested.load(std::memory_order_acquire); });
++    // Paced deadlines (VBlank, alarms) were set against the wall clock: move them past the pause, so guest time
++    // continues where it stopped. Unpaced ones are always due and only the guest cycle decides.
++    const auto heldFor = std::chrono::steady_clock::now() - start;
++    if (m_paced)
++        for (ScheduledEvent &item : m_deadlines)
++            if (item.hostDeadline != kUnpacedHostDeadline && item.hostDeadline != std::chrono::steady_clock::time_point{})
++                item.hostDeadline += heldFor;
++    m_heldAck.store(false, std::memory_order_release);
++    m_holdCv.notify_all();
+ }
+ 
+ void EeScheduler::postEvent(EeEvent event)
+@@ -1767,6 +1809,7 @@ void EeScheduler::applyPendingPreemption()
+ void EeScheduler::processPendingEvents()
+ {
+     assertExecutor();
++    parkIfHeld();
+     processDueDeadlines();
+     const uint32_t timerInterrupts = m_pendingEeTimerInterrupts;
+     m_pendingEeTimerInterrupts = 0u;
+@@ -1801,7 +1844,8 @@ void EeScheduler::processPendingEvents()
+         std::lock_guard lock(m_eventMutex);
+         const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+         const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
+-        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
++        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire) ||
++                                 m_holdRequested.load(std::memory_order_acquire);
+         m_checkpointPending.store(pendingWork, std::memory_order_release);
+     }
+     applyPendingPreemption();
+@@ -2059,9 +2103,10 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
+ void EeScheduler::waitForEvent()
+ {
+     std::unique_lock lock(m_eventMutex);
+-    if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
++    if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire) ||
++        m_holdRequested.load(std::memory_order_acquire))
+     {
+-        return;
++        return; // a hold parks in processPendingEvents (patch 0077)
+     }
+     const uint64_t timerCycles = m_runtime.memory().cyclesUntilNextEeTimerInterrupt();
+     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
+@@ -2070,7 +2115,8 @@ void EeScheduler::waitForEvent()
+     if (m_deadlines.empty() && !hasTimerDeadline)
+     {
+         m_eventCv.wait(lock, [this]()
+-                       { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
++                       { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire) ||
++                                m_holdRequested.load(std::memory_order_acquire); });
+         if (m_diag)
+         {
+             m_pacingWaitNs += static_cast<uint64_t>(
+@@ -2114,7 +2160,8 @@ void EeScheduler::waitForEvent()
+ 
+     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                                { return !m_events.empty() ||
+-                                                        m_stopRequested.load(std::memory_order_acquire); });
++                                                        m_stopRequested.load(std::memory_order_acquire) ||
++                                                        m_holdRequested.load(std::memory_order_acquire); });
+     if (m_diag)
+     {
+         m_pacingWaitNs += static_cast<uint64_t>(
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index e68ee4a..9d50c90 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -9,6 +9,8 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <filesystem>
++#include <mutex>
++#include <thread>
+ #include <fstream>
+ #include <sstream>
+ #include <string>
+@@ -390,6 +392,33 @@ namespace
+         ee.waitVSync(ee.currentVSyncTick());
+     }
+ 
++    // Patch 0077 (setHeld): the guest waits vsyncs and records each resume's tick and wall time.
++    struct HeldSample
++    {
++        uint64_t tick;
++        std::chrono::steady_clock::time_point at;
++    };
++    std::vector<HeldSample> s_heldSeen;
++    std::mutex s_heldMutex;
++    constexpr uint32_t kHeldVSyncs = 40u;
++
++    void heldDrive(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        EeScheduler &ee = runtime->eeScheduler();
++        {
++            std::lock_guard lock(s_heldMutex);
++            s_heldSeen.push_back(HeldSample{ee.currentVSyncTick(), std::chrono::steady_clock::now()});
++            if (s_heldSeen.size() > kHeldVSyncs)
++            {
++                ctx->pc = 0u;
++                runtime->requestStop();
++                return;
++            }
++        }
++        ctx->pc = kDrivePc;
++        ee.waitVSync(ee.currentVSyncTick());
++    }
++
+     // Wall milliseconds for kPacingVSyncs vsyncs; the vsync ticks seen in seen.
+     double runPacing(bool paced, std::vector<uint64_t> &seen)
+     {
+@@ -656,6 +685,46 @@ void register_ps2_gs_external_tests()
+             std::filesystem::remove_all(dir, ec);
+         });
+ 
++        tc.Run("held (patch 0077): guest time stands still while held, and no vsync burst after", [](TestCase &t)
++        {
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            PS2Runtime runtime;
++            runtime.registerFunction(kDrivePc, heldDrive);
++            {
++                std::lock_guard lock(s_heldMutex);
++                s_heldSeen.clear();
++            }
++            R5900Context mainContext{};
++            mainContext.pc = kDrivePc;
++            EeScheduler &ee = runtime.eeScheduler();
++            std::thread game([&]()
++                             { ee.reset(rdram.data(), mainContext);
++                               ee.run(); });
++            std::this_thread::sleep_for(std::chrono::milliseconds(150));
++            const bool parked = ee.setHeld(true);
++            const uint64_t tickAtHold = ee.currentVSyncTick();
++            std::this_thread::sleep_for(std::chrono::milliseconds(300));
++            const uint64_t tickAfterHold = ee.currentVSyncTick();
++            const bool heldFlag = ee.held();
++            const auto released = std::chrono::steady_clock::now();
++            const bool resumed = ee.setHeld(false);
++            game.join();
++
++            t.IsTrue(parked, "setHeld(true) returns once the executor parked");
++            t.IsTrue(heldFlag, "held() while parked");
++            t.IsTrue(resumed, "setHeld(false) returns once it resumed");
++            t.Equals(tickAfterHold, tickAtHold, "no vsync while held (300 ms = ~18 vsyncs)");
++            uint32_t within50ms = 0;
++            {
++                std::lock_guard lock(s_heldMutex);
++                for (const HeldSample &s : s_heldSeen)
++                    if (s.at >= released && s.at - released < std::chrono::milliseconds(50))
++                        ++within50ms;
++                t.Equals(s_heldSeen.size(), static_cast<size_t>(kHeldVSyncs + 1u), "every wait resumed after the hold");
++            }
++            t.IsTrue(within50ms <= 4u, "no catch-up burst: " + std::to_string(within50ms) + " vsyncs in the first 50 ms");
++        });
++
+         tc.Run("unpaced (PS2X_PACING=0): the same vsync ticks, without waiting for the wall clock", [](TestCase &t)
+         {
+             std::vector<uint64_t> paced, unpaced;
+-- 
+2.46.2.windows.1
+

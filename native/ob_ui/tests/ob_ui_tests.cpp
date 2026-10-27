@@ -1,0 +1,517 @@
+// ob_ui_core tests (ob.sh test): the settings menu's platform-free part.
+// - IniFile: an unchanged file saves byte-identical; set replaces in place, lands after its commented example, adds to
+//   a section or a new one; input.ini inline comments and their column stay; CRLF stays; quotes;
+// - disc check: SHA-256 known vectors, the PCSX2 CRC, a synthetic ISO (Ok, another release named by its CRC, another
+//   game, not a disc image, no file), an extracted folder and a bare ELF;
+// - menu trigger: F1/Esc, the Back+Start combo after 1 s, hold-back of a lone Start, a combo hidden from the game,
+//   a late tap, the pad gate while open and after closing;
+// - memory cards: unformatted, a formatted card with one save, transfer never overwrites, backups keep N.
+#include "disc_check.h"
+#include "ini_file.h"
+#include "memory_card.h"
+#include "menu_trigger.h"
+#include "widescreen.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+static int s_fail = 0, s_total = 0;
+static void Check(bool ok, const char* what)
+{
+	++s_total;
+	if (!ok)
+	{
+		++s_fail;
+		std::printf("FAIL: %s\n", what);
+	}
+}
+
+namespace fs = std::filesystem;
+
+static fs::path TempDir(const char* name)
+{
+	const fs::path d = fs::temp_directory_path() / "ob_ui_tests" / name;
+	std::error_code ec;
+	fs::remove_all(d, ec);
+	fs::create_directories(d, ec);
+	return d;
+}
+
+static void WriteBytes(const fs::path& p, const std::vector<uint8_t>& b)
+{
+	std::ofstream f(p, std::ios::binary);
+	f.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+}
+
+// ---- IniFile ----
+static void IniTests()
+{
+	const std::string outbreak =
+		"; outbreak.ini\n"
+		"game = D:\\Games\\a;b.iso\n"
+		"\n"
+		"; upscale: render resolution multiplier\n"
+		"; upscale = 3\n"
+		"\n"
+		"; window = 1440x810\n";
+	obui::IniFile ini;
+	ini.parse(outbreak);
+	Check(ini.text() == outbreak, "ini: unchanged text is byte-identical");
+	Check(ini.get("", "GAME").value_or("") == "D:\\Games\\a;b.iso", "ini: ';' inside an outbreak.ini value is kept");
+	Check(!ini.get("", "upscale"), "ini: a commented example is not a value");
+	ini.set("", "game", "E:\\new.iso");
+	Check(ini.get("", "game").value_or("") == "E:\\new.iso", "ini: set replaces the value");
+	ini.set("", "upscale", "4");
+	{
+		const std::string t = ini.text();
+		Check(t.find("; upscale = 3\nupscale = 4\n") != std::string::npos, "ini: new key lands after its commented example");
+		Check(t.find("; outbreak.ini\ngame = E:\\new.iso\n") == 0, "ini: other lines untouched");
+	}
+	ini.set("", "saves", "D:\\saves");
+	Check(ini.text().find("; window = 1440x810\nsaves = D:\\saves\n") != std::string::npos,
+		"ini: new key without example goes at the end of its section");
+	ini.set("", "mods", " padded ");
+	Check(ini.text().find("mods = \" padded \"") != std::string::npos && ini.get("", "mods").value_or("") == " padded ",
+		"ini: quotes for leading/trailing spaces, stripped by get");
+	Check(ini.remove("", "mods") && !ini.get("", "mods"), "ini: remove");
+
+	// Last active line wins; keys case-insensitive.
+	obui::IniFile dup;
+	dup.parse("vu1 = interp\nVU1 = mvu\n");
+	Check(dup.get("", "vu1").value_or("") == "mvu", "ini: last line wins");
+	dup.set("", "vu1", "interp");
+	Check(dup.text() == "vu1 = interp\nVU1 = interp\n", "ini: set changes the last line");
+
+	// CRLF preserved, and used for new lines.
+	obui::IniFile crlf;
+	crlf.parse("a = 1\r\nb = 2\r\n");
+	crlf.set("", "b", "3");
+	crlf.set("", "c", "4");
+	Check(crlf.text() == "a = 1\r\nb = 3\r\nc = 4\r\n", "ini: CRLF kept");
+	obui::IniFile noEol;
+	noEol.parse("a = 1");
+	noEol.set("", "b", "2");
+	Check(noEol.text() == "a = 1\nb = 2\n", "ini: last line without newline gets one");
+
+	// input.ini: sections, inline comments and their column.
+	const std::string input =
+		"[keyboard]\n"
+		"cross    = K            ; Cross = K\n"
+		"circle   = L            ; Circle = L\n"
+		"\n"
+		"[gamepad]\n"
+		"cross    = RIGHT_FACE_DOWN  ; A\n";
+	obui::IniFile in(true);
+	in.parse(input);
+	Check(in.text() == input, "input.ini: unchanged text is byte-identical");
+	Check(in.get("keyboard", "cross").value_or("") == "K", "input.ini: inline comment stripped");
+	Check(in.get("GAMEPAD", "cross").value_or("") == "RIGHT_FACE_DOWN", "input.ini: section lookup");
+	in.set("keyboard", "cross", "SPACE");
+	Check(in.text().find("cross    = SPACE        ; Cross = K\n") != std::string::npos, "input.ini: comment column kept");
+	in.set("keyboard", "cross", "A_VERY_LONG_KEY_NAME_HERE");
+	Check(in.text().find("cross    = A_VERY_LONG_KEY_NAME_HERE ; Cross = K\n") != std::string::npos,
+		"input.ini: long value, comment after one space");
+	in.set("keyboard", "square", "J");
+	Check(in.text().find("circle   = L            ; Circle = L\nsquare = J\n\n[gamepad]") != std::string::npos,
+		"input.ini: new key at the end of its section, before the blank line");
+	in.set("mouse", "look", "on");
+	Check(in.text().find("[gamepad]\ncross    = RIGHT_FACE_DOWN  ; A\n\n[mouse]\nlook = on\n") != std::string::npos,
+		"input.ini: new section at the end");
+
+	// Save / load round trip through a temp file.
+	const fs::path dir = TempDir("ini");
+	obui::IniFile missing;
+	Check(missing.load(dir / "none.ini") && missing.text().empty(), "ini: missing file loads empty");
+	Check(in.save(dir / "input.ini"), "ini: save");
+	obui::IniFile back(true);
+	Check(back.load(dir / "input.ini") && back.text() == in.text(), "ini: load returns what was saved");
+	Check(!fs::exists(dir / "input.ini.tmp"), "ini: no tmp file left");
+}
+
+// ---- disc check ----
+static void PutLe32(std::vector<uint8_t>& b, size_t at, uint32_t v)
+{
+	for (int i = 0; i < 4; ++i)
+		b[at + i] = static_cast<uint8_t>(v >> (8 * i));
+}
+
+// One ISO 9660 directory record.
+static std::vector<uint8_t> DirRecord(const std::string& name, uint32_t lba, uint32_t size, bool dir)
+{
+	const size_t nameLen = name.empty() ? 1 : name.size();
+	size_t len = 33 + nameLen;
+	if (len & 1)
+		++len;
+	std::vector<uint8_t> r(len, 0);
+	r[0] = static_cast<uint8_t>(len);
+	PutLe32(r, 2, lba);
+	PutLe32(r, 10, size);
+	r[25] = dir ? 2 : 0;
+	r[32] = static_cast<uint8_t>(nameLen);
+	if (name.empty())
+		r[33] = 0;
+	else
+		std::memcpy(&r[33], name.data(), name.size());
+	return r;
+}
+
+// PVD at 16, root directory at 18, SYSTEM.CNF at 19, the boot file from 20.
+static std::vector<uint8_t> MakeIso(const std::string& cnf, const std::string& bootName, const std::vector<uint8_t>& elf)
+{
+	const uint32_t S = 2048, elfSectors = static_cast<uint32_t>((elf.size() + S - 1) / S);
+	std::vector<uint8_t> iso((20 + elfSectors + 1) * S, 0);
+	uint8_t* pvd = &iso[16 * S];
+	pvd[0] = 1;
+	std::memcpy(pvd + 1, "CD001", 5);
+	std::vector<uint8_t> dir;
+	auto add = [&](const std::vector<uint8_t>& r) { dir.insert(dir.end(), r.begin(), r.end()); };
+	add(DirRecord("", 18, S, true));
+	add(DirRecord("\x01", 18, S, true));
+	add(DirRecord("SYSTEM.CNF;1", 19, static_cast<uint32_t>(cnf.size()), false));
+	add(DirRecord(bootName + ";1", 20, static_cast<uint32_t>(elf.size()), false));
+	std::memcpy(&iso[18 * S], dir.data(), dir.size());
+	const std::vector<uint8_t> rootRec = DirRecord("", 18, S, true);
+	std::memcpy(pvd + 156, rootRec.data(), 34);
+	std::memcpy(&iso[19 * S], cnf.data(), cnf.size());
+	std::memcpy(&iso[20 * S], elf.data(), elf.size());
+	return iso;
+}
+
+static void DiscTests()
+{
+	Check(obui::sha256Hex(nullptr, 0) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256: empty");
+	Check(obui::sha256Hex(reinterpret_cast<const uint8_t*>("abc"), 3) ==
+		"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256: abc");
+	{
+		const std::string s = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"; // 56 bytes: two padding blocks
+		Check(obui::sha256Hex(reinterpret_cast<const uint8_t*>(s.data()), s.size()) ==
+			"248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256: 56-byte vector");
+		std::vector<uint8_t> million(1000000, 'a');
+		Check(obui::sha256Hex(million.data(), million.size()) ==
+			"cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "sha256: one million 'a'");
+	}
+	{
+		const uint8_t w[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
+		Check(obui::pcsx2ElfCrc(w, 8) == 0x80000001u, "crc: XOR of little-endian words");
+	}
+	{
+		std::string boot, serial, ver;
+		Check(obui::parseSystemCnf("BOOT2 = cdrom0:\\SLPM_654.28;1\r\nVER = 1.04\r\nVMODE = NTSC\r\n", boot, serial, ver) &&
+			boot == "SLPM_654.28" && serial == "SLPM-65428" && ver == "1.04", "SYSTEM.CNF: boot file, serial, version");
+	}
+
+	std::vector<uint8_t> elf(6000);
+	elf[0] = 0x7F; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F';
+	for (size_t i = 4; i < elf.size(); ++i)
+		elf[i] = static_cast<uint8_t>(i * 7);
+	obui::ExpectedElf expected{"SLPM-65428", elf.size(), obui::sha256Hex(elf.data(), elf.size()), obui::pcsx2ElfCrc(elf.data(), elf.size())};
+	const std::string cnf = "BOOT2 = cdrom0:\\SLPM_654.28;1\nVER = 1.04\n";
+	const fs::path dir = TempDir("disc");
+
+	WriteBytes(dir / "good.iso", MakeIso(cnf, "SLPM_654.28", elf));
+	obui::DiscReport r = obui::checkDisc(dir / "good.iso", expected);
+	Check(r.verdict == obui::DiscVerdict::Ok && r.stepsPassed == 3 && r.serial == "SLPM-65428" && r.version == "1.04",
+		"disc: matching image verified");
+
+	obui::ExpectedElf other = expected;
+	other.sha256 = std::string(64, '0');
+	std::vector<uint8_t> jp = elf;
+	// Make the image's ELF have the original Japanese disc's CRC: fix the last word so the XOR comes out 0x03C8F393.
+	PutLe32(jp, jp.size() - 4, 0);
+	PutLe32(jp, jp.size() - 4, obui::pcsx2ElfCrc(jp.data(), jp.size()) ^ 0x03C8F393u);
+	WriteBytes(dir / "jp.iso", MakeIso(cnf, "SLPM_654.28", jp));
+	r = obui::checkDisc(dir / "jp.iso", expected);
+	Check(r.verdict == obui::DiscVerdict::WrongRelease && r.stepsPassed == 2 && r.crc == 0x03C8F393u &&
+		r.message.find("original Japanese disc") != std::string::npos, "disc: another release named by its CRC");
+
+	WriteBytes(dir / "other.iso", MakeIso("BOOT2 = cdrom0:\\SLUS_202.28;1\n", "SLUS_202.28", elf));
+	r = obui::checkDisc(dir / "other.iso", expected);
+	Check(r.verdict == obui::DiscVerdict::WrongGame && r.stepsPassed == 1 && r.message.find("SLUS-20228") != std::string::npos,
+		"disc: another game named by its serial");
+
+	WriteBytes(dir / "garbage.iso", std::vector<uint8_t>(100000, 0x5A));
+	r = obui::checkDisc(dir / "garbage.iso", expected);
+	Check(r.verdict == obui::DiscVerdict::NotDiscImage && r.stepsPassed == 0, "disc: not a disc image");
+	r = obui::checkDisc(dir / "missing.iso", expected);
+	Check(r.verdict == obui::DiscVerdict::NoFile && r.stepsPassed == 0, "disc: no file");
+	r = obui::checkDisc(fs::path(), expected);
+	Check(r.verdict == obui::DiscVerdict::NoFile, "disc: nothing chosen");
+
+	// An extracted folder and the bare ELF (outbreak.ini / command line forms).
+	fs::create_directories(dir / "folder");
+	WriteBytes(dir / "folder" / "SYSTEM.CNF", std::vector<uint8_t>(cnf.begin(), cnf.end()));
+	WriteBytes(dir / "folder" / "SLPM_654.28", elf);
+	r = obui::checkDisc(dir / "folder", expected);
+	Check(r.verdict == obui::DiscVerdict::Ok && r.stepsPassed == 3, "disc: extracted folder verified");
+	r = obui::checkDisc(dir / "folder" / "SLPM_654.28", expected);
+	Check(r.verdict == obui::DiscVerdict::Ok && r.stepsPassed == 3, "disc: bare boot ELF verified");
+
+	obui::DiscCache cache;
+	cache.remember(dir / "good.iso", obui::checkDisc(dir / "good.iso", expected));
+	Check(cache.sameFileAs(dir / "good.iso") && !cache.sameFileAs(dir / "jp.iso"), "disc cache: same file recognised");
+
+	// Optional, by hand: OB_UI_REAL_DISC=<the player's .iso, folder or ELF> must pass against the built-in ELF.
+	if (const char* real = std::getenv("OB_UI_REAL_DISC"); real && *real)
+	{
+		r = obui::checkDisc(fs::u8path(real), obui::builtInExpectedElf());
+		std::printf("real disc: verdict %d steps %d serial %s crc %08X: %s\n", static_cast<int>(r.verdict), r.stepsPassed,
+			r.serial.c_str(), r.crc, r.message.c_str());
+		Check(r.verdict == obui::DiscVerdict::Ok, "disc: the real disc (OB_UI_REAL_DISC) verified");
+	}
+
+	const obui::ExpectedElf built = obui::builtInExpectedElf();
+	Check(built.serial == "SLPM-65428" && built.size == 1294104u && built.crc == 0x32088394u &&
+		built.sha256 == "975dd77d1e1c81f0d8f5f072b35c487c5ad6befbb99b339641a4c9573a334480", "disc: built-in expected ELF");
+}
+
+// ---- menu trigger ----
+static uint16_t Pressed(uint16_t bits) { return static_cast<uint16_t>(~bits); }
+
+static void TriggerTests()
+{
+	using obui::kPadSelect;
+	using obui::kPadStart;
+	constexpr uint16_t kCross = 1u << 14;
+	{
+		// The menu's setting since 2026-10-26: no hold-back and no combo. Start and Select pass on their first read,
+		// alone or together; holding Back + Start never toggles; F1 still does.
+		obui::MenuTrigger t{obui::MenuTrigger::Config{1.0, 0.0, false, false}};
+		Check((t.filterPad(Pressed(kPadStart), 0.0) & kPadStart) == 0, "trigger (no hold-back): Start shows pressed on the first read");
+		t.filterPad(0xFFFFu, 0.05);
+		const uint16_t both = t.filterPad(Pressed(kPadSelect | kPadStart), 0.1);
+		Check((both & kPadSelect) == 0 && (both & kPadStart) == 0, "trigger (no hold-back): Select + Start together both pass");
+		Check(!t.update(0.1, true, true, false, false, false) && !t.update(0.6, true, true, false, false, false) &&
+			!t.update(1.15, true, true, false, false, false) && !t.update(2.5, true, true, false, false, false),
+			"trigger (no combo): holding Back + Start never toggles");
+		Check(t.update(2.6, false, false, false, true, false), "trigger (no combo): F1 still toggles");
+	}
+	{
+		// Windows' menu (2026-10-26): the combo held 5 s, no hold-back; comboProgress drives the gear ring.
+		obui::MenuTrigger t{obui::MenuTrigger::Config{5.0, 0.0, false, true}};
+		Check((t.filterPad(Pressed(kPadSelect | kPadStart), 0.0) & (kPadSelect | kPadStart)) == 0, "trigger (5 s combo): Select + Start pass at once");
+		Check(!t.update(0.0, true, true, false, false, false) && t.comboProgress(0.0) == 0.0f, "trigger (5 s combo): progress starts at 0");
+		Check(!t.update(2.5, true, true, false, false, false) && t.comboProgress(2.5) > 0.49f && t.comboProgress(2.5) < 0.51f,
+			"trigger (5 s combo): half way at 2.5 s, no toggle");
+		Check(!t.update(3.0, true, false, false, false, false) && t.comboProgress(3.0) == 0.0f, "trigger (5 s combo): letting go resets the ring");
+		t.update(3.1, true, true, false, false, false);
+		Check(!t.update(8.0, true, true, false, false, false) && t.update(8.2, true, true, false, false, false),
+			"trigger (5 s combo): toggles 5 s after both are held again");
+		Check(t.comboProgress(8.3) == 0.0f, "trigger (5 s combo): ring hidden once fired");
+	}
+	{
+		obui::MenuTrigger t;
+		Check(t.update(0.0, false, false, false, true, false), "trigger: F1 toggles");
+		Check(t.update(0.1, false, false, false, false, true), "trigger: Esc toggles");
+		Check(!t.update(0.2, false, false, false, false, false), "trigger: nothing pressed, no toggle");
+		Check(!t.update(0.3, false, false, true, false, false), "trigger: Guide off by default");
+	}
+	{
+		obui::MenuTrigger t(obui::MenuTrigger::Config{1.0, 0.1, true});
+		Check(t.update(0.0, false, false, true, false, false) && !t.update(0.1, false, false, true, false, false),
+			"trigger: Guide when enabled, once per press");
+	}
+	{
+		obui::MenuTrigger t;
+		bool fired = false;
+		double firedAt = -1;
+		for (double now = 0.0; now < 1.5; now += 1.0 / 60.0)
+			if (t.update(now, true, true, false, false, false) && !fired)
+			{
+				fired = true;
+				firedAt = now;
+			}
+		Check(fired && firedAt >= 0.99 && firedAt < 1.05, "trigger: Back+Start combo fires after 1 s");
+		Check(!t.update(1.6, true, true, false, false, false), "trigger: combo fires once per hold");
+		t.update(1.7, false, false, false, false, false);
+		bool again = false;
+		for (double now = 1.8; now < 2.9; now += 1.0 / 60.0)
+			again |= t.update(now, true, true, false, false, false);
+		Check(again, "trigger: combo fires again after both are released");
+	}
+	{
+		// A lone Start: hidden for the hold-back window, then the game sees it.
+		obui::MenuTrigger t;
+		Check(t.filterPad(0xFFFF, 0.0) == 0xFFFF, "pad: idle passes");
+		Check((t.filterPad(Pressed(kPadStart), 0.0) & kPadStart) != 0, "pad: Start hidden at first");
+		Check((t.filterPad(Pressed(kPadStart), 0.05) & kPadStart) != 0, "pad: Start hidden inside the window");
+		Check((t.filterPad(Pressed(kPadStart), 0.12) & kPadStart) == 0, "pad: Start reaches the game after the window");
+		Check((t.filterPad(Pressed(kPadStart), 0.5) & kPadStart) == 0, "pad: Start stays pressed while held");
+		Check((t.filterPad(0xFFFF, 0.6) & kPadStart) != 0, "pad: Start released");
+		Check((t.filterPad(Pressed(kCross), 0.7) & kCross) == 0, "pad: other buttons never held back");
+	}
+	{
+		// Combo: both hidden until both are released.
+		obui::MenuTrigger t;
+		t.filterPad(Pressed(kPadSelect), 0.0);
+		uint16_t out = t.filterPad(Pressed(kPadSelect | kPadStart), 0.05);
+		Check((out & (kPadSelect | kPadStart)) == (kPadSelect | kPadStart), "pad: combo hides both");
+		out = t.filterPad(Pressed(kPadSelect | kPadStart), 0.9);
+		Check((out & (kPadSelect | kPadStart)) == (kPadSelect | kPadStart), "pad: combo still hidden after the window");
+		out = t.filterPad(Pressed(kPadStart), 1.2);
+		Check((out & kPadStart) != 0, "pad: one let go, the other still hidden");
+		out = t.filterPad(0xFFFF, 1.3);
+		Check(out == 0xFFFF, "pad: no late tap after a combo");
+	}
+	{
+		// A quick tap: delivered late, for a few reads.
+		obui::MenuTrigger t;
+		t.filterPad(Pressed(kPadStart), 0.0);
+		const uint16_t first = t.filterPad(0xFFFF, 0.04);
+		const uint16_t second = t.filterPad(0xFFFF, 0.06);
+		int shown = 0;
+		for (int i = 0; i < 10; ++i)
+			shown += (t.filterPad(0xFFFF, 0.1 + i * 0.016) & kPadStart) == 0;
+		Check((first & kPadStart) == 0 && (second & kPadStart) == 0 && shown == 2, "pad: a tap inside the window arrives late (4 reads)");
+	}
+	{
+		// Gate: everything released while open; after closing, held buttons stay masked until let go.
+		obui::MenuTrigger t;
+		t.setMenuOpen(true, 0.0);
+		Check(t.menuOpen() && t.filterPad(Pressed(kCross), 0.1) == 0xFFFF, "gate: menu open, game sees nothing");
+		t.setMenuOpen(false, 0.2);
+		Check((t.filterPad(Pressed(kCross), 0.3) & kCross) != 0, "gate: button held through closing stays masked");
+		Check((t.filterPad(Pressed(kCross), 0.4) & kCross) != 0, "gate: masked until released");
+		t.filterPad(0xFFFF, 0.5);
+		Check((t.filterPad(Pressed(kCross), 0.6) & kCross) == 0, "gate: a new press after release reaches the game");
+	}
+	Check(obui::reservedKeyNames().size() == 2, "trigger: F1 and Esc reserved");
+}
+
+// ---- memory cards ----
+static constexpr uint32_t kRaw = 528, kPages = 16384;
+
+static void PutPageLe32(std::vector<uint8_t>& c, uint32_t page, uint32_t off, uint32_t v) { PutLe32(c, size_t(page) * kRaw + off, v); }
+
+static void PutEntry(std::vector<uint8_t>& c, uint32_t page, uint16_t mode, uint32_t length, const char* name)
+{
+	uint8_t* e = &c[size_t(page) * kRaw];
+	std::memset(e, 0, 512);
+	e[0] = static_cast<uint8_t>(mode);
+	e[1] = static_cast<uint8_t>(mode >> 8);
+	PutLe32(c, size_t(page) * kRaw + 4, length);
+	std::memcpy(e + 0x40, name, std::strlen(name));
+}
+
+// A formatted card as mcd.py format makes it (pages/cluster 2, indirect FAT at 8, FAT at 9, data from cluster 41),
+// root directory "." "..", plus one save directory in the root's second cluster.
+static std::vector<uint8_t> MakeFormattedCard()
+{
+	std::vector<uint8_t> c(size_t(kPages) * kRaw, 0);
+	std::memcpy(c.data(), "Sony PS2 Memory Card Format 1.2.0.0", 35);
+	c[0x2A] = 2;                       // pages per cluster
+	PutPageLe32(c, 0, 0x34, 41);       // alloc_offset
+	PutPageLe32(c, 0, 0x3C, 0);        // root directory cluster
+	PutPageLe32(c, 0, 0x50, 8);        // first indirect FAT cluster
+	PutPageLe32(c, 8 * 2, 0, 9);       // indirect FAT -> FAT cluster 9
+	PutPageLe32(c, 9 * 2, 0, 0x80000001u); // FAT: root cluster 0 -> 1 (in use)
+	PutPageLe32(c, 9 * 2, 4, 0xFFFFFFFFu); // cluster 1: end of chain
+	PutEntry(c, (41 + 0) * 2 + 0, 0x8427, 3, ".");
+	PutEntry(c, (41 + 0) * 2 + 1, 0xA426, 0, "..");
+	PutEntry(c, (41 + 1) * 2 + 0, 0x8427, 2, "BISLPM-65428NETBIO");
+	return c;
+}
+
+static void CardTests()
+{
+	const fs::path dir = TempDir("cards");
+	Check(!obui::readCard(dir / "Mcd001.ps2").present, "card: missing card not present");
+	WriteBytes(dir / "Mcd001.ps2", std::vector<uint8_t>(size_t(kPages) * kRaw, 0xFF));
+	obui::CardInfo info = obui::readCard(dir / "Mcd001.ps2");
+	Check(info.present && !info.formatted && info.sizeBytes == 8650752u && info.saves.empty(), "card: blank card is unformatted");
+
+	WriteBytes(dir / "Mcd001.ps2", MakeFormattedCard());
+	info = obui::readCard(dir / "Mcd001.ps2");
+	Check(info.formatted && info.error.empty() && info.saves.size() == 1 && info.saves[0] == "BISLPM-65428NETBIO",
+		"card: formatted card lists its save");
+
+	// Transfer: Copy keeps the source, never overwrites a card already at the destination; Move removes the source.
+	const fs::path to = dir / "new";
+	std::string err;
+	Check(obui::transferCards(dir, to, obui::CardMove::Copy, &err) && fs::exists(to / "Mcd001.ps2") && fs::exists(dir / "Mcd001.ps2"),
+		"card: copy to a new folder");
+	WriteBytes(dir / "Mcd001.ps2", std::vector<uint8_t>(16, 1));
+	err.clear();
+	Check(!obui::transferCards(dir, to, obui::CardMove::Move, &err) && !err.empty() && obui::readCard(to / "Mcd001.ps2").formatted &&
+		fs::exists(dir / "Mcd001.ps2"), "card: an existing destination card is never overwritten");
+	const fs::path to2 = dir / "moved";
+	Check(obui::transferCards(to, to2, obui::CardMove::Move, &err) && fs::exists(to2 / "Mcd001.ps2") && !fs::exists(to / "Mcd001.ps2"),
+		"card: move");
+	Check(obui::transferCards(dir, dir / "x", obui::CardMove::Leave, &err) && !fs::exists(dir / "x" / "Mcd001.ps2"), "card: leave");
+
+	// Import replaces slot 1; a non-card is refused.
+	Check(obui::importCard(to2 / "Mcd001.ps2", dir, &err) && obui::readCard(dir / "Mcd001.ps2").formatted, "card: import from PCSX2");
+	WriteBytes(dir / "notacard.bin", std::vector<uint8_t>(1000, 0));
+	Check(!obui::importCard(dir / "notacard.bin", dir, &err), "card: import refuses a non-card");
+
+	// Backups keep the newest N (seed older ones by name).
+	fs::create_directories(dir / "backups");
+	for (int i = 0; i < 5; ++i)
+		WriteBytes(dir / "backups" / ("Mcd001-2000010" + std::to_string(i) + "-000000.ps2.bak"), {1});
+	Check(obui::backupCard(dir / "Mcd001.ps2", 3, &err), "card: backup");
+	int n = 0;
+	bool oldestGone = true;
+	for (const auto& e : fs::directory_iterator(dir / "backups"))
+	{
+		++n;
+		if (e.path().filename().string().find("20000100") != std::string::npos)
+			oldestGone = false;
+	}
+	Check(n == 3 && oldestGone, "card: backups keep the newest 3");
+}
+
+static void WriteText(const fs::path& p, const std::string& t)
+{
+	std::ofstream o(p, std::ios::binary);
+	o << t;
+}
+
+static void WidescreenTests()
+{
+	// Detection: the patch line or gsaspectratio=16:9, case and spaces ignored; comment lines do not count.
+	Check(obui::isWidescreenPnach("gametitle=x\r\n[Widescreen 16:9]\r\ngsaspectratio=16:9\r\n"), "widescreen: gsaspectratio line");
+	Check(obui::isWidescreenPnach("PATCH = 1, EE, 20239D48, extended, 3FE38E38 // gameplay\n"), "widescreen: patch line, any case and spaces");
+	Check(!obui::isWidescreenPnach("//patch=1,EE,20239d48,extended,3fe38e38\n; gsaspectratio=16:9\n"), "widescreen: comment lines ignored");
+	Check(!obui::isWidescreenPnach("patch=1,EE,00100000,extended,00000000\ngsaspectratio=4:3\n"), "widescreen: another patch is not");
+
+	const fs::path dir = TempDir("widescreen");
+	const std::string ws = "gametitle=t\n[Widescreen 16:9]\npatch=1,EE,20239d48,extended,3fe38e38\n";
+	WriteText(dir / "other.pnach", "patch=1,EE,00100000,extended,00000000\n");
+	std::string err;
+
+	// None: 16:9 writes ob-widescreen.pnach; the other mod is not one.
+	Check(!obui::widescreenEnabled(dir), "widescreen: off with no widescreen mod");
+	Check(obui::setWidescreen(dir, true, &err) && fs::exists(dir / obui::kOwnWidescreenFile), "widescreen: 16:9 creates ob-widescreen.pnach when none");
+	Check(obui::widescreenEnabled(dir) && obui::findWidescreenMods(dir).size() == 1, "widescreen: on, one mod (other.pnach not counted)");
+
+	// 4:3 disables every enabled one by rename (the player's file and ours), nothing deleted.
+	WriteText(dir / "widescreen.pnach", ws);
+	Check(obui::setWidescreen(dir, false, &err), "widescreen: 4:3");
+	Check(fs::exists(dir / "widescreen.pnach.disabled") && fs::exists(dir / "ob-widescreen.pnach.disabled") &&
+			  !fs::exists(dir / "widescreen.pnach") && fs::exists(dir / "other.pnach"),
+		"widescreen: 4:3 renames all widescreen mods to .disabled, keeps the rest");
+	Check(!obui::widescreenEnabled(dir), "widescreen: off after 4:3");
+
+	// 16:9 again: enables one existing disabled mod, the player's own before ours; writes nothing new.
+	Check(obui::setWidescreen(dir, true, &err), "widescreen: 16:9 again");
+	Check(fs::exists(dir / "widescreen.pnach") && fs::exists(dir / "ob-widescreen.pnach.disabled") &&
+			  !fs::exists(dir / "ob-widescreen.pnach"),
+		"widescreen: 16:9 enables the player's disabled file, only one");
+	Check(obui::isWidescreenModFile(dir / "ob-widescreen.pnach.disabled") && !obui::isWidescreenModFile(dir / "other.pnach"),
+		"widescreen: file test by name or content");
+}
+
+int main()
+{
+	IniTests();
+	DiscTests();
+	TriggerTests();
+	CardTests();
+	WidescreenTests();
+	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
+	return s_fail ? 1 : 0;
+}

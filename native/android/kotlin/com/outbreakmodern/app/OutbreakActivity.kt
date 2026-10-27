@@ -1,0 +1,118 @@
+package com.outbreakmodern.app
+
+import android.app.NativeActivity
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.net.Uri
+import android.os.Bundle
+import android.system.Os
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ViewGroup
+import android.view.WindowManager
+import androidx.activity.ComponentDialog
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.ComposeView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+
+/**
+ * The game: the framework's NativeActivity runs libps2EntryRunner.so (android.app.lib_name in the manifest). Before
+ * it starts, the disc chosen in the launcher is opened here and handed to the runner as /proc/self/fd/<n>
+ * (PS2X_GAME_PATH), and the runner's own launcher is off (PS2X_LAUNCHER=0, PS2Recomp patch 0078). The in-game menu is
+ * a Compose dialog over the game, opened by the runner (native/ob_ui/android/android_menu.h: showMenu) while it holds
+ * the game; nativeMenuClosed tells it how the menu closed.
+ */
+class OutbreakActivity : NativeActivity() {
+    private var discFd = -1
+    private var menu: ComponentDialog? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val settings = Settings(this)
+        settings.savedDiscUri()?.let { uri ->
+            discFd = openDocument(uri.toString())
+            if (discFd >= 0) Os.setenv("PS2X_GAME_PATH", "/proc/self/fd/$discFd", true)
+        }
+        Os.setenv("PS2X_LAUNCHER", "0", true)
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    /** Opens a document read-only and hands its descriptor over (kept open for the process); -1 on failure. */
+    fun openDocument(uri: String): Int = runCatching {
+        contentResolver.openFileDescriptor(Uri.parse(uri), "r")!!.detachFd()
+    }.getOrDefault(-1)
+
+    /** Called by the runner (native thread) when the menu should open. */
+    fun showMenu() {
+        runOnUiThread { if (menu == null) openMenu() }
+    }
+
+    private external fun nativeMenuClosed(quit: Boolean, inputChanged: Boolean, settingsChanged: Boolean)
+
+    private fun openMenu() {
+        val nav = MenuNav()
+        val model = SettingsModel(this, Settings(this), inGame = true, nav = nav)
+        var closed = false
+        lateinit var dialog: ComponentDialog
+        fun close(quit: Boolean) {
+            if (closed) return
+            closed = true
+            dialog.dismiss()
+            menu = null
+            nativeMenuClosed(quit, model.inputChanged, model.settingsChanged)
+            // Quit leaves the way Android expects (developer, 2026-10-26: quitting disturbed the front end that started
+            // us): finish this activity and its task, so the system returns to the caller cleanly, instead of only
+            // the runner ending the process with _Exit underneath a live activity.
+            if (quit)
+                finishAndRemoveTask()
+        }
+        val footer = { i: Int -> if (i == 0) nav.ask(Confirm("Quit the game?", "Progress since your last save is lost.", "Quit game", "Cancel", { close(true) })) else close(false) }
+        val input = GamepadInput(scope) { a ->
+            nav.handle(a, model.pages(), footerActions = footer, onBackFromList = { close(false) }, onStart = { close(false) })
+        }
+        dialog = object : ComponentDialog(this, android.R.style.Theme_Material_NoActionBar_Fullscreen) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                if (model.capturing && model.onCaptureKey(event)) return true
+                return input.onKeyEvent(event) || super.dispatchKeyEvent(event)
+            }
+
+            override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean =
+                (!model.capturing && input.onMotionEvent(ev)) || super.dispatchGenericMotionEvent(ev)
+        }
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+        }
+        dialog.setCancelable(false)
+        dialog.setContentView(ComposeView(this).apply {
+            setContent {
+                AppTheme {
+                    LaunchedEffect(Unit) { while (true) { delay(500); model.tickCapture() } }
+                    SettingsShell(
+                        title = "Game paused",
+                        subtitle = "Sound and timers stopped",
+                        pages = model.pages(), nav = nav,
+                        footerLabels = listOf("Quit game", "Resume"),
+                        footerDim = listOf(false, false),
+                        footerActions = footer,
+                        status = model.statusLine("Settings save as you change them"),
+                        backLabel = "resume", startLabel = "resume",
+                        backdrop = androidx.compose.ui.graphics.Color(0xD90F1115), // the paused game shows through, dimmed
+                    )
+                }
+            }
+        })
+        menu = dialog
+        dialog.show()
+    }
+}

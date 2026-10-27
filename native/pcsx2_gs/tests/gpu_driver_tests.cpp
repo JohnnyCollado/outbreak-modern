@@ -130,7 +130,6 @@ namespace
 			{"library missing", [](obgpu::CustomDriverCheck& c) { c.files = {"meta.json"}; }, "not in the folder"},
 			{"Mali", [](obgpu::CustomDriverCheck& c) { c.system_vendor_id = 0x13B5; }, "not Adreno (vendor ARM)"},
 			{"no kgsl, probe failed", [](obgpu::CustomDriverCheck& c) { c.kgsl_present = false; }, "not Adreno"},
-			{"old Android", [](obgpu::CustomDriverCheck& c) { c.device_api = 27; }, "needs Android API 28, device has 27"},
 			{"libs not extracted", [](obgpu::CustomDriverCheck& c) { c.native_lib_dir_ok = false; }, "not extracted"},
 			{"hooks missing", [](obgpu::CustomDriverCheck& c) { c.hooks_present = false; }, "hooks"},
 		};
@@ -141,6 +140,15 @@ namespace
 			r = obgpu::CustomDriverBlocker(c, lib);
 			Check((std::string("decide: falls back, ") + k.name).c_str(), r.find(k.want) != std::string::npos && lib.empty(), r);
 		}
+		// A newer minApi than the device loads anyway, with a warning (developer, 2026-10-26).
+		c = GoodCheck();
+		c.device_api = 27;
+		r = obgpu::CustomDriverBlocker(c, lib);
+		Check("decide: older Android still loads", r.empty() && !lib.empty(), r);
+		Check("decide: older Android warns", obgpu::MinApiWarning(c).find("made for Android API 28, device has 27") != std::string::npos,
+			obgpu::MinApiWarning(c));
+		c = GoodCheck();
+		Check("decide: no warning on a new enough device", obgpu::MinApiWarning(c).empty(), obgpu::MinApiWarning(c));
 		Check("decide: fall-back line",
 			obgpu::FallbackLine("turnip", "GPU is not Adreno") ==
 				"[gpu] custom driver turnip unavailable (GPU is not Adreno); using system driver");

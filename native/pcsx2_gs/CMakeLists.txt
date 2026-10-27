@@ -218,6 +218,11 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_ipu" "${CMAKE_BINARY_DIR}
 # PCSX2's SIO2 and PS2 memory cards, on ob_pcsx2_gs: native/pcsx2_sio2.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_sio2" "${CMAKE_BINARY_DIR}/pcsx2_sio2")
 
+# Settings menu core and its tests without the runner (the GS tree, ob.sh test); with it, added below.
+if(NOT TARGET ps2_runtime)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ob_ui" "${CMAKE_BINARY_DIR}/ob_ui")
+endif()
+
 # Runner hookup (PS2Recomp PS2X_EXTERNAL_GS_DIR add_subdirectory's us): ps2x_external_gs implements
 # PS2ExternalGS with PS2Recomp's flags; it reaches PCSX2 only through the plain-types adapter/ob_gs_bridge.h,
 # and links ob_pcsx2_gs_adapter PRIVATE so PCSX2's PUBLIC defines/options never reach ps2_runtime.
@@ -241,7 +246,10 @@ if(TARGET ps2_runtime)
         add_dependencies(ob_pcsx2_gs_adapter main_hook hook_impl)
     endif()
 
-    add_library(ps2x_external_gs STATIC adapter/hook.cpp)
+    # Settings menu (native/ob_ui): its core, and its screens on this adapter.
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ob_ui" "${CMAKE_BINARY_DIR}/ob_ui")
+
+    add_library(ps2x_external_gs STATIC adapter/hook.cpp adapter/ui_hook.cpp)
     if(MSVC)
         target_compile_options(ps2x_external_gs PRIVATE /EHsc) # this directory strips /EHsc for PCSX2 (above)
     else()
@@ -257,4 +265,10 @@ if(TARGET ps2_runtime)
     # The external SIO2 + memory cards (PS2Recomp 0071): PCSX2's SIO2 behind native/pcsx2_sio2/adapter/ob_sio2_bridge.h.
     target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_sio2/adapter")
     target_link_libraries(ps2x_external_gs PRIVATE ob_pcsx2_sio2)
+    # The settings UI (PS2Recomp 0078): native/ob_ui's launcher and menu behind ob_ui.h, fed by adapter/ui_hook.cpp.
+    target_link_libraries(ps2x_external_gs PRIVATE ob_ui)
+    if(ANDROID)
+        # adapter/ui_hook.cpp: the Back key from any device (app->onInputEvent, ahead of raylib).
+        target_include_directories(ps2x_external_gs PRIVATE "${CMAKE_ANDROID_NDK}/sources/android/native_app_glue")
+    endif()
 endif()

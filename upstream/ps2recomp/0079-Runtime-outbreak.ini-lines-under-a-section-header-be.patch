@@ -1,0 +1,65 @@
+From 37a1754aa752482aad72fb9c3373e6ea0a341bf0 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 15:42:19 -0400
+Subject: [PATCH 79/79] Runtime: outbreak.ini lines under a [section] header
+ belong to other readers (the settings UI's [ui]), not bad lines
+
+---
+ ps2xRuntime/src/lib/ps2_game_source.cpp |  8 ++++++++
+ ps2xTest/src/ps2_game_source_tests.cpp  | 15 +++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index 365ca87..eacecbf 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -125,12 +125,20 @@ namespace ps2game
+         std::stringstream in(text);
+         std::string raw;
+         int lineNo = 0;
++        bool otherSection = false; // patch 0079: lines under a [section] header belong to other readers (e.g. [ui])
+         while (std::getline(in, raw))
+         {
+             ++lineNo;
+             const std::string line = trim(raw);
+             if (line.empty() || line.front() == ';' || line.front() == '#')
+                 continue;
++            if (line.front() == '[' && line.back() == ']')
++            {
++                otherSection = true;
++                continue;
++            }
++            if (otherSection)
++                continue;
+             auto bad = [&](const std::string &why)
+             { messages.push_back("[settings] line " + std::to_string(lineNo) + ": " + why); };
+             const size_t equals = line.find('=');
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index c21d194..757e5d3 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -362,6 +362,21 @@ void register_ps2_game_source_tests()
+             t.IsTrue(cleared.saves.empty(), "an empty value clears it");
+         });
+ 
++        tc.Run("settings: lines under a [section] header belong to other readers (patch 0079)", [](TestCase &t)
++        {
++            const std::filesystem::path base = std::filesystem::path("C:/games");
++            ps2game::Settings s;
++            std::vector<std::string> messages;
++            ps2game::parseSettingsIni("saves = cards\n"
++                                      "[ui]\n"
++                                      "window_mode = borderless\n"
++                                      "saves = elsewhere\n"
++                                      "vsync = strict\n",
++                                      base, s, messages);
++            t.Equals(messages.size(), size_t{0}, "no bad lines for a [ui] section's keys");
++            t.IsTrue(s.saves == (base / "cards").lexically_normal(), "keys before the section still read: " + s.saves.string());
++        });
++
+         tc.Run("settings: gpu_driver recorded as a name; ignored off Android with one note", [](TestCase &t)
+         {
+             ps2game::Settings s;
+-- 
+2.46.2.windows.1
+

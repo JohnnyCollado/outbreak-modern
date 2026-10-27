@@ -14,6 +14,7 @@
 //   wait vsync <n>
 //   wait mem <ref> <1|2|4> <==|!=> <value>  ref = <addr> or *<ptraddr>+<off> (null pointer = not satisfied)
 //   press <btn[+btn..]> <held vsyncs>       then released for 1 vsync before the next step
+//   stick <left|right> <x> <y> <vsyncs>   x, y in -1..1 (y -1 = up); held, then centred for 1 vsync
 //   capture <screen> <n>                  completes after n frames dumped as <screen>-<k>.png
 //   watch <ref> <1|2|4>                   non-blocking; logs every change for the rest of the run
 //   log <text>
@@ -28,6 +29,7 @@ public:
         WaitVsync,
         WaitMem,
         Press,
+        Stick,
         Capture,
         Watch,
         Log,
@@ -51,6 +53,8 @@ public:
         bool equal = true;
         uint32_t value = 0;
         uint16_t mask = 0;     // press: pressed buttons (bits of the active-low pad word)
+        bool rightStick = false; // stick: which one
+        uint8_t stickX = 0x80, stickY = 0x80; // stick: 0..255, 0x80 = centre
         uint32_t count = 0;    // wait vsync n, press held vsyncs, capture n
         std::string name;      // capture screen, log text
     };
@@ -71,6 +75,13 @@ public:
 
     // Game thread: active-low pad button word (0xFFFF = nothing held).
     uint16_t buttons() const { return m_buttons.load(std::memory_order_acquire); }
+    // Game thread: rx, ry, lx, ly (0x80 = centre), as PSPadBackend::readState's data[4..7].
+    void sticks(uint8_t out[4]) const
+    {
+        const uint32_t v = m_sticks.load(std::memory_order_acquire);
+        for (int i = 0; i < 4; i++)
+            out[i] = static_cast<uint8_t>(v >> (8 * i));
+    }
     bool quitRequested() const { return m_quit.load(std::memory_order_acquire); }
 
     // Main thread: when a capture step is active and <latchedTick> is new, reserves frame k and
@@ -126,6 +137,7 @@ private:
     bool m_hasCaptureTick = false;
 
     std::atomic<uint16_t> m_buttons{0xFFFFu};
+    std::atomic<uint32_t> m_sticks{0x80808080u}; // rx | ry << 8 | lx << 16 | ly << 24
     std::atomic<bool> m_quit{false};
 };
 

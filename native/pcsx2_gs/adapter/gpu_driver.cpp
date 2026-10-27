@@ -371,6 +371,16 @@ namespace obgpu
 		return {};
 	}
 
+	std::string MinApiWarning(const CustomDriverCheck& c)
+	{
+		if (c.meta.minApi <= 0 || c.device_api <= 0 || c.device_api >= c.meta.minApi)
+			return {};
+		char b[128];
+		std::snprintf(b, sizeof(b), "driver made for Android API %d, device has %d: loading it anyway (it may have bugs)",
+			c.meta.minApi, c.device_api);
+		return b;
+	}
+
 	std::string CustomDriverBlocker(const CustomDriverCheck& c, std::string& library)
 	{
 		library.clear();
@@ -393,13 +403,9 @@ namespace obgpu
 				VendorName(c.system_vendor_id).c_str());
 			return b;
 		}
-		if (c.meta.minApi > 0 && c.device_api > 0 && c.device_api < c.meta.minApi)
-		{
-			library.clear();
-			char b[96];
-			std::snprintf(b, sizeof(b), "driver needs Android API %d, device has %d", c.meta.minApi, c.device_api);
-			return b;
-		}
+		// A newer minApi than the device is no longer a blocker (developer, 2026-10-26): firmware-extracted packages
+		// often state their own phone's Android version and may still work; MinApiWarning logs it, the launcher warns,
+		// and a driver that then fails still falls back to the system one.
 		if (!c.native_lib_dir_ok)
 		{
 			library.clear();

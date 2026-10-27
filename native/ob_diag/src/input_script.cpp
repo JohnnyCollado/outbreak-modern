@@ -1,3 +1,5 @@
+#include <cmath>
+#include <cstdlib>
 #include "input_script.h"
 
 #include <cctype>
@@ -203,6 +205,25 @@ bool Ps2InputScript::parse(const std::string &text, std::string &error)
             if (!parseNumber(tok[2], step.count))
                 return fail("bad held vsync count");
         }
+        else if (cmd == "stick")
+        {
+            step.op = Op::Stick;
+            if (tok.size() != 5 || (tok[1] != "left" && tok[1] != "right"))
+                return fail("expected 'stick <left|right> <x -1..1> <y -1..1> <vsyncs>'");
+            step.rightStick = tok[1] == "right";
+            auto axis = [](const std::string &t, uint8_t &out) {
+                char *end = nullptr;
+                const double v = std::strtod(t.c_str(), &end);
+                if (end == t.c_str() || *end != 0 || v < -1.0 || v > 1.0)
+                    return false;
+                out = static_cast<uint8_t>(std::lround(127.5 + v * 127.5) > 255 ? 255 : std::lround(127.5 + v * 127.5));
+                return true;
+            };
+            if (!axis(tok[2], step.stickX) || !axis(tok[3], step.stickY))
+                return fail("stick x and y must be numbers in -1..1");
+            if (!parseNumber(tok[4], step.count))
+                return fail("bad held vsync count");
+        }
         else if (cmd == "capture")
         {
             step.op = Op::Capture;
@@ -293,6 +314,12 @@ void Ps2InputScript::beginStep(uint64_t tick, const ReadMem &read, std::ostream 
     case Op::Press:
         m_buttons.store(static_cast<uint16_t>(0xFFFFu & ~step.mask), std::memory_order_release);
         break;
+    case Op::Stick:
+    {
+        const uint32_t pair = static_cast<uint32_t>(step.stickX) | (static_cast<uint32_t>(step.stickY) << 8);
+        m_sticks.store(step.rightStick ? (0x80800000u | pair) : (0x00008080u | (pair << 16)), std::memory_order_release);
+        break;
+    }
     case Op::Capture:
         m_captureActive = true;
         m_captureTaken = 0;
@@ -360,6 +387,11 @@ void Ps2InputScript::onVSync(uint64_t tick, const ReadMem &read, std::ostream &l
         case Op::Press:
             if (elapsed >= step.count)
                 m_buttons.store(0xFFFFu, std::memory_order_release);
+            done = elapsed >= static_cast<uint64_t>(step.count) + 1u;
+            break;
+        case Op::Stick:
+            if (elapsed >= step.count)
+                m_sticks.store(0x80808080u, std::memory_order_release);
             done = elapsed >= static_cast<uint64_t>(step.count) + 1u;
             break;
         case Op::Capture:

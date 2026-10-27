@@ -49,6 +49,19 @@ namespace
 	{
 		std::fprintf(stderr, "%s\n", line.c_str());
 		std::fflush(stderr);
+		// The settings menu shows what ran last time (plan P11): this run's [gpu] lines in <external files>/gpu-last-run.txt.
+		static bool s_first = true;
+		android_app* app = GetAndroidApp();
+		if (app && app->activity && app->activity->externalDataPath)
+		{
+			const std::string path = std::string(app->activity->externalDataPath) + "/gpu-last-run.txt";
+			if (std::FILE* f = std::fopen(path.c_str(), s_first ? "w" : "a"))
+			{
+				std::fprintf(f, "%s\n", line.c_str());
+				std::fclose(f);
+			}
+			s_first = false;
+		}
 	}
 
 	// Instance with VK_KHR_surface + VK_KHR_android_surface (GSDeviceVK requires both for an Android window),
@@ -377,6 +390,8 @@ bool ObGpuSelectDriver(const std::string& setting)
 	c.hooks_present = c.native_lib_dir_ok && IsFile(libdir + "/libhook_impl.so") && IsFile(libdir + "/libmain_hook.so");
 	std::string library;
 	reason = obgpu::CustomDriverBlocker(c, library);
+	if (const std::string warn = obgpu::MinApiWarning(c); !warn.empty() && reason.empty())
+		Log("[gpu] custom driver " + name + ": " + warn);
 	if (!reason.empty())
 	{
 		Log(obgpu::FallbackLine(name, reason));

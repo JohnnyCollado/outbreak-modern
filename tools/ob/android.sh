@@ -6,10 +6,11 @@
 #              external VU1 = native/pcsx2_vu (ARMSX2's ARM64 microVU as libob_a64vu.so, sources $OB_ARMSX2 at its pin);
 #              clones libadrenotools (custom GPU driver loader, BSD-2-Clause) into $OB_ADRENOTOOLS at its pin if missing
 #   build      libps2EntryRunner.so (the first build compiles every game unit once; later builds are incremental)
-#   package    APK without Gradle: aapt2 link, lib/arm64-v8a/*.so (runner, shaderc, libadrenotools' two hooks,
-#              libob_a64vu.so: the runner dlopens it at start-up),
-#              assets/resources (PCSX2 shaders), zipalign,
-#              apksigner with the debug key in $OB_ROOT/android-keys (made by keytool on first use, never in git)
+#   package    APK with Gradle (native/android, wrapper Gradle 9.7.1 + AGP 9.4.0, JDK 17): stages stripped
+#              lib/arm64-v8a/*.so (runner, shaderc, libadrenotools' two hooks, libob_a64vu.so: the runner dlopens it at
+#              start-up) and assets/resources (PCSX2 shaders) in $APK_DIR/stage, then gradlew assembleDebug compiles the
+#              Java bridge (OutbreakActivity), packs and signs with the debug key in $OB_ROOT/android-keys (made by
+#              keytool on first use, never in git); build tree $APK_DIR/gradle-build; log ob-android-gradle.log
 #   verify     NEEDED libraries and undefined dynamic symbols of the .so files against the NDK's API-29 system libs
 #   all        (default) every step above in order; a step that is up to date costs seconds
 # Env: OB_ROOT=C:/ob, OB_SRC, OB_ANDROID_R=$OB_ROOT/android-r, OB_ANDROID_NDK=<sdk>/ndk/27.0.12077973,
@@ -122,8 +123,18 @@ step_build() {
     return $rc
 }
 
+# OutbreakActivity (native/android/java): javac --release 11 with android.jar on the class path (the JDK refuses
+# -bootclasspath with -target 9+; Java 11 class files, which d8 reads whatever the JDK), then d8 -> classes.dex, which
+# the package step adds at the APK root. Skipped while classes.dex is newer than every .java file.
+JAVA_SRC="$REPO/native/android/java"
+DEX_DIR="$APK_DIR/dex"
+step_dex() {
+    # Gradle builds the Java side now (native/android/build.gradle.kts), inside the package step.
+    echo "dex: built by Gradle in the package step"
+}
+
 step_package() {
-    local log="$OB_LOGS/ob-android-package.log" st="$APK_DIR/stage" so="$OB_ANDROID_R/ps2xRuntime/libps2EntryRunner.so" v
+    local log="$OB_LOGS/ob-android-gradle.log" st="$APK_DIR/stage" so="$OB_ANDROID_R/ps2xRuntime/libps2EntryRunner.so" v
     [ -f "$so" ] || { echo "package: $so missing (build first)"; return 1; }
     [ -f "$SHADERC_B/libshaderc/libshaderc_shared.so" ] || { echo "package: libshaderc_shared.so missing (shaderc first)"; return 1; }
     rm -rf "$st" && mkdir -p "$st/lib/arm64-v8a" "$st/assets/resources" "$KEYS" || return 1
@@ -140,18 +151,17 @@ step_package() {
     "$LLVM/llvm-strip.exe" --strip-unneeded -o "$st/lib/arm64-v8a/libob_a64vu.so" "$v" || return 1
     cp -r "$OB_PCSX2/bin/resources/shaders" "$st/assets/resources/" || return 1
     (cd "$st/assets/resources" && find . -type f ! -name files.txt | sed 's|^\./||' | sort > files.txt)
+    # Gradle (native/android: AGP 9.4.0, wrapper Gradle 9.7.1, JDK 17) compiles the Java bridge, packs the staged
+    # libraries (lib/) and assets, and signs with the debug key; the build tree stays outside the repo.
+    local gb="$APK_DIR/gradle-build" jdk="${OB_GRADLE_JDK:-C:/Program Files/Microsoft/jdk-17.0.19.10-hotspot}"
     {
         [ -f "$KEYS/debug.keystore" ] || "$OB_JDK/bin/keytool.exe" -genkeypair -keystore "$(cygpath -w "$KEYS/debug.keystore")" \
             -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
-        "$OB_ANDROID_BT/aapt2.exe" link --manifest "$(cygpath -w "$REPO/native/android/AndroidManifest.xml")" \
-            -I "$(cygpath -w "$JAR")" -A "$(cygpath -w "$st/assets")" --min-sdk-version $API --target-sdk-version $TARGET_SDK \
-            -o "$(cygpath -w "$APK_DIR/base.apk")" &&
-        "$PY" -I "$REPO/tools/ob/apk_add_libs.py" "$APK_DIR/base.apk" "$st/lib" "$APK_DIR/unaligned.apk" &&
-        "$OB_ANDROID_BT/zipalign.exe" -f -p 4 "$(cygpath -w "$APK_DIR/unaligned.apk")" "$(cygpath -w "$APK_DIR/aligned.apk")" &&
-        PATH="$OB_JDK/bin:$PATH" cmd //c "$(cygpath -w "$OB_ANDROID_BT/apksigner.bat")" sign --ks "$(cygpath -w "$KEYS/debug.keystore")" \
-            --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey \
-            --out "$(cygpath -w "$APK_DIR/outbreak-modern.apk")" "$(cygpath -w "$APK_DIR/aligned.apk")" &&
+        (cd "$REPO/native/android" && JAVA_HOME="$jdk" ANDROID_HOME="$OB_ANDROID_SDK" ./gradlew --console=plain \
+            "-PobStage=$(cygpath -m "$st")" "-PobBuildDir=$(cygpath -m "$gb")" "-PobKeystore=$(cygpath -m "$KEYS/debug.keystore")" \
+            assembleDebug) &&
+        cp "$gb/outputs/apk/debug/outbreak-modern-debug.apk" "$APK_DIR/outbreak-modern.apk" &&
         PATH="$OB_JDK/bin:$PATH" cmd //c "$(cygpath -w "$OB_ANDROID_BT/apksigner.bat")" verify -v "$(cygpath -w "$APK_DIR/outbreak-modern.apk")" &&
         "$OB_ANDROID_BT/aapt2.exe" dump badging "$(cygpath -w "$APK_DIR/outbreak-modern.apk")"
     } > "$log" 2>&1 || { echo "package: failed ($log)"; tail -15 "$log"; return 1; }
@@ -169,6 +179,7 @@ case ${1:-all} in
     shaderc) step_shaderc ;;
     configure) step_configure ;;
     build) step_build ;;
+    dex) step_dex ;;
     package) step_package ;;
     verify) step_verify ;;
     all) step_shaderc && step_configure && step_build && step_package && step_verify ;;

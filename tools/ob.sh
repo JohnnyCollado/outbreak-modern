@@ -185,6 +185,16 @@ cmd_test() {
     else
         echo "pcsx2_sio2: 0/0 (build failed: $OB_LOGS/ob-pcsx2-sio2-tests-build.log)"; red=1
     fi
+    # The settings menu's core (native/ob_ui/tests): ini editing, the disc check, the menu trigger, memory cards.
+    log="$OB_LOGS/ob-test-ob_ui.log"
+    if vc cmake --build "$gsb" --target ob_ui_tests > "$OB_LOGS/ob-ui-tests-build.log" 2>&1; then
+        (cd "$gsb" && ./ob_ui/ob_ui_tests.exe) > "$log" 2>&1
+        r=$(grep -o 'ob_ui: [0-9]*/[0-9]*' "$log" | tail -1)
+        echo "${r:-ob_ui: 0/0 (no result: $log)}"
+        if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
+    else
+        echo "ob_ui: 0/0 (build failed: $OB_LOGS/ob-ui-tests-build.log)"; red=1
+    fi
     [ $red = 0 ] || echo "red suite(s): see $OB_LOGS/ob-test-*.log"
     return $red
 }
@@ -270,7 +280,8 @@ cmd_recompile() {
     local rd="$OB_R/ps2xRuntime"
     rm -rf "$rd/resources/shaders" && mkdir -p "$rd/resources" &&
         cp -r "$px/bin/resources/shaders" "$rd/resources/" &&
-        cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$pxd/bin/z.dll" "$pxd/bin/libpng16.dll" "$rd/" ||
+        cp "$pxd/bin/shaderc_shared.dll" "$pxd/bin/zstd.dll" "$pxd/bin/z.dll" "$pxd/bin/libpng16.dll" "$rd/" &&
+        cp "$REPO/native/windows/outbreak-icon.png" "$rd/" || # the window icon (ui_hook.cpp; tools/ob/make_icons.py)
         { echo "runner: pcsx2 staging failed"; return 1; }
     if [ -n "$prof" ]; then
         # A copy that survives the next normal build: play-profile.bat runs it; hostprof finds the PDB beside it.
@@ -297,6 +308,8 @@ fresh_saves() {
 
 cmd_boot() {
     local secs=200 tag=latest script= diag=1 pad=
+    # Boots go straight to the game: the settings menu's launcher (PS2Recomp 0078) stays off unless set.
+    export PS2X_LAUNCHER="${PS2X_LAUNCHER:-0}"
     while [ $# -gt 0 ]; do
         case $1 in
             --secs) secs=$2; shift 2 ;;

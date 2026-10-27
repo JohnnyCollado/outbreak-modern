@@ -141,6 +141,32 @@ void register_input_script_tests()
             t.IsTrue(text.find("[script] step 1 line 2 begin tick=102") != std::string::npos, "step 1 logged");
             t.IsTrue(text.find("[script] step 2 line 3 begin tick=106") != std::string::npos, "step 2 logged"); });
 
+        tc.Run("stick holds the left stick, then centres it", [](TestCase &t)
+               {
+            Ps2InputScript script;
+            t.IsTrue(parseOk(script, "stick left 0 -1 2\nstick right 1 0.5 1\nquit\n"), "parse");
+            Ps2InputScript bad;
+            std::string error;
+            t.IsFalse(bad.parse("stick left 2 0 5\n", error), "x out of range refused");
+            t.IsFalse(bad.parse("stick middle 0 0 5\n", error), "unknown stick refused");
+            FakeMemory mem;
+            std::ostringstream log;
+            const auto read = mem.reader();
+            uint8_t st[4] = {};
+            script.sticks(st);
+            t.IsTrue(st[0] == 0x80 && st[1] == 0x80 && st[2] == 0x80 && st[3] == 0x80, "centred before any step");
+            uint64_t tick = 10;
+            script.onVSync(tick, read, log); // left stick up
+            script.sticks(st);
+            t.IsTrue(st[2] == 0x80 && st[3] == 0x00 && st[0] == 0x80 && st[1] == 0x80, "lx centre, ly up (0), right centred");
+            script.onVSync(++tick, read, log);
+            script.onVSync(++tick, read, log); // 12: centred
+            script.sticks(st);
+            t.IsTrue(st[2] == 0x80 && st[3] == 0x80, "centred after 2 vsyncs");
+            script.onVSync(++tick, read, log); // 13: right stick
+            script.sticks(st);
+            t.IsTrue(st[0] == 0xFF && st[1] == 0xBF && st[2] == 0x80 && st[3] == 0x80, "rx right, ry half down, left centred"); });
+
         tc.Run("wait mem with deref and watch", [](TestCase &t)
                {
             Ps2InputScript script;

@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Outbreak Modern, Android Stage A1 (tools/ob/android.sh, docs/ops/android.md). No Java/Kotlin code: the
-     framework's NativeActivity loads lib/arm64-v8a/libps2EntryRunner.so (android.app.lib_name), whose raylib
-     platform layer (android_native_app_glue) calls the runner's main(). -->
+<!-- Outbreak Modern (tools/ob/android.sh, docs/ops/android.md). Two activities, Kotlin (native/android/kotlin):
+     LauncherActivity, the Compose settings launcher (docs/plans/2026-10-26-settings-menu.md, decisions A13-A14), and
+     OutbreakActivity, the game: a NativeActivity subclass that loads lib/arm64-v8a/libps2EntryRunner.so
+     (android.app.lib_name), whose raylib platform layer (android_native_app_glue) calls the runner's main(), and that
+     shows the in-game menu as a Compose dialog over the game. Built by Gradle (build.gradle.kts): the package name is
+     its namespace/applicationId, and extractNativeLibs="true" comes from packaging.jniLibs.useLegacyPackaging. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.outbreakmodern.app"
     android:versionCode="1"
     android:versionName="0.1-a1">
 
@@ -15,24 +17,39 @@
 
     <application
         android:label="Outbreak Modern"
-        android:hasCode="false"
-        android:extractNativeLibs="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:hasCode="true"
         android:isGame="true"
         android:appCategory="game"
         android:allowBackup="false">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.outbreakmodern.app.LauncherActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
-            <meta-data android:name="android.app.lib_name" android:value="ps2EntryRunner" />
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.GAME" />
             </intent-filter>
         </activity>
+        <activity
+            android:name="com.outbreakmodern.app.OutbreakActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+            <meta-data android:name="android.app.lib_name" android:value="ps2EntryRunner" />
+        </activity>
+        <!-- Restarts the app in a fresh process (a new graphics driver loads once per process): RestartActivity.kt. -->
+        <activity
+            android:name="com.outbreakmodern.app.RestartActivity"
+            android:exported="false"
+            android:process=":restart"
+            android:theme="@android:style/Theme.NoDisplay" />
     </application>
 </manifest>

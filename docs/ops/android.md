@@ -14,9 +14,9 @@ touches a device by itself: every `adb` command below needs the developer's "pro
 | Texture replacement | Android branch of `native/pcsx2_gs/CMakeLists.txt` | PCSX2's `GSTextureReplacements*.cpp` (`OB_TEXTURE_REPLACEMENTS`), as on Windows: libpng 1.6.58 and zstd 1.5.7 built static from `C:\ob\pcsx2-deps-build` (`tools/ob/pcsx2-deps*.bat` unpacked them), zlib from the NDK, PCSX2's `3rdparty/libzip`. Pack in `files/textures/<serial>/replacements`, `textures = textures` in `outbreak.ini`; the Odin holds 60 fps in J's Bar with the 3.2 GB pack (`reports/2026-10-24-android.md` entry 16) |
 | shaderc | `C:\ob\android-shaderc-build/libshaderc/libshaderc_shared.so` | From the sources `tools/ob/pcsx2-deps.bat` unpacked and patched (`C:\ob\pcsx2-deps-build\shaderc-2026.2`); `android.sh shaderc` re-checks the four archives' SHA-256 |
 | Shaders | APK `assets/resources/shaders` + `files.txt` | Copied by the GS adapter to `<internal files>/resources` on first start (and when the list changes): PCSX2 reads resources as files |
-| APK | `C:\ob\android-apk\outbreak-modern.apk` | No Gradle: `aapt2 link` (`native/android/AndroidManifest.xml`), `lib/arm64-v8a/*.so` added, `zipalign`, `apksigner` with the debug key `C:\ob\android-keys\debug.keystore` (keytool, first package; never in git) |
+| APK | `C:\ob\android-apk\outbreak-modern.apk` | Gradle (`native/android`: `settings.gradle.kts`, `build.gradle.kts`, wrapper Gradle 9.7.1, AGP 9.4.0, JDK 17 = `OB_GRADLE_JDK`, default Microsoft OpenJDK 17; Kotlin 2.4.10 + Compose BOM 2026.08.00, as PlayFieldPortal, all from the local Gradle cache): `android.sh package` strips and stages `lib/arm64-v8a/*.so` and `assets/resources` in `C:\ob\android-apk\stage`, then `gradlew assembleDebug` compiles `kotlin/` (LauncherActivity, OutbreakActivity, the Compose menu), packs (`useLegacyPackaging` = `extractNativeLibs="true"`) and signs (v2) with the debug key `C:\ob\android-keys\debug.keystore` (keytool, first package; never in git). Build tree `C:\ob\android-apk\gradle-build`, log `C:\ob\logs\ob-android-gradle.log`; packaging ~12 s, unchanged ~5-8 s (Gradle daemon); first Compose build 89 s. Debug APK ~79 MB (unshrunk Compose dex stored uncompressed) |
 
-Package id: **`com.outbreakmodern.app`**, activity `android.app.NativeActivity` (`android:hasCode="false"`, lib name
+Package id: **`com.outbreakmodern.app`**, activities (Kotlin, `native/android/kotlin`, plan decisions A13-A14): `LauncherActivity` (MAIN/LAUNCHER: the Compose settings launcher; disc pick and imports through the Storage Access Framework; the C++ ini editor, disc check and card reader through `NativeBridge` = JNI in `libps2EntryRunner.so`, `native/ob_ui/android/android_menu.cpp`) and `OutbreakActivity` (the game, a `NativeActivity` subclass: opens the saved disc and passes `PS2X_GAME_PATH=/proc/self/fd/<n>` and `PS2X_LAUNCHER=0`; the in-game menu is a Compose dialog it shows when the runner calls `showMenu`), lib name
 `ps2EntryRunner`), minSdk 29, targetSdk 35, sensor landscape, `android.hardware.gamepad` optional, Vulkan 1.1
 required.
 
@@ -166,3 +166,20 @@ adb shell am force-stop com.outbreakmodern.app
 ```
 
 `adb uninstall com.outbreakmodern.app` deletes the app's files dir too, ISO included (4.7 GB to push again).
+
+## What's installed (launcher, 2026-10-26)
+
+The Kotlin launcher lists what sits in the app's files dir, with its size (measured in the background, `Installed.kt`)
+and a Delete that asks first (Cancel focused):
+- Game page: the disc image copy in the files dir (Delete) or a disc linked through the system picker (Forget: drops
+  `game-uri.txt` and the kept permission, never the user's file); the texture pack folder `textures/SLPM-65428` and
+  zip `textures/SLPM-65428.zip` as separate entries (PCSX2 loads both; the folder's copy wins where they overlap:
+  `GSTextureReplacements.cpp` scans `<serial>/replacements` first and keeps the first entry per texture); a storage
+  line (used by the app, free on the device).
+- Mods page: each `.pnach` in `mods/SLPM-65428/` with On/Off (Off = renamed `.pnach.disabled`; the runner loads only
+  `.pnach`, `ps2_pnach.cpp:221`), size, Delete; Delete all; import from a folder or zip. The menu's own
+  `ob-widescreen.pnach` is not listed: Display > Aspect ratio alone manages it.
+- Graphics driver page: several drivers side by side, an In use badge, Select and Delete (both the external
+  `drivers/<name>/` and the GS's internal copy). A changed choice shows "Restart needed" with Restart now
+  (`RestartActivity`, its own `:restart` process: the app's process ends, the launcher starts in a fresh one, since a
+  Vulkan driver loads once per process).

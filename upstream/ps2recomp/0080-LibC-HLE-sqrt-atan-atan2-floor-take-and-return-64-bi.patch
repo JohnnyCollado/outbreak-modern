@@ -1,0 +1,142 @@
+From 58145be9d0cba95249846459a2e35add63d9892a Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 19:37:20 -0400
+Subject: [PATCH] LibC HLE: sqrt, atan, atan2, floor take and return 64-bit
+ doubles in GPRs (the EE's soft-float double ABI) instead of floats in
+ f12/f14/f0; atan2's leftovers left Resident Evil Outbreak's stick without an
+ angle (no movement)
+
+---
+ ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp | 48 ++++++++++++-----------
+ ps2xTest/src/ps2_runtime_kernel_tests.cpp | 26 ++++++++++++
+ 2 files changed, 52 insertions(+), 22 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
+index d467c4b..343439e 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
+@@ -916,10 +916,31 @@ namespace ps2_stubs
+         setReturnS32(ctx, ret);
+     }
+ 
++    // libm's double functions (patch 0080): the R5900 has no double FPU, so a double travels as its 64 bits in one
++    // GPR ($a0, then $a1) and comes back in $v0, as the game's own callers do (e.g. Resident Evil Outbreak's stick angle
++    // at 0x1A5940: atan2's arguments from __floatsidf in $a0/$a1). Reading f12/f14 and writing f0, as before, gave the
++    // callers leftover values: the left stick's angle (no direction, no movement), and garbage sqrt / atan / floor.
++    namespace
++    {
++        double argDouble(R5900Context *ctx, int reg)
++        {
++            const uint64_t bits = GPR_U64(ctx, reg);
++            double d;
++            std::memcpy(&d, &bits, sizeof(d));
++            return d;
++        }
++
++        void returnDouble(R5900Context *ctx, double d)
++        {
++            uint64_t bits;
++            std::memcpy(&bits, &d, sizeof(bits));
++            setReturnU64(ctx, bits);
++        }
++    }
++
+     void sqrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        float arg = ctx->f[12];
+-        ctx->f[0] = ::sqrtf(arg);
++        returnDouble(ctx, std::sqrt(argDouble(ctx, 4)));
+     }
+ 
+     void sin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+@@ -980,9 +1001,7 @@ namespace ps2_stubs
+ 
+     void atan2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        float y = ctx->f[12];
+-        float x = ctx->f[14];
+-        ctx->f[0] = ::atan2f(y, x);
++        returnDouble(ctx, std::atan2(argDouble(ctx, 4), argDouble(ctx, 5)));
+     }
+ 
+     void pow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+@@ -1018,8 +1037,7 @@ namespace ps2_stubs
+ 
+     void floor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        float arg = ctx->f[12];
+-        ctx->f[0] = ::floorf(arg);
++        returnDouble(ctx, std::floor(argDouble(ctx, 4)));
+     }
+ 
+     void fabs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+@@ -1040,21 +1058,7 @@ namespace ps2_stubs
+ 
+     void atan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        float in = ctx ? ctx->f[12] : 0.0f;
+-        if (in == 0.0f)
+-        {
+-            uint32_t raw = getRegU32(ctx, 4);
+-            std::memcpy(&in, &raw, sizeof(in));
+-        }
+-        const float out = std::atan(in);
+-        if (ctx)
+-        {
+-            ctx->f[0] = out;
+-        }
+-
+-        uint32_t outRaw = 0u;
+-        std::memcpy(&outRaw, &out, sizeof(outRaw));
+-        setReturnU32(ctx, outRaw);
++        returnDouble(ctx, std::atan(argDouble(ctx, 4)));
+     }
+ 
+     void memchr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index 2c171b6..3b05eef 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -8,6 +8,7 @@
+ #include <array>
+ #include <atomic>
+ #include <cstdint>
++#include <cmath>
+ #include <cstring>
+ #include <sstream>
+ #include <thread>
+@@ -552,6 +553,31 @@ void register_ps2_runtime_kernel_tests()
+ {
+     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
+     {
++        tc.Run("libm double stubs take and return 64-bit doubles in GPRs (patch 0080)", [](TestCase &t)
++        {
++            // As the game's callers pass them: each double's 64 bits in one GPR ($a0, $a1), the result in $v0.
++            auto bitsOf = [](double d) { uint64_t b; std::memcpy(&b, &d, sizeof(b)); return b; };
++            auto valueOf = [](uint64_t b) { double d; std::memcpy(&d, &b, sizeof(d)); return d; };
++            R5900Context ctx{};
++            R5900Context *c = &ctx; // the GPR macros take a pointer name (they do not parenthesize it)
++            auto call = [&](void (*fn)(uint8_t *, R5900Context *, PS2Runtime *), double a, double b) {
++                SET_GPR_U64(c, 4, bitsOf(a));
++                SET_GPR_U64(c, 5, bitsOf(b));
++                ctx.f[12] = 0.0f; // leftovers the old stubs read
++                ctx.f[14] = 0.0f;
++                SET_GPR_U64(c, 2, 0u);
++                fn(nullptr, c, nullptr);
++                return valueOf(GPR_U64(c, 2));
++            };
++            const double up = call(&ps2_stubs::atan2, 127.0, 0.0);
++            t.IsTrue(std::fabs(up - 1.5707963267948966) < 1e-12, "atan2(127, 0) = pi/2 (stick up): " + std::to_string(up));
++            const double left = call(&ps2_stubs::atan2, 0.0, -127.0);
++            t.IsTrue(std::fabs(left - 3.141592653589793) < 1e-12, "atan2(0, -127) = pi (stick left): " + std::to_string(left));
++            t.IsTrue(call(&ps2_stubs::sqrt, 16129.0, 0.0) == 127.0, "sqrt(16129) = 127");
++            t.IsTrue(std::fabs(call(&ps2_stubs::atan, 1.0, 0.0) - 0.7853981633974483) < 1e-12, "atan(1) = pi/4");
++            t.IsTrue(call(&ps2_stubs::floor, -2.5, 0.0) == -3.0, "floor(-2.5) = -3");
++        });
++
+         tc.Run("unsigned loads and ABI word writes extend independently", [](TestCase &t)
+         {
+             constexpr uint64_t kUpper = 0x1122334455667788ull;
+-- 
+2.46.2.windows.1
+

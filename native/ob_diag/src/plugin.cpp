@@ -219,14 +219,21 @@ namespace
             }
             if (!m_script)
                 return false;
-            buttons = m_script->buttons();
+            buttons = m_script->buttons(); // both ports, as before
             return true;
         }
         bool padSticks(int port, uint8_t sticks[4]) override
         {
-            if (!m_pad || port != 0)
+            if (port != 0)
                 return false;
-            m_pad->sticks(sticks);
+            if (m_pad)
+            {
+                m_pad->sticks(sticks);
+                return true;
+            }
+            if (!m_script)
+                return false;
+            m_script->sticks(sticks); // the script's stick steps (centred otherwise)
             return true;
         }
 
