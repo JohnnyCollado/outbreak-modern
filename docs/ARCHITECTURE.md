@@ -40,6 +40,8 @@ ps2EntryRunner.exe at run time
                    (0073 keeps sceDbcInit) and disc modules sio2man/mc2_s1 (reports/2026-10-26-memory-cards.md)
   DEV9 (network) . PCSX2 2.9.134 DEV9 + SMAP + Sockets adapter in-process (native/pcsx2_dev9; PS2X_DEV9=pcsx2|off,
                    default off; patch 0081) with DMA 8 and INTC 13; for online play (docs/plans/2026-10-26-online-play.md)
+  ob_server ...... the built-in server for same-network play (native/ob_server, AGPL-3.0, own LICENSE.md): login pages,
+                   lobby, relay (docs/plans/2026-10-27-ob-server.md; protocol research/2026-10-27-lobby-protocol.md)
   window/input ... raylib window and pad (bindings: input.ini, patches 0038/0040); PCSX2 Vulkan draws into a child window;
                    title = frame counter
   disc ........... cdrom0: = the ISO 9660 image (ps2x/iop/iso9660.h: real LSNs, buffered reads) or the folder;

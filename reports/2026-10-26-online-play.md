@@ -170,8 +170,12 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - Done: the boot's HDD check with an adapter (entry 12). Next: the network menu (S3). The gate not yet run in the
   net trees; ps2x 558/558 in `C:\ob\net-t`.
 - Build defect (entry 11): fixed by 0082; a stub change now rebuilds 2 batches in ~4 min (was 454, 21 min).
-- Next: the network menu (S3; Bioserver1 in Docker as the reference needs the developer's "proceed"), and whether to
-  fake an installed HDD (research 7.5: only for HDD-only rooms).
+- Reference decided (developer, 2026-10-27): the fan server's source is read, nothing installed (option B); spec in
+  `research/2026-10-27-lobby-protocol.md`, design `docs/plans/2026-10-27-ob-server.md` (approved).
+- ob_server step A done: `native/ob_server` (packet header, lobby/relay stream splitting, string scrambling, session
+  digits), tests 27/27, 0 warnings, in `ob.sh test`. The scrambling formula decodes the fan server's captured version
+  string into "0311172218" (ten digits: strong evidence the formula is right). Next: step B (login pages, DNAS hook).
+- Faking an installed HDD: not now (research 7.5: only for HDD-only rooms).
 - mbedTLS on a real device and against the PS2's actual ClientHello: S3 / S6.
 
 ## Useful for other developers

@@ -34,7 +34,8 @@
 # OB_RUN=<repo>/game_files (read only; recompile input); OB_GAME=$OB_RUN/SLPM_654.28 (what boot/gate run: the
 # ELF, an extracted folder or an ISO image); OB_VCVARS=VS2022 Community vcvars64.bat;
 # OB_PCSX2=C:/ob/pcsx2, OB_PCSX2_DEPS=C:/ob/pcsx2-deps, OB_PCSX2_GS_BUILD=C:/ob/pcsx2-gs-build,
-# OB_PCSX2_VU_BUILD=C:/ob/pcsx2-vu-build, OB_DIAG_BUILD=C:/ob/diag-build (ob_diag.dll, ob_diag_tests.exe).
+# OB_PCSX2_VU_BUILD=C:/ob/pcsx2-vu-build, OB_DIAG_BUILD=C:/ob/diag-build (ob_diag.dll, ob_diag_tests.exe),
+# OB_SERVER_BUILD=C:/ob/ob-server-build (native/ob_server's tests).
 # Writes nothing inside the repo; logs go to $OB_LOGS. cmake/ctest/MSVC steps run via tools/ob/vc.bat
 # (its path must contain no spaces: cmd /c quoting).
 set -u
@@ -48,6 +49,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 # itself, or an ISO 9660 disc image, e.g. OB_GAME="$REPO/ps2_emu/roms/Biohazard - Outbreak (English v2.1).iso".
 : "${OB_GAME:=$OB_RUN/SLPM_654.28}"
 : "${OB_DIAG_BUILD:=$OB_ROOT/diag-build}" "${OB_PCSX2_VU_BUILD:=$OB_ROOT/pcsx2-vu-build}"
+: "${OB_SERVER_BUILD:=$OB_ROOT/ob-server-build}"
 : "${OB_VCVARS:=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 export OB_VCVARS
 PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
@@ -186,6 +188,18 @@ cmd_test() {
         if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
     else
         echo "pcsx2_sio2: 0/0 (build failed: $OB_LOGS/ob-pcsx2-sio2-tests-build.log)"; red=1
+    fi
+    # The built-in server for same-network play (native/ob_server, standalone, AGPL): wire format and stream splitting.
+    log="$OB_LOGS/ob-test-ob_server.log"
+    if { [ -f "$OB_SERVER_BUILD/build.ninja" ] ||
+           vc cmake -S "$REPO/native/ob_server" -B "$OB_SERVER_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release; } > "$OB_LOGS/ob-server-build.log" 2>&1 &&
+       vc cmake --build "$OB_SERVER_BUILD" >> "$OB_LOGS/ob-server-build.log" 2>&1; then
+        "$OB_SERVER_BUILD/ob_server_tests.exe" > "$log" 2>&1
+        r=$(grep -o 'ob_server: [0-9]*/[0-9]*' "$log" | tail -1)
+        echo "${r:-ob_server: 0/0 (no result: $log)}"
+        if [ -z "$r" ] || grep -q '^FAIL' "$log"; then red=1; grep -a '^FAIL' "$log" | head -10; fi
+    else
+        echo "ob_server: 0/0 (build failed: $OB_LOGS/ob-server-build.log)"; red=1
     fi
     # PCSX2's DEV9 + SMAP + Sockets adapter (native/pcsx2_dev9/tests): DHCP and DNS through the SMAP registers.
     log="$OB_LOGS/ob-test-pcsx2_dev9.log"
