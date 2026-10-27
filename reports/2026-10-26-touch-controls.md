@@ -184,7 +184,17 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
     6 % (8), movie decoding 5 % (7), PLT stubs 4 % (4), VU1 JIT 3 % (0), VIF1/GIF 4 % (0), the rest about 9 %.
 - **Root cause:** the emulator's own overhead takes most of each frame on a core the phone runs at about 2.4 GHz; the
   game's code is under a fifth of it. J's Bar's opening adds geometry and sound work, and the thread goes over 100 %.
-- **Next (proposed to the developer):** see the summary of options in the session; not built yet.
+- **Fix (developer: fixes 1-3):** the unwinder's library lookup checks this library first (`native/ob_ui/android/
+  fast_unwind.cpp`, a hidden `dl_iterate_phdr`; "[unwind] fast path on" at start); PS2Recomp 0086 (EE timers updated
+  only near an event); `-Wl,-Bsymbolic-functions` (PLT relocations 3 986 -> 456).
+- **Result (run 5, 04:10:20-04:13:04, gamer pro mode; the developer also closed every other app):** 162 s, median
+  60 fps, 3 s under 50 (39 before), J's Bar's opening 53-56 fps (37-44 before). `GameThread` again 93 % busy in the
+  slow seconds at the same 2.4 GHz median clock, so the same core time gave about 30 % more frames: the fixes, not
+  spare CPU from closed apps (the thread was not short of a core before either). Shares of the game thread in the slow
+  seconds: unwinding 5.4 -> 1.0 %, PLT 3.8 -> 1.1 %, EE timers + checkpoints 13.7 -> 8.1 %. The profiler recorded fewer
+  samples per second than asked this time (Android throttles perf sampling), so only shares and `top` are compared.
+- **Still open:** J's Bar's opening is 53-56, not 60. Next costs: the IOP interpreter (about 19 %), the scheduler's
+  remaining checkpoint work, SPU2 mixing; and the clocks (the thread never got the cpu6-7 cores during a dip).
 
 ## Mistakes and corrections
 
