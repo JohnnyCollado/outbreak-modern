@@ -1,0 +1,644 @@
+From ca774f36f2c875dfc890a89a0a60923796341b70 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 18:25:52 -0400
+Subject: [PATCH 97/97] Runtime: NETCNFIF's settings-file server, the PS2
+ network settings made for the player
+
+A game using Sony's NETCNFIF reads its network settings (netcnf's BWNETCNF set) through file callbacks that call
+the EE RPC server 0x80001101 (ps2sdk netcnfif.c: 12 open, 13 read, 14 close), which the game registers to read a
+memory card. With PS2X_NETCNF set ("dhcp", or "static:address,netmask,gateway,dns1[,dns2]"), the host adapter
+serves that id itself (IopHost::hasEeRpcServer/eeRpc, patch 0096) with the four files generated in
+runtime/ps2_netcnf: the index "BWNETCNF" and "net000.cnf" in plain text, "ifc000.dat" and "dev000.dat" scrambled
+as netcnf does (three rotation amounts per console-ID byte, each 16-bit word rotated left then inverted; console
+ID = patch 0093's eight 0xAA bytes). The player needs neither a memory card nor Sony's configuration utility.
+Unset or "off": as before.
+
+Tests (written first): ps2x_tests Netcnf: the scrambling of a known word for two IDs and an odd last byte; the
+DHCP set byte-for-byte against the reference writer (outbreak-modern tools/ob/mcd.py, checked against the game's
+netcnf.irx); a static set's keywords; PS2X_NETCNF parsing; RPC 12/13/14 open, read (clipped), close, closed and
+unknown names. Fails without: 558/569.
+---
+ ps2xRuntime/CMakeLists.txt               |   1 +
+ ps2xRuntime/include/runtime/ps2_netcnf.h |  76 +++++++++
+ ps2xRuntime/src/lib/ps2_iop_host.cpp     |  37 +++++
+ ps2xRuntime/src/lib/ps2_iop_host.h       |   3 +
+ ps2xRuntime/src/lib/ps2_netcnf.cpp       | 195 ++++++++++++++++++++++
+ ps2xTest/CMakeLists.txt                  |   1 +
+ ps2xTest/src/main.cpp                    |   2 +
+ ps2xTest/src/ps2_netcnf_tests.cpp        | 196 +++++++++++++++++++++++
+ 8 files changed, 511 insertions(+)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_netcnf.h
+ create mode 100644 ps2xRuntime/src/lib/ps2_netcnf.cpp
+ create mode 100644 ps2xTest/src/ps2_netcnf_tests.cpp
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 7ec2511..7819813 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -398,6 +398,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_iop_host.cpp
+     src/lib/ps2_memory.cpp
+     src/lib/ps2_game_source.cpp
++    src/lib/ps2_netcnf.cpp
+     src/lib/ps2_pnach.cpp
+     src/lib/ps2_input_bindings.cpp
+     src/lib/ps2_pad.cpp
+diff --git a/ps2xRuntime/include/runtime/ps2_netcnf.h b/ps2xRuntime/include/runtime/ps2_netcnf.h
+new file mode 100644
+index 0000000..816a8c3
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_netcnf.h
+@@ -0,0 +1,76 @@
++#ifndef PS2_NETCNF_H
++#define PS2_NETCNF_H
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++
++// Sony's PS2 network settings (netcnf's BWNETCNF set) made for the player and served to the game's NETCNFIF
++// module (patch 0097). A game using Sony's NETCNFIF reads its settings through file callbacks that call the EE
++// RPC server 0x80001101 (ps2sdk netcnfif.c: 12 open, 13 read, 14 close), which the game itself registers to read
++// a memory card. The runtime serves that id instead, with the four files generated here, so a player needs
++// neither a memory card nor Sony's configuration utility.
++//
++// Files (ps2sdk iop/network/netcnf netcnf.c): the index "BWNETCNF" ("type,stat,sys_name,usr_name" lines; types
++// 0 combination, 1 interface, 2 device) and the combination "net000.cnf" are plain text; the interface
++// "ifc000.dat" and device "dev000.dat" are scrambled with a key from the console's i.Link ID (sceCdRI, which
++// patch 0093 answers with eight 0xAA bytes): three rotation amounts per ID byte ((b >> 5) + 1, ((b >> 2) & 7) + 1,
++// (b & 3) + 1), each 16-bit word rotated left by key[n % 24] then inverted, an odd last byte the same in 8 bits.
++// Each config file starts with the magic line "# <Sony Computer Entertainment Inc.>" and an empty line.
++namespace ps2x::netcnf
++{
++    struct NetworkConfig
++    {
++        bool dhcp = true;      // automatic address and DNS (the default); else the fields below
++        std::string address;   // "a.b.c.d"
++        std::string netmask;
++        std::string gateway;
++        std::string dns1;
++        std::string dns2;
++    };
++
++    struct SettingsFile
++    {
++        std::string name;
++        std::vector<uint8_t> data;
++    };
++
++    constexpr std::array<uint8_t, 8> kConsoleId{0xAAu, 0xAAu, 0xAAu, 0xAAu, 0xAAu, 0xAAu, 0xAAu, 0xAAu};
++
++    // netcnf's scrambling of an interface or device file for the given console ID.
++    std::vector<uint8_t> scramble(const std::vector<uint8_t> &plain, const std::array<uint8_t, 8> &consoleId = kConsoleId);
++
++    // The four files, in order: BWNETCNF (index), net000.cnf, ifc000.dat (scrambled), dev000.dat (scrambled).
++    std::vector<SettingsFile> settingsFiles(const NetworkConfig &config);
++
++    // PS2X_NETCNF: unset, "" or "off" = none (the game reads a memory card, as before); "dhcp" = automatic;
++    // "static:address,netmask,gateway,dns1[,dns2]" = fixed. Anything else = none.
++    std::optional<NetworkConfig> configFromEnvironment(const char *value);
++
++    // NETCNFIF's file callbacks as an RPC server (ps2sdk netcnfif.c sce_callback_open/read/close):
++    //   12 open:  send {int flags, int mode, int devlen, int pathlen, char device[devlen], char path[pathlen]}
++    //             reply {int fd (< 0 = no such file), int filesize}
++    //   13 read:  send {int fd, int devlen, int pathlen, int offset, int size, device, path}
++    //             reply {int count, char data[count]}
++    //   14 close: send {int fd} reply {int 0}
++    // The path's last component names the file ("mc0:" + "/BWNETCNF/ifc000.dat"); the device is not checked.
++    class SettingsServer
++    {
++    public:
++        static constexpr uint32_t kSid = 0x80001101u;
++        static constexpr int kMaxOpen = 8;
++
++        explicit SettingsServer(const NetworkConfig &config);
++
++        // False for a function it does not serve; else reply holds the answer.
++        bool call(uint32_t function, const std::vector<uint8_t> &send, std::vector<uint8_t> &reply);
++
++    private:
++        std::vector<SettingsFile> m_files;
++        std::array<int, kMaxOpen> m_open{}; // fd -> index into m_files, -1 = free
++    };
++}
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.cpp b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+index b30a6e6..060485b 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -4,6 +4,7 @@
+ #include "ps2_stubs.h"
+ #include "Kernel/Stubs/SIF.h"
+ #include "runtime/ps2_memory.h"
++#include "runtime/ps2_netcnf.h"
+ #include "Kernel/Stubs/MemoryCard.h"
+ #include "Kernel/Syscalls/Common.h"
+ 
+@@ -11,9 +12,11 @@
+ #include "ps2x/iop/ps2_path.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cstring>
+ #include <filesystem>
+ #include <iostream>
++#include <optional>
+ #include <limits>
+ #include <utility>
+ 
+@@ -543,6 +546,40 @@ bool PS2IopHostAdapter::invokeGuestFunction(uint64_t callToken,
+     return false;
+ }
+ 
++namespace
++{
++    // The game's network settings served to its NETCNFIF module (patch 0097): made once from PS2X_NETCNF on the
++    // first bind; none when it is unset or "off" (the game then reads a memory card through its own EE server,
++    // which our IOP cannot call: it asks the player for settings).
++    ps2x::netcnf::SettingsServer *netcnfServer()
++    {
++        static std::optional<ps2x::netcnf::SettingsServer> server = []() -> std::optional<ps2x::netcnf::SettingsServer> {
++            const char *value = std::getenv("PS2X_NETCNF");
++            const std::optional<ps2x::netcnf::NetworkConfig> config = ps2x::netcnf::configFromEnvironment(value);
++            if (!config)
++            {
++                if (value && *value && std::string(value) != "off")
++                    std::cout << "[netcnf] PS2X_NETCNF=" << value << " not understood (dhcp | static:address,netmask,gateway,dns1[,dns2] | off): off" << std::endl;
++                return std::nullopt;
++            }
++            std::cout << "[netcnf] serving the game's network settings (PS2X_NETCNF=" << value << ")" << std::endl;
++            return ps2x::netcnf::SettingsServer{*config};
++        }();
++        return server ? &*server : nullptr;
++    }
++}
++
++bool PS2IopHostAdapter::hasEeRpcServer(uint32_t sid) const
++{
++    return sid == ps2x::netcnf::SettingsServer::kSid && netcnfServer() != nullptr;
++}
++
++bool PS2IopHostAdapter::eeRpc(uint32_t sid, uint32_t function, const std::vector<uint8_t> &send, std::vector<uint8_t> &reply)
++{
++    ps2x::netcnf::SettingsServer *server = netcnfServer();
++    return server != nullptr && sid == ps2x::netcnf::SettingsServer::kSid && server->call(function, send, reply);
++}
++
+ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
+                                        const void *packet,
+                                        size_t packetSize)
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.h b/ps2xRuntime/src/lib/ps2_iop_host.h
+index f83cb4b..83e0b3d 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.h
++++ b/ps2xRuntime/src/lib/ps2_iop_host.h
+@@ -89,6 +89,9 @@ public:
+                              uint32_t a3,
+                              uint32_t *resultAddress) override;
+     bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override;
++    // NETCNFIF's settings-file server (patch 0097; PS2X_NETCNF).
++    bool hasEeRpcServer(uint32_t sid) const override;
++    bool eeRpc(uint32_t sid, uint32_t function, const std::vector<uint8_t> &send, std::vector<uint8_t> &reply) override;
+ 
+     void log(ps2x::iop::LogLevel level, std::string_view message) override;
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_netcnf.cpp b/ps2xRuntime/src/lib/ps2_netcnf.cpp
+new file mode 100644
+index 0000000..cb90ad6
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_netcnf.cpp
+@@ -0,0 +1,195 @@
++#include "runtime/ps2_netcnf.h"
++
++#include <cstring>
++#include <sstream>
++
++namespace ps2x::netcnf
++{
++    namespace
++    {
++        constexpr const char *kMagic = "# <Sony Computer Entertainment Inc.>\n\n";
++        constexpr int32_t kNoEntry = -4, kBadHandle = -9, kTooManyOpen = -24; // as ioman's errno values
++
++        std::vector<uint8_t> text(const std::string &s)
++        {
++            return std::vector<uint8_t>(s.begin(), s.end());
++        }
++
++        uint32_t readU32(const std::vector<uint8_t> &v, size_t offset)
++        {
++            uint32_t value = 0;
++            for (size_t i = 0; i < 4; ++i)
++                value |= static_cast<uint32_t>(offset + i < v.size() ? v[offset + i] : 0u) << (8 * i);
++            return value;
++        }
++
++        void putU32(std::vector<uint8_t> &v, uint32_t value)
++        {
++            for (size_t i = 0; i < 4; ++i)
++                v.push_back(static_cast<uint8_t>(value >> (8 * i)));
++        }
++
++        // A NUL-terminated string at offset, at most `length` bytes (the length netcnfif sends includes the NUL).
++        std::string stringAt(const std::vector<uint8_t> &v, size_t offset, size_t length)
++        {
++            std::string s;
++            for (size_t i = 0; i < length && offset + i < v.size() && v[offset + i] != 0u; ++i)
++                s.push_back(static_cast<char>(v[offset + i]));
++            return s;
++        }
++
++        std::string lastName(const std::string &path)
++        {
++            const size_t cut = path.find_last_of("/\\:");
++            return cut == std::string::npos ? path : path.substr(cut + 1);
++        }
++    }
++
++    std::vector<uint8_t> scramble(const std::vector<uint8_t> &plain, const std::array<uint8_t, 8> &consoleId)
++    {
++        uint8_t key[24];
++        for (size_t i = 0; i < 8; ++i)
++        {
++            key[i * 3 + 0] = static_cast<uint8_t>((consoleId[i] >> 5) + 1);
++            key[i * 3 + 1] = static_cast<uint8_t>(((consoleId[i] >> 2) & 7) + 1);
++            key[i * 3 + 2] = static_cast<uint8_t>((consoleId[i] & 3) + 1);
++        }
++        std::vector<uint8_t> out;
++        out.reserve(plain.size());
++        size_t n = 0;
++        for (; n + 1 < plain.size(); n += 2)
++        {
++            const uint32_t word = plain[n] | (static_cast<uint32_t>(plain[n + 1]) << 8);
++            const uint32_t shift = key[(n / 2) % 24];
++            const uint32_t rotated = ((word << shift) | (word >> (16 - shift))) & 0xFFFFu;
++            const uint32_t value = rotated ^ 0xFFFFu;
++            out.push_back(static_cast<uint8_t>(value));
++            out.push_back(static_cast<uint8_t>(value >> 8));
++        }
++        if (n < plain.size())
++        {
++            const uint32_t byte = plain[n];
++            const uint32_t shift = key[(n / 2) % 24];
++            const uint32_t rotated = ((byte << shift) | (byte >> (8 - shift))) & 0xFFu;
++            out.push_back(static_cast<uint8_t>(rotated ^ 0xFFu));
++        }
++        return out;
++    }
++
++    std::vector<SettingsFile> settingsFiles(const NetworkConfig &config)
++    {
++        std::ostringstream ifc;
++        ifc << kMagic << "type eth\n";
++        if (config.dhcp)
++        {
++            ifc << "dhcp\n";
++        }
++        else
++        {
++            ifc << "address " << config.address << "\nnetmask " << config.netmask << "\ngateway " << config.gateway
++                << "\ndns1_address " << config.dns1 << "\n";
++            if (!config.dns2.empty())
++                ifc << "dns2_address " << config.dns2 << "\n";
++        }
++        const std::string dev = std::string(kMagic) +
++                                "type eth\nvendor \"SCE\"\nproduct \"Ethernet (Network Adaptor)\"\nphy_config auto\n";
++        return {
++            {"BWNETCNF", text("0,1,net000.cnf,Combination1\n1,1,ifc000.dat,Setting 1\n"
++                              "2,1,dev000.dat,SCE/Ethernet (Network Adaptor)\n")},
++            {"net000.cnf", text(std::string(kMagic) + "interface \"Combination1\" \"ifc000.dat\" \"dev000.dat\"\n")},
++            {"ifc000.dat", scramble(text(ifc.str()))},
++            {"dev000.dat", scramble(text(dev))},
++        };
++    }
++
++    std::optional<NetworkConfig> configFromEnvironment(const char *value)
++    {
++        const std::string mode = value ? value : "";
++        if (mode == "dhcp")
++            return NetworkConfig{};
++        if (mode.rfind("static:", 0) != 0)
++            return std::nullopt;
++        std::vector<std::string> fields;
++        std::string field;
++        std::istringstream list(mode.substr(7));
++        while (std::getline(list, field, ','))
++            fields.push_back(field);
++        if (fields.size() < 4 || fields.size() > 5)
++            return std::nullopt;
++        NetworkConfig config;
++        config.dhcp = false;
++        config.address = fields[0];
++        config.netmask = fields[1];
++        config.gateway = fields[2];
++        config.dns1 = fields[3];
++        if (fields.size() == 5)
++            config.dns2 = fields[4];
++        return config;
++    }
++
++    SettingsServer::SettingsServer(const NetworkConfig &config)
++        : m_files(settingsFiles(config))
++    {
++        m_open.fill(-1);
++    }
++
++    bool SettingsServer::call(uint32_t function, const std::vector<uint8_t> &send, std::vector<uint8_t> &reply)
++    {
++        reply.clear();
++        switch (function)
++        {
++        case 12: // open(flags, mode, devlen, pathlen, device, path) -> fd, filesize
++        {
++            const uint32_t deviceLength = readU32(send, 8);
++            const uint32_t pathLength = readU32(send, 12);
++            const std::string name = lastName(stringAt(send, 16u + deviceLength, pathLength));
++            int file = -1;
++            for (size_t i = 0; i < m_files.size(); ++i)
++                if (m_files[i].name == name)
++                    file = static_cast<int>(i);
++            int fd = -1;
++            for (int i = 0; i < kMaxOpen && fd < 0; ++i)
++                if (m_open[static_cast<size_t>(i)] < 0)
++                    fd = i;
++            if (file < 0 || fd < 0)
++            {
++                putU32(reply, static_cast<uint32_t>(file < 0 ? kNoEntry : kTooManyOpen));
++                putU32(reply, 0u);
++                return true;
++            }
++            m_open[static_cast<size_t>(fd)] = file;
++            putU32(reply, static_cast<uint32_t>(fd));
++            putU32(reply, static_cast<uint32_t>(m_files[static_cast<size_t>(file)].data.size()));
++            return true;
++        }
++        case 13: // read(fd, devlen, pathlen, offset, size, device, path) -> count, data
++        {
++            const uint32_t fd = readU32(send, 0);
++            const uint32_t offset = readU32(send, 12);
++            const uint32_t size = readU32(send, 16);
++            if (fd >= static_cast<uint32_t>(kMaxOpen) || m_open[fd] < 0)
++            {
++                putU32(reply, static_cast<uint32_t>(kBadHandle));
++                return true;
++            }
++            const std::vector<uint8_t> &data = m_files[static_cast<size_t>(m_open[fd])].data;
++            const size_t start = std::min<size_t>(offset, data.size());
++            const size_t count = std::min<size_t>(size, data.size() - start);
++            putU32(reply, static_cast<uint32_t>(count));
++            reply.insert(reply.end(), data.begin() + static_cast<std::ptrdiff_t>(start),
++                         data.begin() + static_cast<std::ptrdiff_t>(start + count));
++            return true;
++        }
++        case 14: // close(fd) -> 0
++        {
++            const uint32_t fd = readU32(send, 0);
++            if (fd < static_cast<uint32_t>(kMaxOpen))
++                m_open[fd] = -1;
++            putU32(reply, 0u);
++            return true;
++        }
++        default:
++            return false;
++        }
++    }
++}
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 8e995df..26a4b7e 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -41,6 +41,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_gs_external_tests.cpp
+     src/ps2_runtime_api_tests.cpp
+     src/ps2_fps_counter_tests.cpp
++    src/ps2_netcnf_tests.cpp
+     src/ps2_diag_hooks_tests.cpp
+     src/ps2_input_bindings_tests.cpp
+     src/ps2_game_source_tests.cpp
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 614d6c7..1d18bfe 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -22,6 +22,7 @@ void register_ps2_float_semantics_tests();
+ void register_ps2_gs_external_tests();
+ void register_ps2_runtime_api_tests();
+ void register_ps2_fps_counter_tests();
++void register_ps2_netcnf_tests();
+ void register_ps2_diag_hooks_tests();
+ void register_ps2_input_bindings_tests();
+ void register_ps2_game_source_tests();
+@@ -52,6 +53,7 @@ int main()
+     register_ps2_gs_external_tests();
+     register_ps2_runtime_api_tests();
+     register_ps2_fps_counter_tests();
++    register_ps2_netcnf_tests();
+     register_ps2_diag_hooks_tests();
+     register_ps2_input_bindings_tests();
+     register_ps2_game_source_tests();
+diff --git a/ps2xTest/src/ps2_netcnf_tests.cpp b/ps2xTest/src/ps2_netcnf_tests.cpp
+new file mode 100644
+index 0000000..7b50813
+--- /dev/null
++++ b/ps2xTest/src/ps2_netcnf_tests.cpp
+@@ -0,0 +1,196 @@
++#include "MiniTest.h"
++#include "runtime/ps2_netcnf.h"
++
++#include <cstring>
++#include <string>
++#include <vector>
++
++namespace
++{
++    // The four files for "network adapter, DHCP" as the reference writer (outbreak-modern tools/ob/mcd.py
++    // netcnf, checked against the game's netcnf.irx) produces them; hex from `mcd.netcnf_files` on 2026-10-27.
++    const char *const kIndexHex =
++        "302c312c6e65743030302e636e662c436f6d62696e6174696f6e310a312c312c6966633030302e6461742c53657474696e6720310a"
++        "322c312c6465763030302e6461742c5343452f45746865726e657420284e6574776f726b2041646170746f72290a";
++    const char *const kCombinationHex =
++        "23203c536f6e7920436f6d707574657220456e7465727461696e6d656e7420496e632e3e0a0a696e74657266616365202243"
++        "6f6d62696e6174696f6e312220226966633030302e6461742220226465763030302e646174220a";
++    const char *const kInterfaceHex =
++        "37f71d66848cb7e1e485947ca2e2d46cfdd662e4d46c5cf4a46594d48c5cedb78ce48e0e7d7d5c347cd4e6b75cbcacdfe7257fac";
++    const char *const kDeviceHex =
++        "37f71d66848cb7e1e485947ca2e2d46cfdd662e4d46c5cf4a46594d48c5cedb78ce48e0e7d7d5c347cd4e6b75cbcac4fa466dc84"
++        "6efc6b37e5d5efaee36384dc54e4f7e2edd65cbca3668cd45efcec75d45c44846523fdf6dcf4e2e3846cb6ee63fdbc3404e5246"
++        "4ccb4c6fca2a75c84af";
++
++    std::vector<uint8_t> fromHex(const char *hex)
++    {
++        std::vector<uint8_t> out;
++        for (size_t i = 0; hex[i] && hex[i + 1]; i += 2)
++            out.push_back(static_cast<uint8_t>(std::stoul(std::string(hex + i, 2), nullptr, 16)));
++        return out;
++    }
++
++    std::vector<uint8_t> bytes(const char *text)
++    {
++        return std::vector<uint8_t>(text, text + std::strlen(text));
++    }
++
++    void putU32(std::vector<uint8_t> &v, uint32_t value)
++    {
++        for (int i = 0; i < 4; ++i)
++            v.push_back(static_cast<uint8_t>(value >> (8 * i)));
++    }
++
++    uint32_t getU32(const std::vector<uint8_t> &v, size_t offset)
++    {
++        uint32_t value = 0;
++        for (int i = 0; i < 4; ++i)
++            value |= static_cast<uint32_t>(offset + i < v.size() ? v[offset + i] : 0u) << (8 * i);
++        return value;
++    }
++
++    // netcnfif.c sce_callback_open's buffer: flags, mode, devlen, pathlen, device, path (lengths include the NUL).
++    std::vector<uint8_t> openRequest(const char *device, const char *path, uint32_t flags = 1u)
++    {
++        std::vector<uint8_t> v;
++        putU32(v, flags);
++        putU32(v, 0u);
++        putU32(v, static_cast<uint32_t>(std::strlen(device) + 1));
++        putU32(v, static_cast<uint32_t>(std::strlen(path) + 1));
++        v.insert(v.end(), device, device + std::strlen(device) + 1);
++        v.insert(v.end(), path, path + std::strlen(path) + 1);
++        return v;
++    }
++
++    // sce_callback_read's: fd, devlen, pathlen, offset, size, device, path.
++    std::vector<uint8_t> readRequest(uint32_t fd, uint32_t offset, uint32_t size, const char *device = "mc0:",
++                                     const char *path = "/BWNETCNF/BWNETCNF")
++    {
++        std::vector<uint8_t> v;
++        putU32(v, fd);
++        putU32(v, static_cast<uint32_t>(std::strlen(device) + 1));
++        putU32(v, static_cast<uint32_t>(std::strlen(path) + 1));
++        putU32(v, offset);
++        putU32(v, size);
++        v.insert(v.end(), device, device + std::strlen(device) + 1);
++        v.insert(v.end(), path, path + std::strlen(path) + 1);
++        return v;
++    }
++
++    std::vector<uint8_t> closeRequest(uint32_t fd)
++    {
++        std::vector<uint8_t> v;
++        putU32(v, fd);
++        return v;
++    }
++}
++
++void register_ps2_netcnf_tests()
++{
++    using namespace ps2x::netcnf;
++
++    MiniTest::Case("Netcnf", [](TestCase &tc)
++    {
++        tc.Run("scrambling: each 16-bit word rotated left by the console ID's key, then inverted", [](TestCase &t)
++        {
++            // ID byte 0xAA gives rotations 6, 3, 3. "# " = 0x2023 rotated left 6 = 0x08C8, inverted = 0xF737.
++            t.IsTrue(scramble(bytes("# ")) == std::vector<uint8_t>{0x37u, 0xF7u}, "first word with rotation 6");
++            // Another ID: 0x01 gives (0 + 1, 0 + 1, 1 + 1) = 1, 1, 2: 0x2023 rotated left 1 = 0x4046, inverted 0xBFB9.
++            std::array<uint8_t, 8> other{};
++            other.fill(0x01u);
++            t.IsTrue(scramble(bytes("# "), other) == std::vector<uint8_t>{0xB9u, 0xBFu}, "the key follows the ID");
++            // An odd last byte is rotated within 8 bits: 'd' = 0x64 rotated left 3 = 0x23, inverted 0xDC.
++            const std::vector<uint8_t> odd = scramble(bytes("odd"));
++            t.Equals(odd.size(), static_cast<size_t>(3), "odd length kept");
++            t.IsTrue(odd.size() == 3 && odd[2] == 0xDCu, "odd last byte");
++        });
++
++        tc.Run("the DHCP settings set equals the reference writer's bytes", [](TestCase &t)
++        {
++            NetworkConfig config;
++            const std::vector<SettingsFile> files = settingsFiles(config);
++            t.Equals(files.size(), static_cast<size_t>(4), "index, combination, interface, device");
++            if (files.size() != 4)
++                return;
++            t.Equals(files[0].name, std::string("BWNETCNF"), "index name");
++            t.Equals(files[1].name, std::string("net000.cnf"), "combination name");
++            t.Equals(files[2].name, std::string("ifc000.dat"), "interface name");
++            t.Equals(files[3].name, std::string("dev000.dat"), "device name");
++            t.IsTrue(files[0].data == fromHex(kIndexHex), "index bytes");
++            t.IsTrue(files[1].data == fromHex(kCombinationHex), "combination bytes");
++            t.IsTrue(files[2].data == fromHex(kInterfaceHex), "interface bytes (scrambled 'type eth', 'dhcp')");
++            t.IsTrue(files[3].data == fromHex(kDeviceHex), "device bytes (scrambled vendor/product/phy_config)");
++        });
++
++        tc.Run("a fixed address writes netcnf's address keywords instead of dhcp", [](TestCase &t)
++        {
++            NetworkConfig config;
++            config.dhcp = false;
++            config.address = "192.168.1.20";
++            config.netmask = "255.255.255.0";
++            config.gateway = "192.168.1.1";
++            config.dns1 = "192.168.1.1";
++            const std::vector<SettingsFile> files = settingsFiles(config);
++            // The interface file, unscrambled by the inverse of the test's own formula, must hold the keywords
++            // netcnf's parser knows (netcnfif.c prints them as "address", "netmask", "gateway", "dns1_address",
++            // "dns2_address") and no "dhcp" line.
++            t.Equals(files.size(), static_cast<size_t>(4), "four files");
++            if (files.size() != 4)
++                return;
++            // Scramble the expected plain text and compare the scrambled bytes.
++            const std::vector<uint8_t> expected = scramble(bytes(
++                "# <Sony Computer Entertainment Inc.>\n\ntype eth\naddress 192.168.1.20\nnetmask 255.255.255.0\n"
++                "gateway 192.168.1.1\ndns1_address 192.168.1.1\n"));
++            t.IsTrue(files[2].data == expected, "static interface file");
++        });
++
++        tc.Run("PS2X_NETCNF selects the configuration", [](TestCase &t)
++        {
++            t.IsFalse(configFromEnvironment(nullptr).has_value(), "unset = none");
++            t.IsFalse(configFromEnvironment("").has_value(), "empty = none");
++            t.IsFalse(configFromEnvironment("off").has_value(), "off = none");
++            t.IsFalse(configFromEnvironment("maybe").has_value(), "unknown = none");
++            const auto dhcp = configFromEnvironment("dhcp");
++            t.IsTrue(dhcp.has_value() && dhcp->dhcp, "dhcp");
++            const auto fixed = configFromEnvironment("static:10.0.0.5,255.0.0.0,10.0.0.1,8.8.8.8,8.8.4.4");
++            t.IsTrue(fixed.has_value() && !fixed->dhcp && fixed->address == "10.0.0.5" && fixed->netmask == "255.0.0.0" &&
++                         fixed->gateway == "10.0.0.1" && fixed->dns1 == "8.8.8.8" && fixed->dns2 == "8.8.4.4",
++                     "static with five addresses");
++            t.IsFalse(configFromEnvironment("static:10.0.0.5").has_value(), "static needs at least four");
++        });
++
++        tc.Run("RPC 12/13/14 open, read and close the files by their path's last name", [](TestCase &t)
++        {
++            SettingsServer server{NetworkConfig{}};
++            std::vector<uint8_t> reply;
++            t.IsTrue(server.call(12u, openRequest("mc0:", "/BWNETCNF/BWNETCNF"), reply), "open served");
++            const uint32_t fd = getU32(reply, 0);
++            t.IsTrue(static_cast<int32_t>(fd) >= 0, "open returns a handle");
++            t.Equals(getU32(reply, 4), 99u, "open returns the index file's size");
++
++            t.IsTrue(server.call(13u, readRequest(fd, 0u, 99u), reply), "read served");
++            t.Equals(getU32(reply, 0), 99u, "read returns the count");
++            t.IsTrue(reply.size() >= 4 + 99 && std::vector<uint8_t>(reply.begin() + 4, reply.begin() + 4 + 99) == fromHex(kIndexHex),
++                     "the data follows the count");
++
++            t.IsTrue(server.call(13u, readRequest(fd, 95u, 50u), reply), "a read past the end is served");
++            t.Equals(getU32(reply, 0), 4u, "and clipped to the file");
++
++            t.IsTrue(server.call(14u, closeRequest(fd), reply), "close served");
++            t.Equals(getU32(reply, 0), 0u, "close returns 0");
++            t.IsTrue(server.call(13u, readRequest(fd, 0u, 4u), reply) && static_cast<int32_t>(getU32(reply, 0)) < 0,
++                     "a closed handle reads an error");
++
++            t.IsTrue(server.call(12u, openRequest("mc0:", "/BWNETCNF/ifc000.dat"), reply), "open the interface file");
++            t.Equals(getU32(reply, 4), 52u, "its size");
++            const uint32_t fd2 = getU32(reply, 0);
++            t.IsTrue(server.call(12u, openRequest("mc0:", "/BWNETCNF/dev000.dat"), reply), "open the device file too");
++            t.Equals(getU32(reply, 4), 113u, "its size");
++            t.IsTrue(getU32(reply, 0) != fd2, "a different handle while both are open");
++
++            t.IsTrue(server.call(12u, openRequest("mc0:", "/BWNETCNF/nothere.cnf"), reply), "an unknown name is answered");
++            t.IsTrue(static_cast<int32_t>(getU32(reply, 0)) < 0, "with an error");
++            t.IsFalse(server.call(2u, closeRequest(0u), reply), "other functions are not this server's");
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+

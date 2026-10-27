@@ -1,0 +1,242 @@
+From 257f742d0a4d741fb162dba6214bf5c38d6bef16 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 18:19:03 -0400
+Subject: [PATCH 96/97] IOP sifcmd: sceSifBindRpc/CallRpc/CheckStatRpc to an EE
+ RPC server the host serves
+
+An IOP module calling an EE-side RPC server (Sony's NETCNFIF asks the EE server 0x80001101 for its settings
+files through sceSifBindRpc + sceSifCallRpc) got 0 from sifcmd 15, 16 and 18 and never bound: NETCNFIF's bind
+loop ran until the RPC handler's budget ended, so its file callbacks were never installed.
+
+IopHost gains hasEeRpcServer(sid) and eeRpc(sid, function, send, reply), default "no such server". Bind (15)
+on a served sid writes the sid into SifRpcClientData_t.command and .server (nonzero = bound; ps2sdk sifrpc:
+16-byte header, command, buff, cbuff, end_function, end_param, server); Call (16) sends the IOP buffer to the
+host and writes its reply into the receive buffer (at most rsize), synchronously; CheckStat (18) answers 0
+(nothing in flight). Any other sid behaves as before: there is still no path to the EE's own servers.
+
+Test (written first): iop_emulator_tests, a module binds 0x80004321, which the test host serves, and calls
+function 7 with "0123456789abcdef": cd.server set, the reply ("1".."g", each byte + 1) in its receive buffer,
+bind/check/call return 0. Fails without: IOP 4/5.
+---
+ ps2xIOP/include/ps2x/iop/iop_host.h       | 17 ++++++
+ ps2xIOP/src/emulator/services/iop_rpc.cpp | 56 +++++++++++++++++-
+ ps2xIOP/tests/iop_emulator_tests.cpp      | 71 +++++++++++++++++++++++
+ 3 files changed, 141 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xIOP/include/ps2x/iop/iop_host.h b/ps2xIOP/include/ps2x/iop/iop_host.h
+index 1eceb08..13c33be 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_host.h
++++ b/ps2xIOP/include/ps2x/iop/iop_host.h
+@@ -7,6 +7,7 @@
+ #include <cstdint>
+ #include <string>
+ #include <string_view>
++#include <vector>
+ 
+ namespace ps2x::iop
+ {
+@@ -96,6 +97,22 @@ namespace ps2x::iop
+ 
+         virtual void audioCommand(uint32_t sid, uint32_t function, GuestBuffer send, GuestBuffer receive) = 0;
+ 
++        // An EE RPC server the host answers itself (patch 0096): an IOP module's sceSifBindRpc(sid) succeeds when
++        // hasEeRpcServer(sid), and its sceSifCallRpc(function, send) gets eeRpc's reply. Default: no such server.
++        virtual bool hasEeRpcServer(uint32_t sid) const
++        {
++            (void)sid;
++            return false;
++        }
++        virtual bool eeRpc(uint32_t sid, uint32_t function, const std::vector<uint8_t> &send, std::vector<uint8_t> &reply)
++        {
++            (void)sid;
++            (void)function;
++            (void)send;
++            (void)reply;
++            return false;
++        }
++
+         virtual std::string hostPath(HostPathKind kind) const = 0;
+         virtual std::string translateGuestPath(std::string_view path) const = 0;
+         virtual uint64_t openHostFile(std::string_view path) = 0;
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index c0f5a72..1fd1e1d 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -131,6 +131,13 @@ namespace ps2x::iop::detail
+         }
+     }
+ 
++    namespace
++    {
++        constexpr uint32_t kRpcClientCommand = 16u; // SifRpcClientData_t.command
++        constexpr uint32_t kRpcClientServer = 36u;  // SifRpcClientData_t.server
++        constexpr uint32_t kRpcMaxPayload = 0x10000u;
++    }
++
+     bool IopRpcBridge::dispatchSifCmdImport(uint16_t ordinal, IopCpuState &cpu)
+     {
+         const auto setV0 = [&](uint32_t value)
+@@ -148,10 +155,53 @@ namespace ps2x::iop::detail
+         case 10:
+         case 11:
+         case 14: // InitRpc
+-        case 15:
+-        case 16:
+             setV0(0);
+             return true;
++        case 15: // sceSifBindRpc(cd, sid, mode) (patch 0096): an EE server the host serves itself is bound at once:
++                 // cd->server (SifRpcClientData_t: 16-byte header, command, buff, cbuff, end_function, end_param,
++                 // server) becomes the sid, nonzero, as a caller's "bound?" test wants (NETCNFIF loops on it). Any
++                 // other sid stays unbound as before: there is no path to the EE's own servers.
++        {
++            const uint32_t clientData = cpu.gpr[4];
++            const uint32_t sid = cpu.gpr[5];
++            if (clientData != 0u && m_host.hasEeRpcServer(sid))
++            {
++                m_memory.write32(clientData + kRpcClientCommand, sid);
++                m_memory.write32(clientData + kRpcClientServer, sid);
++            }
++            setV0(0);
++            return true;
++        }
++        case 16: // sceSifCallRpc(cd, fno, mode, send, ssize, recv, rsize, end_func, end_param): to a bound host
++                 // server, synchronously: the send buffer goes to the host, its reply lands in recv (at most rsize).
++        {
++            const uint32_t clientData = cpu.gpr[4];
++            const uint32_t function = cpu.gpr[5];
++            const uint32_t send = cpu.gpr[7];
++            const uint32_t stackPointer = cpu.gpr[29];
++            const uint32_t sendSize = m_memory.read32(stackPointer + 16u);
++            const uint32_t receive = m_memory.read32(stackPointer + 20u);
++            const uint32_t receiveSize = m_memory.read32(stackPointer + 24u);
++            const uint32_t sid = clientData != 0u ? m_memory.read32(clientData + kRpcClientServer) : 0u;
++            if (sid == 0u || !m_host.hasEeRpcServer(sid))
++            {
++                setV0(0);
++                return true;
++            }
++            std::vector<uint8_t> payload(sendSize <= kRpcMaxPayload ? sendSize : 0u);
++            if (!payload.empty() && !m_memory.readRam(send, payload.data(), payload.size()))
++                payload.clear();
++            std::vector<uint8_t> reply;
++            if (!m_host.eeRpc(sid, function, payload, reply))
++            {
++                setV0(static_cast<uint32_t>(-1));
++                return true;
++            }
++            if (receive != 0u && receiveSize != 0u && !reply.empty())
++                (void)m_memory.writeRam(receive, reply.data(), std::min<size_t>(reply.size(), receiveSize));
++            setV0(0);
++            return true;
++        }
+         case 12: // sceSifSendCmd
+         case 13: // isceSifSendCmd
+         {
+@@ -231,7 +281,7 @@ namespace ps2x::iop::detail
+             setV0(server.serverData);
+             return true;
+         }
+-        case 18:
++        case 18: // sceSifCheckStatRpc: 0 = nothing in flight (host calls complete before they return)
+             setV0(0);
+             return true;
+         case 19: // SetRpcQueue
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index cffc709..5ac9c1c 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -66,6 +66,17 @@ namespace
+         uint32_t allocateGuest(uint32_t, uint32_t) override { return 0u; }
+         void freeGuest(uint32_t) override {}
+         void audioCommand(uint32_t, uint32_t, GuestBuffer, GuestBuffer) override {}
++        // Patch 0096: the test host serves EE RPC server 0x80004321; function 7 answers each byte + 1.
++        bool hasEeRpcServer(uint32_t sid) const override { return sid == 0x80004321u; }
++        bool eeRpc(uint32_t sid, uint32_t function, const std::vector<uint8_t> &send, std::vector<uint8_t> &reply) override
++        {
++            if (sid != 0x80004321u || function != 7u)
++                return false;
++            reply = send;
++            for (uint8_t &b : reply)
++                ++b;
++            return true;
++        }
+         std::string hostPath(HostPathKind kind) const override
+         {
+             return kind == HostPathKind::CdRoot ? cdRoot : std::string{};
+@@ -405,6 +416,59 @@ namespace
+         std::memcpy(image + 0x260u, ops, sizeof(ops));
+     }
+ 
++    // A module calling an EE RPC server the host serves (patch 0096): sceSifBindRpc(&cd, 0x80004321, 0),
++    // sceSifCheckStatRpc(&cd), sceSifCallRpc(&cd, 7, 0, "0123456789abcdef", 16, recv, 64, 0, 0). Returns
++    // (cd.server != 0) | recv[0] << 8 | recv[15] << 16 | ((bind + check + call) & 0xFF) << 24.
++    void writeEeRpcIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00018000u;
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2) & 0x03FFFFFFu); };
++        const uint32_t stubBind = loadAddress + 0x194u, stubCall = loadAddress + 0x19Cu, stubStat = loadAddress + 0x1A4u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x300u; program.memsz = 0x300u; program.flags = 7u; program.align = 4u;
++        const uint32_t code[] = {
++            0x27BDFFD0u, 0xAFBF002Cu, 0xAFB00028u, 0xAFB10024u, 0xAFB20020u, // frame 48; save ra, s0-s2
++            0x3C040001u, 0x34848200u, 0x3C058000u, 0x34A54321u, jal(stubBind), 0x00003021u, // bind(&cd, sid, 0)
++            0x00408021u,                                                          // s0 = bind result
++            0x3C040001u, jal(stubStat), 0x34848200u,                              // checkstat(&cd)
++            0x00408821u,                                                          // s1 = its result
++            0x24080010u, 0xAFA80010u,                                             // 16(sp) = ssize 16
++            0x3C080001u, 0x35088280u, 0xAFA80014u,                                // 20(sp) = recv
++            0x24080040u, 0xAFA80018u, 0xAFA0001Cu, 0xAFA00020u,                   // 24(sp) = rsize 64; end 0, 0
++            0x3C040001u, 0x34848200u, 0x24050007u, 0x00003021u, 0x3C070001u, jal(stubCall), 0x34E78240u, // call
++            0x00409021u,                                                          // s2 = call result
++            0x3C080001u, 0x35088200u, 0x8D090024u, 0u, 0x0009482Bu,               // t1 = cd.server != 0
++            0x3C080001u, 0x35088280u, 0x910A0000u, 0x910B000Fu, 0u,               // t2 = recv[0], t3 = recv[15]
++            0x000A5200u, 0x000B5C00u, 0x012A4825u, 0x012B4825u,                   // t1 |= t2 << 8 | t3 << 16
++            0x02116021u, 0x01926021u, 0x318C00FFu, 0x000C6600u, 0x012C1025u,      // v0 = t1 | (sum & 0xFF) << 24
++            0x8FB20020u, 0x8FB10024u, 0x8FB00028u, 0x8FBF002Cu, 0u,
++            0x03E00008u, 0x27BD0030u,
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x63666973u, 0x0000646Du, // "sifcmd"
++            0x03E00008u, 0x2400000Fu, // 15 sceSifBindRpc
++            0x03E00008u, 0x24000010u, // 16 sceSifCallRpc
++            0x03E00008u, 0x24000012u, // 18 sceSifCheckStatRpc
++            0u, 0u,
++        };
++        uint8_t *image = host.guest.data() + address + codeOffset;
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(image, code, sizeof(code));
++        std::memcpy(image + 0x180u, imports, sizeof(imports));
++        std::memcpy(image + 0x240u, "0123456789abcdef", 16);
++    }
++
+     // A module calling cdvdman import `number` as f(buf, &result), buf[0] and result preset to -1; returns
+     // buf[first] | buf[second] << 8 | (result & 0xFF) << 16 | f's return << 24. sceCdRI (22): the console ID NETCNF
+     // keys its settings files' encoding on; sceCdReadClock (24): the clock USBSRCH polls.
+@@ -1912,6 +1976,13 @@ int main()
+                     "ioman open/read/close must call the device's functions with an iop_file_t (unit 3, flags 1, "
+                     "path after ':'), return fd 0 and the read count, and an unknown device must give -19")) return 1;
+ 
++        // An IOP module calling an EE RPC server the host serves (NETCNFIF's settings-file callbacks, patch 0096).
++        writeEeRpcIrx(host, 0x1A00u);
++        const ModuleLoadResult eeRpc = iop.loadModuleBuffer(0x1A00u);
++        if (!expect(eeRpc.handled && static_cast<uint32_t>(eeRpc.startResult) == 0x00673101u,
++                    "sceSifBindRpc must set cd.server for a host-served sid, sceSifCallRpc must deliver the host's "
++                    "reply ('1'..'g') into the receive buffer, and bind/check/call must return 0")) return 1;
++
+         // A module loading another through modload 19 + 8 (Capcom's LOADHIGH.IRX for its network stack).
+         writeArgvIrx(host, 0xA00u);
+         host.files["argv.irx"].assign(host.guest.begin() + 0xA00, host.guest.begin() + 0xA00 + 0x200);
+-- 
+2.46.2.windows.1
+
