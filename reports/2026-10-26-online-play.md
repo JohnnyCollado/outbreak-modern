@@ -273,6 +273,36 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   from the app's Network page or read from the card image), or build real IOP-to-EE RPC so the game's own libmc2
   code serves them.
 
+### 22. The client serves the settings; the game lists them; two more walls fell, one is left
+
+- **Built (developer approved):** PS2Recomp 0096 (IOP `sceSifBindRpc`/`CallRpc`/`CheckStatRpc` to a host-served EE
+  server) and 0097 (the runtime serves NETCNFIF's server 0x80001101 with Sony's four settings files from
+  `PS2X_NETCNF=dhcp`; no memory card involved). Tests written first (IOP 5/5, ps2x 569/569).
+- **Drive 1:** the list showed "1. 使用できません" (unusable, red). The game's data compare (`netwk` 0x5c7270: the
+  combination's `attach_ifc` against the type-1 list) failed because the type-0 load returned **-2**: NETCNF's heap
+  allocations failed. Cause: `IopMemory::allocate` never reused freed blocks (a bump allocator; the tests had a
+  comment admitting it, and 0075 had pooled RPC stacks around it); NETCNF reads its 100-byte index every frame of
+  this screen, so the 832 KB heap ran dry in seconds. **PS2Recomp 0098:** first fit from the heap's start; test
+  written first (10,000 alloc/free cycles on a fresh IOP). A wrong library name in my test module ("sysmme") cost
+  three builds: the module's log lines showed it.
+- **Drive 2:** "1. Setting 1" listed white, "Hardware: SCE/Ethernet (Network Adaptor)", every NETCNFIF call
+  returns 0 (index, type 1, type 0 loads). **OK on it does nothing.**
+- **Why (so far):** the screen's sub-state machine (`netwk` 0x5c8f90) re-runs a memory-card check every frame
+  (`0x5d0900`, the game's own mc2 job runner 0x1be6f0/0x1bea60 over `sceMc2*Async`): its result lands in
+  `S+0x10DA` = 2, which sets the status bit `S[0x25]` = 1, and with that bit set the sub-state resets to 0 each
+  frame (hence the per-frame index reads) and never reaches the state where OK is handled. The job's path format
+  is `"%s/%s"` (the NET save folder + a file); the result code mapped to that bit is -5. Which sceMc2 call that
+  is and why our card path (mc2_s1 over the external SIO2, patch 0071) answers -5 here is the next question.
+  The NET file was created on this same card earlier in the run, so the card itself works.
+- **Also learned:** the game lists type-1 ("Setting N") entries and loads both the interface (type 1) and the
+  combination (type 0); NETCNF's entry lookup ignores the type and matches the usr_name; the game asks for
+  `mc0:/BWNETCNF/BWNETDCNF`, which netcnf's `do_handle_fname` rewrites to `/BWNETCNF/BWNETCNF`; `f_no_decode`
+  is 0 (static in NETWK's data: scrambled files, as assumed).
+- **Tools:** `.run/spike/up-commit.sh`, `up-amend.sh`, `up-export.sh`, `up-sync.sh` (skips the generated
+  `register_functions.cpp`: my first version overwrote it and the runner built without the game's functions),
+  `up-without.sh` (proves a test fails without the change). Temporary diagnostics lived in `net-src` only and are
+  gone (`up-sync.sh`).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
