@@ -82,7 +82,7 @@ hook points [`research/2026-10-22-gs-seam-in-ps2recomp.md`]; PS2 hardware blocks
 | `tools/ob/android.sh` (+ `android_symcheck.py`; `apk_add_libs.py` no longer used) | Android arm64 build and APK: shaderc, NDK tree `C:\ob\android-r`, the native libraries staged for Gradle (`native/android`) which packs and signs, offline symbol check | `docs/ops/android.md` |
 | `tools/hostprof/` | External sampling profiler `hostprof.exe` (suspend, read RIP, resume per thread; DbgHelp symbols; per-thread CPU time and top functions). Outside the engine: attaches to a running `ps2EntryRunner.exe` | Built by `ob.sh hostprof-build` into `C:\ob\hostprof-build`; names host functions in an `OB_PROFILE=1` build (`tools/ob/profile.cmake`, `docs/ops/build.md` "Host profiling") |
 | `tools/gate/` | Gate scoring (`gate.py`) and reference handling (`refs.py`) | |
-| `tools/mwo3_to_elf.py`, `tools/splat_functions.py` | Turn overlay `.BIN` files into ELFs and function lists for the recompiler | With tests |
+| `tools/mwo3_to_elf.py`, `tools/splat_functions.py`, `tools/fill_functions.py` | Turn overlay `.BIN` files into ELFs and function lists for the recompiler; `fill_functions.py` adds what splat missed (JAL targets, prologues after a return; NETDNAS 30 → 1,835) | With tests |
 | `tools/q_scan.py`, `tools/recomp_cycle.sh` | Analysis scan; Linux form of the recompile cycle | |
 | `tools/run.sh` | Runs long commands with captured logs | |
 | `research/` | Research reports (2026-10-22) with dated sources | Appendix B |
