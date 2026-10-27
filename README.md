@@ -14,24 +14,29 @@ is in this repository.
 
 ## Online and same-network play (planned, not built yet)
 
-Online play uses the game's own network code, so the port plays with any server that runs the File #1 protocol
-and with any client on it: Windows, Android, PCSX2 and real PS2s. Research and design:
-`research/2026-10-26-network-crossplay.md`.
+Online play uses the game's own network code. Research and design: `research/2026-10-26-network-crossplay.md`.
 
-- **Pick a server** in the settings: the fan server (Obsrv), a server you or someone else runs, or a game hosted
-  on your network. The game has no LAN mode of its own; every match goes through a server.
-- **Play on the same network** in two ways: run the fan server software (Bioserver1) on a PC at home and have
-  everyone pick it, or (later) press "Host game" in the app.
+**First release: this port's clients only.** Windows and Android players of outbreak-modern play together, in any
+mix. Playing with PCSX2 or real PS2s, and on the fan server (Obsrv), comes in the next release.
+
+- **Pick a server** in the settings: a server you or someone else runs, or a game hosted on your network. The
+  game has no LAN mode of its own; every match goes through a server.
+- **Play on the same network:** press "Host game" on one Windows or Android device, and the others join it from a
+  list or by its IP address.
 
 Limitations:
 
-- **An Android host serves only Windows and Android players of this port.** Android apps can't open ports below
-  1024, and the game's login check (DNAS) uses port 443, which a PS2 or PCSX2 can't be told to change. A Windows
-  host serves everyone.
+- **This port's clients only** in the first release (above).
 - **Hosting is for your local network.** Playing over the internet needs port forwarding or a VPN such as
   Tailscale, set up by you; the app doesn't do it.
-- **The built-in host server would be AGPL-3.0**, like the fan server it would be based on, and ship as its own
-  program or library.
-- **Live play on Obsrv waits for its admins' agreement.** Until then, use your own server.
+- **The host server would be AGPL-3.0**, like the fan server it is based on, and ship as its own program or
+  library.
+
+Next release, when PCSX2 and PS2 players can join:
+
+- **An Android host will serve only this port's players.** Android apps can't open ports below 1024, and the
+  game's login check (DNAS) uses port 443, which a PS2 or PCSX2 can't be told to change. A Windows host will
+  serve everyone.
+- **Live play on Obsrv waits for its admins' agreement.**
 - **Only the Japanese release is tested on the fan server.** Whether the English fan patch changes anything
   online is not known yet.

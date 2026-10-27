@@ -159,6 +159,16 @@ Obsrv).
 - **Order:** client with the server setting first (needed for everything), Level 1 alongside, Level 2 after the
   sync test (section 5, step 1), as its own milestone.
 
+**Scope decision (developer, 2026-10-26): the first release is this port's clients only** (Windows + Android).
+PCSX2, real PS2s and Obsrv come in the next release. Still route A, so the next release adds compatibility
+without redoing the transport. What the narrower scope allows:
+
+- DNAS and the KDDI login pages can be answered inside the emulated adapter (no old-cipher TLS on the wire).
+- Any device can host: the adapter can send our own clients to ports above 1024, so Android hosts work.
+- Our server decides whether to send the v1.01 code patch, so it can skip it until we know what it changes.
+- The determinism question narrows to Windows vs Android of the same build (section 2). It can be measured
+  between our two clients once they connect; the PCSX2 test (section 5, step 1) stays the cheaper early answer.
+
 ## 6. Open questions
 
 1. Lockstep or state sync (step 1's experiment, or a read of NETWK's message code).
