@@ -1,0 +1,137 @@
+From a1d57afe8f0a2f3292e01252a057c5a65aa39871 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 01:46:59 -0400
+Subject: [PATCH 83/83] Runtime HLE: sceDevctl and sceMount answer as a PS2
+ with no hard disk drive (hdd0: HDIOC_STATUS 0x4807 = 3, other HDD commands
+ and mounts -19, dev9x:/pfs:/cdrom0: 0), instead of the game's code calling
+ the IOP file service over an RPC client sceFsInit's HLE never binds
+
+---
+ ps2xRuntime/include/ps2_call_list.h         |  2 ++
+ ps2xRuntime/src/lib/Kernel/Stubs/FileIO.cpp | 37 +++++++++++++++++++++
+ ps2xRuntime/src/lib/Kernel/Stubs/FileIO.h   |  2 ++
+ ps2xTest/src/ps2_runtime_io_tests.cpp       | 27 +++++++++++++++
+ 4 files changed, 68 insertions(+)
+
+diff --git a/ps2xRuntime/include/ps2_call_list.h b/ps2xRuntime/include/ps2_call_list.h
+index 7327933..73ac004 100644
+--- a/ps2xRuntime/include/ps2_call_list.h
++++ b/ps2xRuntime/include/ps2_call_list.h
+@@ -417,6 +417,8 @@
+     X(sceeFontSetFont)                        \
+     X(sceeFontSetScale)                       \
+     X(sceIoctl)                               \
++    X(sceDevctl)                              \
++    X(sceMount)                               \
+     X(sceIpuInit)                             \
+     X(sceIpuRestartDMA)                       \
+     X(sceIpuStopDMA)                          \
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.cpp
+index b1083af..ee69966 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.cpp
+@@ -1,6 +1,8 @@
+ #include "Common.h"
+ #include "FileIO.h"
+ 
++#include <mutex>
++
+ namespace ps2_stubs
+ {
+     void sceFsDbChk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+@@ -75,6 +77,41 @@ namespace ps2_stubs
+         setReturnS32(ctx, 0);
+     }
+ 
++    // sceDevctl(name, cmd, arg, arglen, buf, buflen): device control through the IOP file service, answered here as a
++    // PS2 with no hard disk drive answers (the file service's RPC client is never bound: sceFsInit above). With a
++    // network adapter, a game asks hdd0: for HDIOC_STATUS (0x4807) at boot: 3 = no drive, the only answer after which
++    // Resident Evil Outbreak goes on from DVD with no prompt (its 0x1BB420 / 0x1BBA60). The adapter's own device
++    // (dev9x:) and the others asked at power-off (pfs:, cdrom0:) succeed; anything else on an HDD device is "no such
++    // device" (-19), and an unknown device too, with one log line each.
++    void sceDevctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        const std::string name = readPs2CStringBounded(rdram, runtime, getRegU32(ctx, 4), 64);
++        const uint32_t cmd = getRegU32(ctx, 5);
++        const auto starts = [&](const char *prefix) { return name.rfind(prefix, 0) == 0; };
++        int32_t result = -19;
++        if (starts("hdd"))
++            result = cmd == 0x4807u ? 3 : -19;
++        else if (starts("dev9x") || starts("pfs") || starts("cdrom"))
++            result = 0;
++        static std::mutex logMutex;
++        static std::unordered_set<std::string> logged;
++        {
++            std::lock_guard<std::mutex> lock(logMutex);
++            if (logged.insert(name + ":" + std::to_string(cmd)).second)
++                std::cerr << "[fileio] sceDevctl(\"" << name << "\", 0x" << std::hex << cmd << std::dec << ") = " << result
++                          << std::endl;
++        }
++        setReturnS32(ctx, result);
++    }
++
++    // sceMount(mountpoint, blockdev, flag, arg, arglen): no hard disk drive, so no PFS partition mounts (-19).
++    void sceMount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        std::cerr << "[fileio] sceMount(\"" << readPs2CStringBounded(rdram, runtime, getRegU32(ctx, 4), 64) << "\", \""
++                  << readPs2CStringBounded(rdram, runtime, getRegU32(ctx, 5), 96) << "\") = -19 (no HDD)" << std::endl;
++        setReturnS32(ctx, -19);
++    }
++
+     void sceIoctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         const int32_t cmd = static_cast<int32_t>(getRegU32(ctx, 5));
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.h b/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.h
+index dc9268f..32cb25b 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/FileIO.h
+@@ -18,6 +18,8 @@ namespace ps2_stubs
+     void sceFsInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceFsReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceIoctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++    void sceDevctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++    void sceMount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+diff --git a/ps2xTest/src/ps2_runtime_io_tests.cpp b/ps2xTest/src/ps2_runtime_io_tests.cpp
+index 1a8f98f..f0545de 100644
+--- a/ps2xTest/src/ps2_runtime_io_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_io_tests.cpp
+@@ -168,6 +168,33 @@ void register_ps2_runtime_io_tests()
+ {
+     MiniTest::Case("PS2RuntimeIO", [](TestCase &tc)
+     {
++        tc.Run("sceDevctl and sceMount answer as a PS2 with no hard disk drive", [](TestCase &t)
++        {
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            const auto devctl = [&](const char *name, uint32_t cmd) {
++                std::memcpy(rdram.data() + 0x1000u, name, std::strlen(name) + 1u);
++                R5900Context ctx{};
++                setRegU32(ctx, 4, 0x1000u);
++                setRegU32(ctx, 5, cmd);
++                ps2_stubs::sceDevctl(rdram.data(), &ctx, nullptr);
++                return getRegS32(&ctx, 2);
++            };
++            // Resident Evil Outbreak's boot (0x1BB420 / 0x1BBA60): HDIOC_STATUS on hdd0: = 3 is "no drive", the only
++            // answer it continues from silently; a negative errno would mean "drive present".
++            t.Equals(devctl("hdd0:", 0x4807u), 3, "hdd0: HDIOC_STATUS = 3 (no drive)");
++            t.Equals(devctl("hdd0:", 0x4802u), -19, "other hdd0: commands: no such device");
++            t.Equals(devctl("dev9x:", 0x4402u), 0, "the network adapter's own device succeeds");
++            t.Equals(devctl("cdrom0:", 0x4328u), 0, "cdrom0: power-off control succeeds");
++
++            std::memcpy(rdram.data() + 0x1000u, "pfs0:", 6u);
++            std::memcpy(rdram.data() + 0x1100u, "hdd0:PP.SLPM-65428..NETBIO", 27u);
++            R5900Context ctx{};
++            setRegU32(ctx, 4, 0x1000u);
++            setRegU32(ctx, 5, 0x1100u);
++            ps2_stubs::sceMount(rdram.data(), &ctx, nullptr);
++            t.IsTrue(getRegS32(&ctx, 2) < 0, "no PFS partition mounts");
++        });
++
+         tc.Run("ROM0 ROMVER is exposed as the 14-byte firmware pseudo-file", [](TestCase &t)
+         {
+             TestContext test;
+-- 
+2.46.2.windows.1
+

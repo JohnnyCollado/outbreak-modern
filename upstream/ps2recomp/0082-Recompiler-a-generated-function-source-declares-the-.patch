@@ -1,0 +1,221 @@
+From 945beccce468d1f2f85198e53630a0d773c78730 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 01:46:59 -0400
+Subject: [PATCH 82/83] Recompiler: a generated function source declares the
+ recompiled functions and stubs it calls itself (every call is
+ <name>_0x<addr>(rdram)) instead of including the module-wide function and
+ stub headers, and the runner's PCH no longer holds those headers, so a change
+ to the function or stub list rebuilds only the sources that call the changed
+ name
+
+---
+ ps2xRecomp/src/lib/function_emitter.cpp | 64 +++++++++++++++++++------
+ ps2xRuntime/CMakeLists.txt              | 13 ++---
+ ps2xTest/src/code_generator_tests.cpp   | 47 ++++++++++++++++--
+ ps2xTest/src/ps2_recompiler_tests.cpp   |  7 ++-
+ 4 files changed, 99 insertions(+), 32 deletions(-)
+
+diff --git a/ps2xRecomp/src/lib/function_emitter.cpp b/ps2xRecomp/src/lib/function_emitter.cpp
+index fb7c7ab..5729537 100644
+--- a/ps2xRecomp/src/lib/function_emitter.cpp
++++ b/ps2xRecomp/src/lib/function_emitter.cpp
+@@ -7,8 +7,11 @@
+ #include "ps2recomp/types.h"
+ 
+ #include <algorithm>
++#include <cctype>
++#include <set>
+ #include <sstream>
+ #include <stdexcept>
++#include <string_view>
+ #include <unordered_set>
+ 
+ namespace ps2recomp
+@@ -40,20 +43,8 @@ namespace ps2recomp
+         std::stringstream ss;
+         cg.m_currentFunctionName = function.name;
+ 
+-        if (useHeaders)
+-        {
+-            ss << "#include <stdexcept>\n";
+-            ss << "#include \"ps2_runtime_macros.h\"\n";
+-            ss << "#include \"ps2_runtime_api.h\"\n";
+-            ss << "#include <" << cg.functionsHeaderName() << ">\n";
+-            ss << "#include <" << cg.stubsHeaderName() << ">\n\n";
+-            ss << "#include \"ps2_syscalls.h\"\n";
+-            ss << "#include \"ps2_stubs.h\"\n\n";
+-            ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
+-            ss << "#include \"ps2_log.h\"\n";
+-            ss << "#endif\n\n";
+-        }
+-
++        // With useHeaders, the includes and the declarations of the functions this one names go in front of the body
++        // at the end (see there).
+         CodeGenerator::AnalysisResult analysisResult = cg.collectInternalBranchTargets(function, instructions);
+         std::vector<uint32_t> resumeTargets(analysisResult.resumeEntryPoints.begin(),
+                                             analysisResult.resumeEntryPoints.end());
+@@ -234,6 +225,49 @@ namespace ps2recomp
+         }
+ 
+         ss << "}\n";
+-        return ss.str();
++        if (!useHeaders)
++            return ss.str();
++
++        // The file declares the recompiled functions and stubs it calls itself, instead of including the module's
++        // whole function and stub headers: every generated name ends in "_0x<address>", both headers hold only those
++        // declarations, and a call is always "<name>(rdram" (locals such as branch_taken_0x... are never called). A
++        // change to the function or stub list (a stub dropped, a function added) then changes only the files that
++        // call it, so a build recompiles those, not every file of the module.
++        const std::string body = ss.str();
++        std::set<std::string> named;
++        const auto isIdent = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
++        for (size_t i = 0; i < body.size();)
++        {
++            if (!isIdent(body[i]) || std::isdigit(static_cast<unsigned char>(body[i])))
++            {
++                ++i;
++                continue;
++            }
++            size_t end = i;
++            while (end < body.size() && isIdent(body[end]))
++                ++end;
++            const std::string_view word(body.data() + i, end - i);
++            const size_t marker = word.rfind("_0x");
++            if (marker != std::string_view::npos && marker > 0 && marker + 3 < word.size() &&
++                std::all_of(word.begin() + static_cast<std::ptrdiff_t>(marker + 3), word.end(),
++                            [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; }) &&
++                body.compare(end, 6, "(rdram") == 0)
++                named.emplace(word);
++            i = end;
++        }
++
++        std::stringstream out;
++        out << "#include <stdexcept>\n";
++        out << "#include \"ps2_runtime_macros.h\"\n";
++        out << "#include \"ps2_runtime_api.h\"\n\n";
++        out << "#include \"ps2_syscalls.h\"\n";
++        out << "#include \"ps2_stubs.h\"\n\n";
++        out << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
++        out << "#include \"ps2_log.h\"\n";
++        out << "#endif\n\n";
++        for (const std::string &name : named)
++            out << "void " << name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
++        out << "\n" << body;
++        return out.str();
+     }
+ }
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index e890d2f..7ec2511 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -501,20 +501,15 @@ endif()
+ 
+ if(PS2X_ENABLE_RUNNER_PCH)
+     # Only what generated code includes: never ps2_runtime.h, or every generated file
+-    # would rebuild after a change to a runtime-internal header.
++    # would rebuild after a change to a runtime-internal header. Nor the generated
++    # ps2_recompiled_functions.h / ps2_recompiled_stubs.h: function sources declare what they
++    # call themselves, so in the PCH those headers made every change to the function or stub
++    # list rebuild every unit that uses it.
+     set(PS2X_RUNNER_PCH_HEADERS
+         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime_macros.h"
+         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime_api.h"
+     )
+ 
+-    foreach(PS2X_RUNNER_GENERATED_HEADER IN ITEMS
+-        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_recompiled_functions.h"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_recompiled_stubs.h")
+-        if(EXISTS "${PS2X_RUNNER_GENERATED_HEADER}")
+-            list(APPEND PS2X_RUNNER_PCH_HEADERS "${PS2X_RUNNER_GENERATED_HEADER}")
+-        endif()
+-    endforeach()
+-
+     list(APPEND PS2X_RUNNER_PCH_HEADERS
+         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_syscalls.h"
+         "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_stubs.h"
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 5909d58..729ebf3 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -196,16 +196,55 @@ void register_code_generator_tests()
+         const std::string generated = gen.generateFunction(func, {makeNop(func.start)}, true);
+         const std::string registration = gen.generateFunctionRegistration({func}, {});
+ 
+-        t.IsTrue(generated.find("#include <ps2_recompiled_functions.h>") != std::string::npos,
+-                 "function sources must resolve declarations through the configured include path");
+-        t.IsTrue(generated.find("#include <ps2_recompiled_stubs.h>") != std::string::npos,
+-                 "function sources must resolve stub declarations through the configured include path");
++        // A function source declares what it calls itself (no module-wide header), so a change to the function or
++        // stub list rebuilds only the sources that call the changed name.
++        t.IsTrue(generated.find("_recompiled_functions.h") == std::string::npos,
++                 "function sources must not include the module-wide function header");
++        t.IsTrue(generated.find("_recompiled_stubs.h") == std::string::npos,
++                 "function sources must not include the module-wide stub header");
+         t.IsTrue(registration.find("#include <ps2_recompiled_functions.h>") != std::string::npos,
+                  "the registration source must use the same unambiguous declaration header");
+         t.IsTrue(registration.find("#include <ps2_recompiled_stubs.h>") != std::string::npos,
+                  "the registration source must use the same unambiguous stub header");
+     });
+ 
++    tc.Run("a function source declares exactly the functions it calls", [](TestCase &t) {
++        Function caller;
++        caller.name = "caller";
++        caller.start = 0x4000;
++        caller.end = 0x4008;
++        caller.isRecompiled = true;
++
++        Function target;
++        target.name = "target";
++        target.start = 0x5000;
++        target.end = 0x5010;
++        target.isRecompiled = true;
++
++        Instruction j{}; // a tail jump to another function's start: a direct call in the generated code
++        j.address = 0x4000;
++        j.opcode = OPCODE_J;
++        j.target = (0x5000u >> 2) & 0x3FFFFFFu;
++        j.hasDelaySlot = true;
++        j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFFu);
++
++        std::vector<Section> sections = {{".text", 0x4000u, 0x2000u, 0u, true, false, false, true, nullptr}};
++        CodeGenerator gen({}, sections);
++        gen.setRenamedFunctions({{0x4000u, "caller_0x4000"}, {0x5000u, "target_0x5000"}});
++        const std::string generated = gen.generateFunction(caller, {j, makeNop(0x4004)}, true);
++
++        const bool calls = generated.find("target_0x5000(rdram") != std::string::npos;
++        t.IsTrue(calls, "the tail jump is a direct call");
++        t.IsTrue(!calls || generated.find("void target_0x5000(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);") !=
++                               std::string::npos,
++                 "the called function is declared in the file");
++        t.IsTrue(generated.find("void caller_0x4000(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);") ==
++                     std::string::npos,
++                 "the function itself is not declared (it is not called)");
++        t.IsTrue(generated.find("void branch_taken") == std::string::npos && generated.find("void label_") == std::string::npos,
++                 "locals and labels are never declared as functions");
++    });
++
+     tc.Run("unsigned integer loads use explicit zero extension", [](TestCase &t) {
+         CodeGenerator gen({}, {});
+         const std::string lbu = gen.translateInstruction(makeIType(0x8F10, OPCODE_LBU, 1, 2, 0x10));
+diff --git a/ps2xTest/src/ps2_recompiler_tests.cpp b/ps2xTest/src/ps2_recompiler_tests.cpp
+index 9f6dbca..19ffe64 100644
+--- a/ps2xTest/src/ps2_recompiler_tests.cpp
++++ b/ps2xTest/src/ps2_recompiler_tests.cpp
+@@ -1545,10 +1545,9 @@ void register_ps2_recompiler_tests()
+                 t.IsTrue(header.find("void demo_func_00540050_0x540050(") != std::string::npos,
+                          "the module header declares prefixed names");
+                 const std::string code = readFile(outputPath / "demo_func_00540050_0x540050.cpp");
+-                t.IsTrue(code.find("#include <demo_recompiled_functions.h>") != std::string::npos,
+-                         "module code includes the module's own header");
+-                t.IsTrue(code.find("<ps2_recompiled_functions.h>") == std::string::npos,
+-                         "module code does not include the main ELF's header");
++                t.IsTrue(code.find("_recompiled_functions.h") == std::string::npos &&
++                             code.find("_recompiled_stubs.h") == std::string::npos,
++                         "module code includes neither the module's nor the main ELF's whole headers");
+             }
+ 
+             std::error_code removeError;
+-- 
+2.46.2.windows.1
+

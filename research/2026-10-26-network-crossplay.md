@@ -266,6 +266,27 @@ Read in `C:\ob\splat\SLPM_654.28` (the splat tree is the English-patched build, 
   server ("Name is already registered."), up to 3 ID/HN per account. Inferred: the list comes from the server, so
   `ob_server` can pre-register the Player name as the account's first HN, and the player only picks it.
 
+### 7.5 The hard disk install (2026-10-27)
+
+Read in `C:\ob\splat\SLPM_654.28\en\main\text.s` and the overlays; [seen] = read in code, [inferred] = reasoning.
+
+- **Optional, not required.** With a network adapter the boot (0x1BB420) loads DEV9/ATAD/HDD/PFS, asks
+  `sceDevctl("hdd0:", 0x4807)` (drive status) and tries `sceMount("pfs0:", "hdd0:PP.SLPM-65428..NETBIO,…")`. Only a
+  status of **3 (no drive)** continues from DVD with no message; a negative error means "drive present, not
+  installed" [seen: 0x1BBA60 table]. PS2Recomp 0083 answers 3.
+- **What an install copies:** one file, the disc's `NETBIO00.DAT` (904,636,416 bytes) to `pfs0:netbio00.dat`, plus a
+  PS2 browser icon and jacket images (`pfs0:/res/…`). NETBIO01/02 stay on the disc [seen].
+- **How it is used:** if mounted and the HDD copy's size equals the disc's (the only check found), the loader's
+  room-archive path becomes `HST:pfs0:` for that one archive [seen: 0x1BC600, `fsinit.c`]. No other behaviour or
+  timing difference found [unverified: not searched exhaustively]. Its benefit on a PS2 was load speed; our port
+  already reads the disc image from local storage.
+- **Online:** join/create messages carry 0x10000 (DVD) or 0x20000 (HDD); rooms can be DVD-only or HDD-only, and a DVD
+  player is refused an HDD-only room with an error code [seen: netwk 128766-128782, 130255-130299]. Matches
+  Bioserver1's room load type (`LOAD_DVDROM` 1, `LOAD_HARDSK` 2).
+- **Faking an install without emulating a drive** would need: status 0, a mount that succeeds (repeatably), unmount,
+  and `pfs0:netbio00.dat` opened, sized and read from the disc file. No drive image, no IOP disk drivers.
+  Worth it only for HDD-only rooms; between our own clients the server could treat both types alike.
+
 ## 6. Open questions
 
 1. ~~Lockstep or state sync~~: state sync (section 7.1). Left: confirm non-owners only apply enemy state; the

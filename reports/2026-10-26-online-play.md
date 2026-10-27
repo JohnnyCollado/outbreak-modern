@@ -122,6 +122,37 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Effect:** none seen (memory cards work); sio2man probably doesn't wait on those interrupts.
 - **Action:** 0081 uses 0x29 for DEV9; 0071 left as is, noted here. Check against ps2sdk before changing it.
 
+### 11. A stub-list change rebuilt half the runner (21 minutes)
+
+- **Seen:** dropping one stub (entry 9) rebuilt 454 of 871 unity batches, 1,271 s; "headers: copied 1".
+- **Found by:** every generated function file included the module-wide `*_recompiled_functions.h` (5,369 lines) and
+  `*_recompiled_stubs.h`; the unity batches are alphabetical, so main-ELF files sit in most batches.
+- **First fix, not enough:** PS2Recomp 0082's generator change (each file declares the functions it calls: calls are
+  always `<name>_0x<addr>(rdram`; `branch_taken_0x…` locals are not functions, 99,711 of them, so matching on the
+  call form matters). The same stub change still rebuilt 454 batches, 1,265 s.
+- **Cause:** the runner's precompiled header (`ps2xRuntime/CMakeLists.txt`, `PS2X_RUNNER_PCH_HEADERS`) also held
+  both generated headers, so any change to them rebuilt every batch using the PCH.
+- **Fix:** 0082 also drops them from the PCH (only the registration files include them now, directly). Folded into
+  the same patch (amended in `C:\ob\net-up`, no interactive rebase).
+- **Evidence:** ps2x 557/557 with, 554/557 without. Measured (`.run/spike/net-measure.sh`, `_sceFsSemInit` stub on/off):
+  after the PCH change's own full build (405 batches, 1,319 s), the first stub change still rebuilt 454 batches
+  (1,193 s: batches not rebuilt by that baseline still had dependency records from the old PCH), its revert 2 batches
+  (230 s); repeated, both directions 2 batches, 221 s and 240 s. Was 454 batches, 1,271 s.
+- **Still slow-ish:** the ~3.5 min left is the runner's link of ~14,500 objects (plus re-globbing); under the
+  5-minute ceiling, and the floor for any change. A candidate for later (incremental link, fewer objects).
+- **Take-away:** a header in a PCH is included by every unit, whatever the sources say; check the PCH list first.
+
+### 12. The boot's HDD check, answered as "no drive"
+
+- **Seen:** entry 9: `sceDevctl("hdd0:", 0x4807)` waited forever for the IOP file service.
+- **Found by:** reading the game's sceDevctl (0x11B0E0-0x11B184: semaphore, RPC 0x17, wait) and its HDD check
+  (0x1BB420, decision table 0x1BBA60; research 7.5): only status 3 ("no drive") continues silently; a negative error
+  means "drive present".
+- **Fix:** PS2Recomp 0083: `sceDevctl` and `sceMount` as runtime HLE (`hdd*` 0x4807 = 3, other HDD commands and
+  mounts -19, `dev9x:`/`pfs:`/`cdrom0:` 0); the analyzer makes them stubs because they are in `ps2_call_list.h`.
+- **Evidence:** adapter-on boot, 90 s: `[fileio] sceDevctl("hdd0:", 0x4807) = 3`, `sceMount(...) = -19 (no HDD)`,
+  then USBD/USBKB load (17 modules) and the same disc files and overlays as single player; ps2x 558/558.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
@@ -136,9 +167,11 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - S1 done: `native/pcsx2_dev9` builds; tests 15/15 (DHCP offer with address and DNS server, INTC 13 on receive,
   DNS host override, DMA 8 refusal). S2 patch done: PS2Recomp 0081 (provisional number), IOP tests 5/5 suites; the
   runner with `PS2X_DEV9=pcsx2` finds the adapter ("dev9: CXD9611 detected").
-- Open: the boot's HDD check with an adapter (entry 9 part 2); then the network menu (S3). ps2x_tests and the gate
-  not yet run in the net trees (ps2x_tests needs a tools tree from `C:\ob\net-src`).
-- Open: a stub-list change rebuilds every game unit (21 min): build-setup defect (entry 9).
+- Done: the boot's HDD check with an adapter (entry 12). Next: the network menu (S3). The gate not yet run in the
+  net trees; ps2x 558/558 in `C:\ob\net-t`.
+- Build defect (entry 11): fixed by 0082; a stub change now rebuilds 2 batches in ~4 min (was 454, 21 min).
+- Next: the network menu (S3; Bioserver1 in Docker as the reference needs the developer's "proceed"), and whether to
+  fake an installed HDD (research 7.5: only for HDD-only rooms).
 - mbedTLS on a real device and against the PS2's actual ClientHello: S3 / S6.
 
 ## Useful for other developers
