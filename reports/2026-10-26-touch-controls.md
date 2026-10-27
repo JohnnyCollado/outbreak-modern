@@ -135,7 +135,7 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
   "[ui] volume 0% applied" right after "AUDIO: Device initialized".
 - **Take-away:** a setting applied "at start-up" must wait for the device it drives.
 
-### 10. Game speed follows the frame rate (catch-up bursts) - found, not fixed yet
+### 10. Game speed followed the frame rate (catch-up bursts)
 
 - **Seen:** the developer (OnePlus 13): the frame rate swings between about 45 and above 60, and the game's speed
   with it (caught in a window by a zombie, then healed almost at once).
@@ -143,7 +143,10 @@ the native port yet (both menus say "coming later"), so only the Classic layouts
   1933-1939), an absolute schedule; after a slow stretch the missed VBlanks are all due and run back to back, faster
   than 60 per second, until the schedule is caught up (no limit on the debt). The game's logic counts VBlanks, so it
   runs fast during the burst. The period is also 60.00 Hz, not NTSC's 59.94 (0.1 %).
-- **Next:** a plan for the developer (cap the catch-up; measure the dips on the phone).
+- **Fix:** PS2Recomp patch 0085 (developer: "Do the pacing fix first"): a VBlank more than two periods late restarts the
+  schedule from now (a slow stretch slows the game, as on a PS2, and is never made up); VBlank at 59.94 Hz. Test: after a
+  300 ms guest stall, 21 VBlanks ran in the next 100 ms without the patch, at most 9 with it.
+- **Still open:** the dips themselves (below 50 fps on the OnePlus 13): to be measured on the phone.
 
 ## Mistakes and corrections
 

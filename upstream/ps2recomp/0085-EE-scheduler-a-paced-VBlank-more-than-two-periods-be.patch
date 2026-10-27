@@ -1,0 +1,160 @@
+From dc994defdf8161ee44735505f681fe6c17918b07 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 02:55:44 -0400
+Subject: [PATCH] EE scheduler: a paced VBlank more than two periods behind the
+ wall clock restarts the schedule from now instead of being caught up by a
+ burst of VBlanks (the game ran faster than real time after every slow
+ stretch); pacingRestarts(); VBlank at NTSC's 59.94 Hz
+
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h |  4 ++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp | 25 +++++++++--
+ ps2xTest/src/ps2_gs_external_tests.cpp     | 49 ++++++++++++++++++++++
+ 3 files changed, 74 insertions(+), 4 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 1d35c83..e060814 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -284,6 +284,9 @@ public:
+     // GS's frame queue) allow. A test-speed switch; default true. Set before reset.
+     void setPaced(bool paced) noexcept { m_paced = paced; }
+     [[nodiscard]] bool paced() const noexcept { return m_paced; }
++    // Patch 0085: times a paced VBlank fell more than two periods behind the wall clock and the schedule restarted from
++    // now (no catch-up burst). Any thread.
++    [[nodiscard]] uint64_t pacingRestarts() const noexcept { return m_pacingRestarts.load(std::memory_order_relaxed); }
+     // Patch 0077: the host's pause (a menu over the game). setHeld(true), from any thread, parks the EE executor at
+     // its next checkpoint or wait: no guest code, events, EE timers or IOP cycles run, so guest time stands still.
+     // setHeld(false) resumes it, with the paced host deadlines moved forward by the time held (no burst of vsyncs to
+@@ -474,6 +477,7 @@ private:
+     PS2DiagHooks *m_diag = nullptr;
+     uint64_t m_pacingWaitNs = 0;
+     bool m_paced = true; // setPaced
++    std::atomic<uint64_t> m_pacingRestarts{0}; // pacingRestarts
+ 
+     // setHeld (patch 0077): requested by the host, acknowledged by the executor in parkIfHeld (both under m_eventMutex).
+     void parkIfHeld();
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 97290cf..5ae59f1 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -37,8 +37,13 @@ namespace
+     constexpr uint32_t WEF_OR = 0x01u;
+     constexpr uint32_t WEF_CLEAR = 0x10u;
+     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
+-    constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
++    // NTSC: 59.94 fields a second (60000/1001), 16 683.3 us each (patch 0085; was 60.00 Hz, 16 667 us).
++    constexpr auto kVBlankPeriod = std::chrono::nanoseconds(16683333);
+     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
++    // Paced: how far behind the wall clock VBlank may fall and still be caught up (patch 0085). Within it, a late VBlank
++    // is followed by the next one sooner (smooth pacing through jitter); past it the schedule restarts from now, so a
++    // slow stretch slows the game as on a PS2 instead of being made up by a burst of VBlanks faster than real time.
++    constexpr auto kMaxVBlankCatchUp = 2 * kVBlankPeriod;
+     // setPaced(false): a host deadline that is always past (clock epoch + 1 ns; not the epoch, which
+     // processDueDeadlines uses as "none"; not time_point::min(), whose distance to now overflows in wait_until).
+     constexpr auto kUnpacedHostDeadline = std::chrono::steady_clock::time_point{} + std::chrono::nanoseconds(1);
+@@ -59,7 +64,7 @@ namespace
+         return std::chrono::seconds(wholeSeconds) + std::chrono::nanoseconds(remainingNanoseconds);
+     }
+ 
+-    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
++    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16683u);
+     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
+     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
+ 
+@@ -1931,11 +1936,23 @@ void EeScheduler::processDueDeadlines()
+         {
+             if (scheduled.event.type == EeEventType::VBlankStart)
+             {
++                // Paced and far behind the wall clock (patch 0085): the next VBlank is one period from now, not from
++                // where this one should have been, so no burst of overdue VBlanks follows a slow stretch.
++                std::chrono::steady_clock::time_point base = scheduled.hostDeadline;
++                if (m_paced && base != kUnpacedHostDeadline && base != std::chrono::steady_clock::time_point{})
++                {
++                    const auto now = std::chrono::steady_clock::now();
++                    if (now - base > kMaxVBlankCatchUp)
++                    {
++                        base = now;
++                        m_pacingRestarts.fetch_add(1u, std::memory_order_relaxed);
++                    }
++                }
+                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
+-                              scheduled.hostDeadline + kVBlankDuration,
++                              base + kVBlankDuration,
+                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
+                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
+-                              scheduled.hostDeadline + kVBlankPeriod,
++                              std::chrono::time_point_cast<std::chrono::steady_clock::duration>(base + kVBlankPeriod),
+                               EeEvent{EeEventType::VBlankStart, 0, 0});
+             }
+             processEvent(scheduled.event);
+diff --git a/ps2xTest/src/ps2_gs_external_tests.cpp b/ps2xTest/src/ps2_gs_external_tests.cpp
+index 4ecf7ae..83ce19f 100644
+--- a/ps2xTest/src/ps2_gs_external_tests.cpp
++++ b/ps2xTest/src/ps2_gs_external_tests.cpp
+@@ -420,6 +420,32 @@ namespace
+         ee.waitVSync(ee.currentVSyncTick());
+     }
+ 
++    // Patch 0085: the guest is slow for one frame (300 ms, about 18 VBlank periods), then waits vsyncs as usual; each
++    // resume's time is recorded.
++    std::vector<std::chrono::steady_clock::time_point> s_stallSeen;
++    std::chrono::steady_clock::time_point s_stallEnd{};
++    constexpr uint32_t kStallAt = 10u;
++    constexpr uint32_t kStallVSyncs = 30u;
++
++    void stallDrive(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        EeScheduler &ee = runtime->eeScheduler();
++        s_stallSeen.push_back(std::chrono::steady_clock::now());
++        if (s_stallSeen.size() > kStallVSyncs)
++        {
++            ctx->pc = 0u;
++            runtime->requestStop();
++            return;
++        }
++        if (s_stallSeen.size() == kStallAt)
++        {
++            std::this_thread::sleep_for(std::chrono::milliseconds(300)); // a slow frame on the host
++            s_stallEnd = std::chrono::steady_clock::now();
++        }
++        ctx->pc = kDrivePc;
++        ee.waitVSync(ee.currentVSyncTick());
++    }
++
+     // Wall milliseconds for kPacingVSyncs vsyncs; the vsync ticks seen in seen.
+     double runPacing(bool paced, std::vector<uint64_t> &seen)
+     {
+@@ -760,6 +786,29 @@ void register_ps2_gs_external_tests()
+             t.IsTrue(within50ms <= 4u, "no catch-up burst: " + std::to_string(within50ms) + " vsyncs in the first 50 ms");
+         });
+ 
++        tc.Run("paced: a slow frame is not made up by a burst of VBlanks (patch 0085)", [](TestCase &t)
++        {
++            // Before 0085 each VBlank was due one period after the last one's deadline: after a 300 ms stall the ~18
++            // missed VBlanks ran back to back (the game ran faster than real time). Now at most two periods are caught up.
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            PS2Runtime runtime;
++            runtime.registerFunction(kDrivePc, stallDrive);
++            s_stallSeen.clear();
++            s_stallEnd = {};
++            R5900Context mainContext{};
++            mainContext.pc = kDrivePc;
++            runtime.eeScheduler().reset(rdram.data(), mainContext);
++            runtime.eeScheduler().run();
++            t.Equals(s_stallSeen.size(), static_cast<size_t>(kStallVSyncs + 1u), "every wait resumed");
++            size_t within100ms = 0u;
++            for (const auto &at : s_stallSeen)
++                if (at >= s_stallEnd && at - s_stallEnd < std::chrono::milliseconds(100))
++                    ++within100ms;
++            // Real time is 6 VBlanks per 100 ms; two caught up on top; a burst would be well over ten.
++            t.IsTrue(within100ms <= 9u, "no catch-up burst: " + std::to_string(within100ms) + " vsyncs in the first 100 ms after the stall");
++            t.IsTrue(runtime.eeScheduler().pacingRestarts() >= 1u, "the schedule restarted from now");
++        });
++
+         tc.Run("unpaced (PS2X_PACING=0): the same vsync ticks, without waiting for the wall clock", [](TestCase &t)
+         {
+             std::vector<uint64_t> paced, unpaced;
+-- 
+2.46.2.windows.1
+
