@@ -1,0 +1,107 @@
+From aa86eda2cd7550dea74b9d33e8d2b01e556072b8 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 08:36:33 -0400
+Subject: [PATCH 93/94] IOP cdvdman: sceCdRI (22) returns a fixed console ID
+
+sceCdRI(id, result) reads the console's 8-byte i.Link ID. Sony's NETCNF keys the encoding of its memory-card
+network settings (ifcNNN.dat, devNNN.dat) on it and fails to read them unless it returns 1 with *result 0
+(ps2sdk iop/network/netcnf netcnf.c do_read_ilink_id). Was an unhandled import (returning 0). One fixed ID
+(eight 0xAA bytes) for every console, so settings written by one install read on any.
+
+Test: iop_emulator_tests, a module calling sceCdRI with *result preset to -1 gets 0xAA bytes, result 0,
+return 1. Fails without: IOP 4/5.
+---
+ ps2xIOP/src/emulator/imports/iop_cdvd.cpp | 11 ++++++
+ ps2xIOP/tests/iop_emulator_tests.cpp      | 47 +++++++++++++++++++++++
+ 2 files changed, 58 insertions(+)
+
+diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+index a7286c3..5ce5776 100644
+--- a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+@@ -281,6 +281,17 @@ namespace ps2x::iop::detail
+                 cpu.gpr[2] = kCdvdReadyComplete;
+                 return true;
+ 
++            case 22: // sceCdRI(u8 *id, u32 *result): the console's i.Link ID (8 bytes) from the mechacon. Sony's
++                     // netcnf keys its memory-card network settings with it (ps2sdk netcnf.c do_read_ilink_id: needs
++                     // return 1, *result 0, else it retries 20 times and fails). One fixed ID for every console here,
++                     // eight 0xAA bytes, so settings written by one install read on any.
++                for (uint32_t i = 0; a0 != 0u && i < 8u; ++i)
++                    memory.write8(a0 + i, 0xAAu);
++                if (a1 != 0u)
++                    memory.write32(a1, 0u);
++                cpu.gpr[2] = 1u;
++                return true;
++
+             case 28: // sceCdStatus
+                 cpu.gpr[2] = kCdvdStatusPause;
+                 return true;
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 4738cc7..a53cf38 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -337,6 +337,47 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset + 0x80u, imports, sizeof(imports));
+     }
+ 
++    // A module reading the console ID: sceCdRI(buf, &result) with result preset to -1; returns buf[0] | buf[7] << 8 |
++    // (result & 0xFF) << 16 | sceCdRI's return << 24 (NETCNF keys its settings files' encoding on this ID).
++    void writeCdRiIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00015000u;
++        constexpr uint32_t tableAddress = loadAddress + 0x80u;
++        constexpr uint32_t stub22 = tableAddress + 20u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x100u; program.memsz = 0x100u; program.flags = 7u; program.align = 4u;
++        const uint32_t jal22 = 0x0C000000u | ((stub22 >> 2) & 0x03FFFFFFu);
++        const uint32_t code[] = {
++            0x27BDFFE0u, 0xAFBF001Cu,              // addiu sp,-32; sw ra,28(sp)
++            0x2408FFFFu, 0xAFA80010u,              // result (16(sp)) = -1
++            0x27A40008u, jal22, 0x27A50010u,       // sceCdRI(sp+8, sp+16)
++            0x93A80008u, 0x93A9000Fu, 0x8FAA0010u, 0u, // lbu buf[0]; lbu buf[7]; lw result (+ load delay)
++            0x00094A00u, 0x00021600u, 0x314A00FFu, 0x000A5400u,
++            0x00481025u, 0x00491025u, 0x004A1025u, // v0 = v0 << 24 | buf[0] | buf[7] << 8 | (result & 0xFF) << 16
++            0x8FBF001Cu, 0u,                       // lw ra (+ load delay)
++            0x03E00008u, 0x27BD0020u,              // jr ra; addiu sp,32
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x64766463u, 0x006E616Du, // "cdvdman"
++            0x03E00008u, 0x24000016u, // 22 sceCdRI
++            0u, 0u,
++        };
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
++        std::memcpy(host.guest.data() + address + codeOffset + 0x80u, imports, sizeof(imports));
++    }
++
+     // writeMinimalIrx's module with a .iopmod header naming it.
+     void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name)
+     {
+@@ -1780,6 +1821,12 @@ int main()
+                     "look_ctype_table must class '7' digit (0x04), 'a' lower+hex (0x42), ' ' space+blank (0x88), and "
+                     "get_ctype_table()['F'] upper+hex (0x41)")) return 1;
+ 
++        // The console ID (sceCdRI): eight fixed bytes, *result 0, return 1.
++        writeCdRiIrx(host, 0x1000u);
++        const ModuleLoadResult cdri = iop.loadModuleBuffer(0x1000u);
++        if (!expect(cdri.handled && static_cast<uint32_t>(cdri.startResult) == 0x0100AAAAu,
++                    "sceCdRI must fill the 8-byte ID (0xAA), clear *result and return 1")) return 1;
++
+         // A module loading another through modload 19 + 8 (Capcom's LOADHIGH.IRX for its network stack).
+         writeArgvIrx(host, 0xA00u);
+         host.files["argv.irx"].assign(host.guest.begin() + 0xA00, host.guest.begin() + 0xA00 + 0x200);
+-- 
+2.46.2.windows.1
+

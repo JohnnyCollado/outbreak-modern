@@ -219,6 +219,20 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Not covered:** sound. With 0090 the CRI ADX driver now reads its arguments (`thpri=39 spucore=1 debug=0`, it prints
   them: "SPU CORE Number = 1"); before it ran on its defaults. Pictures are identical; audio needs a listen.
 
+### 19. The network settings files are scrambled with the console's ID
+
+- **Found by:** reading Sony's netcnf as ps2sdk reimplements it (`iop/network/netcnf/src/netcnf.c`, fetched
+  2026-10-27): `BWNETCNF/` on the card holds an index file and `netNNN.cnf` in plain text, but the interface and
+  device files (`ifcNNN.dat`, `devNNN.dat`) are scrambled with a key made from the console's i.Link ID, which netcnf
+  reads with cdvdman's `sceCdRI` (import 22). Each byte of the ID gives three bit-rotation amounts; every 16-bit word
+  of the file is rotated left by one and inverted.
+- **Problem:** `sceCdRI` was an unhandled import (returning 0), so netcnf would retry 20 times and give up: the game
+  could never read settings, whoever wrote them.
+- **Fix:** PS2Recomp 0093: `sceCdRI` returns one fixed ID (eight 0xAA bytes) on every install, so the files we write
+  read the same everywhere. Also 0094: `sceCdReadClock` (import 24, polled by USBSRCH: 21 warnings per drive) returns
+  the host's local time in BCD like the EE stub already did. IOP tests 5/5; each fails without its patch (4/5).
+- **Next:** write the settings set onto the card image (entry to follow).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
