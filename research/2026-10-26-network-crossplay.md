@@ -240,6 +240,32 @@ options stay visual only, as M7 says). Section 2's maths gaps matter for single-
 - What our own first-release server needs: the lobby (8300, with its user and session database), the relay
   (8690), and DNAS/login answers (in the client's emulated adapter, scope decision in 5b).
 
+### 7.4 Plan step S0.3: the open game-code questions (2026-10-26)
+
+Read in `C:\ob\splat\SLPM_654.28` (the splat tree is the English-patched build, so addresses are that build's).
+
+- **Enemies on non-owners: a hybrid** (seen). The type-8 handler `func_00609590` (90 sub-commands, table
+  `jtbl_0070B400`) writes enemy position, rotation and state bytes. Enemy update functions still run on every
+  client; only the decisions are gated on owning the room (`func_00577BC0`, `func_005B6C20`, `func_0059B5A0`).
+  Inferred: the owner decides, non-owners animate the current state until the next message.
+- **The random seed is shared** (seen). RNG `func_001ADEF0` (x = x·176 mod 0xFF53 on two seeds), called 571 times
+  from GAME (spot-checked). `func_005CE890` sends seed D_23BBA0 in a type-6 message when `func_1AF0A0()` is true
+  (inferred: "I am the session host"); NETAQ writes it on receive. A drift in RNG use between clients would show
+  up only in non-owner cosmetic effects, because owners decide.
+- **Port 8653 is a developer leftover** (seen: only reached with an argument every caller sets to 0; hardcoded LAN
+  addresses 172.16.90.81, 192.168.0.253). Not needed.
+- **A network configuration on the memory card is needed** (seen): NETWK loads `NETCNF.IRX` / `NETCNFIF.IRX` and
+  reads `mc%d:/BWNETCNF/BWNETDCNF`. Without one the game says "In order to play online you need to configure the
+  network settings" and offers its own editor (Hardware, IP Auto/Manual, DNS, Test Connection). DHCP is
+  supported ("IP Address Setup Auto"). Whether we can write that file ourselves depends on its format (Sony's
+  netcnf files may be scrambled; **unverified**).
+- **Network drivers loaded in network mode** (seen): for Ethernet DEVGLUE, AVEDHCP, AVEPPP, then SMAP
+  ("thpri=10", "device 5"), AVEWRAPE, AVETCP, a `dev9` presence check; DEV9 with ATAD/HDD/PFS. So the disc's own
+  SMAP driver sits under ACCESS's stack: route A holds.
+- **Handle name** (seen strings in NETWK): typed in game ("Please enter the Handle Name (HN)"), checked by the
+  server ("Name is already registered."), up to 3 ID/HN per account. Inferred: the list comes from the server, so
+  `ob_server` can pre-register the Player name as the account's first HN, and the player only picks it.
+
 ## 6. Open questions
 
 1. ~~Lockstep or state sync~~: state sync (section 7.1). Left: confirm non-owners only apply enemy state; the
