@@ -9,7 +9,7 @@ L=C:/ob/net-logs
 start=$(date +%s)
 if [ ! -f "$B/build.ninja" ]; then
     vc cmake -S C:/ob/net-up -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_STUDIO=OFF -DPS2X_ENABLE_FFMPEG=OFF \
-        -DFETCHCONTENT_BASE_DIR=C:/ob/t/_deps -DFETCHCONTENT_FULLY_DISCONNECTED=ON > "$L/net-t-configure.log" 2>&1 ||
+        $( [ -d C:/ob/t/_deps ] && echo "-DFETCHCONTENT_BASE_DIR=C:/ob/t/_deps -DFETCHCONTENT_FULLY_DISCONNECTED=ON" ) > "$L/net-t-configure.log" 2>&1 ||
         { echo "configure failed"; tail -20 "$L/net-t-configure.log"; exit 2; }
 fi
 vc cmake --build "$B" -j 14 --target ps2_analyzer ps2_recomp ps2x_tests > "$L/net-t-build.log" 2>&1 ||

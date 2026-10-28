@@ -23,6 +23,28 @@ Everything decided and found is in git on `netplay-research`: the plan (`docs/pl
 amend, export (`format-patch`), sync (`net-up` → `net-src`, keeping the generated `register_functions.cpp`) and
 prove "fails without" (`up-without.sh save|restore`) for PS2Recomp patches.
 
+## Fresh machine: what to install, what to download, what to carry over
+
+Install (vendor sites; versions in `pins.md`): Git for Windows (Git Bash), Visual Studio 2022 Community with the
+C++ workload (MSVC 19.44), CMake 3.30 and Ninja (`winget install Kitware.CMake Ninja-build.Ninja`), Python 3.14
+(`OB_PY` if not on PATH), and for Android only the NDK `27.0.12077973` + SDK through Android Studio. `tools/ob/vc.bat`
+finds vcvars64; set `OB_VCVARS` if VS is elsewhere.
+
+Download (all GitHub, public; the scripts pin the versions):
+
+| What | Command |
+|---|---|
+| PS2Recomp (`C:\ob\up`, branch `outbreak-patches` = `eb8688b` + our patches) | `git clone https://github.com/ran-j/PS2Recomp C:\ob\up; git -C C:\ob\up checkout -b outbreak-patches eb8688b; git -C C:\ob\up am (Get-ChildItem upstream\ps2recomp\00*.patch)` — 0001-0086 for main's tree; the online branch `net-online` adds 0087-0099 in a worktree (`git -C C:\ob\up worktree add C:\ob\net-up -b net-online`) |
+| PCSX2 v2.9.134 + its deps (zstd, shaderc, glslang, SPIRV, zlib, libpng; checksummed) | `bash tools/ob.sh pcsx2-gs` (clones, patches, builds) |
+| mbedTLS 2.28.10 | `git clone --depth 1 --branch v2.28.10 https://github.com/Mbed-TLS/mbedtls.git C:\ob\mbedtls\v2.28.10`, then `tools/net/mbedtls-build.sh` |
+| Outbreak decomp (names only, optional) | `git clone https://github.com/GalaxyNostalgia/Outbreak-decomp C:\ob\decomp-src` at `eb6af38` |
+| PS2Recomp's own CMake dependencies (FetchContent) | downloaded by the first `tools/ob.sh tools` configure into `C:\ob\t\_deps`; `tools/net/net-tools.sh` reuses them when present and downloads otherwise |
+
+Carry over by drive (not downloadable, not in git): the game data (`game_files/` extracted from your disc, or the
+ISO under `ps2_emu/roms/`), the PCSX2 BIOS in `ps2_emu/` if you want the oracle, and `C:\ob\saves-net\Mcd001.ps2`
+(or recreate it: `mcd.py format` + one run of the pad route). Everything under `C:\ob\net-*` is rebuilt from the
+above; the first recompile is the one long build.
+
 ## Running the game to the network menu
 
 `tools/net/net-live.sh 1500` boots hidden with `PS2X_DEV9=pcsx2`, the game's two host names → 127.0.0.2,
