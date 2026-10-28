@@ -889,6 +889,26 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   the start screen with KEVIN and MARK (`z05`), then **both** connect to the relay 8690 and are refused.
 - **So:** two players get from login to a started game together; the relay is the wall for both.
 
+### 52. The relay: two clients play 零下 together on one PC
+
+- **Plan approved by the developer** (2026-10-28, "Yes"): the relay per research note section 5, tests first.
+- **Build:** `native/ob_server/src/relay.{h,cpp}`, one thread with `poll` like the lobby: on connect the GSLOGIN
+  question (`28 01 10 31`, 12-byte header); the answer's session digits (payload 0..9, the answer's pid) → the
+  account → its game number (set by the lobby at the start); then every frame (`RelayStream`, `[length:1][data]`) is
+  copied unchanged to every other player of the same game. Length-0 and players silent for 60 s are dropped; an
+  unknown session or an account not in a game is disconnected. `Server` starts and stops it with the lobby on the
+  same address. Tests first (`tests/relay_tests.cpp`, three scripted clients, two games): 90/98 against a stub,
+  98/98. Commit `b54651e`.
+- **Live (two clients, loopback, the unlocked cards, host 零下):** both clients reach the start screen, then
+  `[relay] 127.0.0.1: … in game 2` and `[relay] 127.0.0.2: … in game 2`; both play the opening cutscene in step
+  (ticks 18 931 and 18 861: shots `r07`), Start on both, both in the subway tunnel with **Kevin and Mark on each
+  screen** (`r08`). Only client 2's pad held Up for 120 frames: on **client 1's screen Mark walked** from the right
+  of the tracks to the middle and turned (`r09-c1-before` → `r09-c1-after`). The relay carries the game.
+- **Not yet checked:** how long the game stays in step (one short walk seen), enemies and items shared, the end of a
+  scenario and the post-game lobby (area 51), more than two players, two PCs on a LAN, Android.
+- **Scripts:** `tools/net/two-clients-to-room.sh` drives both clients from boot to the host's room with the guest
+  joined (the name keyboard steps from entries 47-51).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
