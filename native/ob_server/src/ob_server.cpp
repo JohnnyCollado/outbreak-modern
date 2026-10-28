@@ -14,6 +14,13 @@ namespace ob::server
 		lobby.trace = config.trace;
 		if (!m_lobby.start(m_accounts, lobby, config.bindAddress, config.lobbyPort, error))
 			return false;
+		RelayConfig relay;
+		relay.log = config.log;
+		if (!m_relay.start(m_accounts, relay, config.bindAddress, config.relayPort, error))
+		{
+			m_lobby.stop();
+			return false;
+		}
 
 		WebConfig web;
 		web.lobbyPort = config.lobbyPort;
@@ -28,6 +35,7 @@ namespace ob::server
 		};
 		if (!m_web.start(web, config.bindAddress, config.webPort, error))
 		{
+			m_relay.stop();
 			m_lobby.stop();
 			return false;
 		}
@@ -37,6 +45,7 @@ namespace ob::server
 	void Server::stop()
 	{
 		m_web.stop();
+		m_relay.stop();
 		m_lobby.stop();
 	}
 }

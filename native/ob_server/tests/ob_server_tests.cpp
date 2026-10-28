@@ -31,6 +31,7 @@ using namespace ob::server;
 static int s_fail = 0, s_total = 0;
 void TestLobby();       // lobby_tests.cpp
 void TestServerChain(); // lobby_tests.cpp
+void TestRelay();       // relay_tests.cpp
 void Check(bool ok, const char* what)
 {
 	++s_total;
@@ -383,6 +384,7 @@ int main()
 	TestTlsServer();
 	TestLobby();
 	TestServerChain();
+	TestRelay();
 	std::printf("ob_server: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

@@ -5,6 +5,7 @@
 
 #include "accounts.h"
 #include "lobby.h"
+#include "relay.h"
 #include "tls_server.h"
 
 #include <array>
@@ -38,12 +39,15 @@ namespace ob::server
 		Accounts& accounts() { return m_accounts; }
 		uint16_t webPort() const { return m_web.port(); }
 		uint16_t lobbyPort() const { return m_lobby.port(); }
+		uint16_t relayPort() const { return m_relay.port(); }
 		const LobbyServer& lobby() const { return m_lobby; }
 		const TlsWebServer& web() const { return m_web; }
+		const RelayServer& relay() const { return m_relay; }
 
 	private:
 		Accounts m_accounts;
 		TlsWebServer m_web;
 		LobbyServer m_lobby;
+		RelayServer m_relay;
 	};
 }

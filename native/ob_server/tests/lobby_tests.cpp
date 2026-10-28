@@ -276,6 +276,7 @@ void TestServerChain()
 	config.bindAddress = "127.0.0.1";
 	config.webPort = 0;
 	config.lobbyPort = 0;
+	config.relayPort = 0;
 	std::string error;
 	Check(server.start(config, &error), "the server (login pages + lobby) starts");
 	const std::string top = FetchTls(server.webPort(), 1, 0x16 /* DHE-RSA-3DES */, "/00000002/CRS-top.jsp");

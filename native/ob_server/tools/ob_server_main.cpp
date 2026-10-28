@@ -63,7 +63,7 @@ int main(int argc, char** argv)
 		else
 		{
 			std::cerr << "usage: ob_server [--host a.b.c.d] [--bind a.b.c.d] [--web-port N] [--lobby-port N] "
-						 "[--relay-port N]\n";
+						 "[--relay-port N] [--trace]\n";
 			return 2;
 		}
 	}
@@ -77,7 +77,7 @@ int main(int argc, char** argv)
 	std::cout << "ob_server: login pages on " << server.webPort() << ", lobby on " << server.lobbyPort()
 			  << ", relay address given to players " << int(config.hostAddress[0]) << "." << int(config.hostAddress[1])
 			  << "." << int(config.hostAddress[2]) << "." << int(config.hostAddress[3]) << ":" << config.relayPort
-			  << " (relay: step D). Ctrl+C ends." << std::endl;
+			  << " (relay listening on " << server.relayPort() << "). Ctrl+C ends." << std::endl;
 	std::signal(SIGINT, onSignal);
 	while (!s_stop)
 		std::this_thread::sleep_for(std::chrono::milliseconds(200));
