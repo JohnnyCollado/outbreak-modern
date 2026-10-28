@@ -36,5 +36,24 @@ namespace obui
 	// Copies a .ps2 card (from PCSX2's memcards folder, say) in as <folder>/Mcd001.ps2, replacing it (the caller asks).
 	bool importCard(const std::filesystem::path& src, const std::filesystem::path& folder, std::string* err);
 
+	// Writing (tools/ob/mcd.py format / Card.add_dir): the network settings folder BWNETCNF the game needs before NET
+	// CONNECTION, which the PS2 made with Sony's separate setup program (reports/2026-10-26-online-play.md entry 57).
+	// A missing or all-0xFF card (8,650,752 bytes) becomes an empty formatted one, as mcd.py formats it (the game
+	// accepts it). A formatted card is left alone (true); a card holding anything else is never formatted (false, err).
+	bool formatCardIfBlank(const std::filesystem::path& ps2File, std::string* err);
+	struct CardFile
+	{
+		std::string name;
+		std::vector<uint8_t> data;
+	};
+	// Adds folder `name` with `files` to the root of a formatted card, laid out as MCMAN writes a save (mcd.py
+	// Card.add_dir). False (err) when the card is unformatted or full, or a folder or file of that name is in the root:
+	// nothing is overwritten. The card is written whole through a side file.
+	bool addCardFolder(const std::filesystem::path& ps2File, const std::string& name, const std::vector<CardFile>& files,
+		std::string* err);
+	// A file in a root folder; false when the card, the folder or the file is not there.
+	bool readCardFile(const std::filesystem::path& ps2File, const std::string& folder, const std::string& file,
+		std::vector<uint8_t>& out);
+
 	constexpr const char* kSlotCardNames[2] = {"Mcd001.ps2", "Mcd002.ps2"};
 } // namespace obui

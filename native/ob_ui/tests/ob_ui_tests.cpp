@@ -27,8 +27,10 @@
 #else
 #include <unistd.h>
 #endif
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -453,6 +455,71 @@ static std::vector<uint8_t> MakeFormattedCard()
 	return c;
 }
 
+// Writing cards (formatCardIfBlank, addCardFolder, readCardFile): the BWNETCNF network settings folder the game needs
+// before NET CONNECTION (reports/2026-10-26-online-play.md entry 57), ported from tools/ob/mcd.py format / netcnf.
+static std::vector<uint8_t> ReadAllBytes(const fs::path& p)
+{
+	std::ifstream f(p, std::ios::binary);
+	return std::vector<uint8_t>(std::istreambuf_iterator<char>(f), {});
+}
+
+static void CardWriteTests()
+{
+	const fs::path dir = TempDir("cardwrite");
+	const fs::path card = dir / "Mcd001.ps2";
+	std::string err;
+	Check(obui::formatCardIfBlank(card, &err) && err.empty(), "card write: a missing card is formatted");
+	obui::CardInfo info = obui::readCard(card);
+	Check(info.formatted && info.sizeBytes == 8650752u && info.saves.empty() && info.error.empty(), "card write: formatted, empty");
+	const std::vector<uint8_t> fresh = ReadAllBytes(card);
+	// An all-zero data page carries the ECC of zeros (77 7f 7f per 128 bytes) and four 0xFF (mcd.py raw_page).
+	const std::vector<uint8_t> zeroSpare = {0x77, 0x7F, 0x7F, 0x77, 0x7F, 0x7F, 0x77, 0x7F, 0x7F, 0x77, 0x7F, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF};
+	Check(fresh.size() == 8650752u && std::equal(zeroSpare.begin(), zeroSpare.end(), fresh.begin() + 100 * 528 + 512),
+		"card write: page ECC as mcd.py");
+	Check(std::memcmp(fresh.data() + 0x1C, "1.2.0.0", 7) == 0, "card write: superblock version");
+
+	WriteBytes(card, std::vector<uint8_t>(8650752u, 0xFF));
+	Check(obui::formatCardIfBlank(card, &err) && obui::readCard(card).formatted, "card write: an all-0xFF card is formatted");
+
+	const fs::path game = dir / "game.ps2";
+	WriteBytes(game, MakeFormattedCard());
+	const std::vector<uint8_t> before = ReadAllBytes(game);
+	Check(obui::formatCardIfBlank(game, &err) && ReadAllBytes(game) == before, "card write: a formatted card is left alone");
+	const fs::path junk = dir / "junk.ps2";
+	WriteBytes(junk, std::vector<uint8_t>(8650752u, 0x5A));
+	err.clear();
+	Check(!obui::formatCardIfBlank(junk, &err) && !err.empty() && ReadAllBytes(junk) == std::vector<uint8_t>(8650752u, 0x5A),
+		"card write: a card with unknown data is never formatted");
+
+	// A folder of files, one spanning many clusters (the network icon, 34,840 bytes = 35 clusters of 1 KiB).
+	std::vector<uint8_t> icon(34840);
+	for (size_t i = 0; i < icon.size(); i++)
+		icon[i] = uint8_t(i * 7 + 3);
+	const std::vector<obui::CardFile> files = {{"SYS_NET.ICO", icon}, {"icon.sys", std::vector<uint8_t>(964, 0x11)},
+		{"BWNETCNF", {'0', ',', '1', '\n'}}, {"empty", {}}};
+	Check(obui::addCardFolder(card, "BWNETCNF", files, &err), "card write: folder added");
+	info = obui::readCard(card);
+	Check(info.saves.size() == 1 && info.saves[0] == "BWNETCNF", "card write: the root lists the folder");
+	std::vector<uint8_t> back;
+	bool same = true;
+	for (const obui::CardFile& f : files)
+		same = same && obui::readCardFile(card, "BWNETCNF", f.name, back) && back == f.data;
+	Check(same, "card write: every file reads back as written");
+	Check(!obui::readCardFile(card, "BWNETCNF", "missing", back), "card write: a missing file is not found");
+
+	const std::vector<uint8_t> withFolder = ReadAllBytes(card);
+	err.clear();
+	Check(!obui::addCardFolder(card, "BWNETCNF", files, &err) && !err.empty() && ReadAllBytes(card) == withFolder,
+		"card write: an existing folder is never overwritten");
+	Check(obui::addCardFolder(card, "SECOND", {{"a", std::vector<uint8_t>(3000, 0x22)}}, &err), "card write: a second folder");
+	info = obui::readCard(card);
+	Check(info.saves.size() == 2 && obui::readCardFile(card, "BWNETCNF", "SYS_NET.ICO", back) && back == icon &&
+		obui::readCardFile(card, "SECOND", "a", back) && back == std::vector<uint8_t>(3000, 0x22),
+		"card write: both folders intact");
+	err.clear();
+	Check(!obui::addCardFolder(junk, "X", files, &err) && !err.empty(), "card write: no folder on an unformatted card");
+}
+
 static void CardTests()
 {
 	const fs::path dir = TempDir("cards");
@@ -620,6 +687,7 @@ int main()
 	DiscTests();
 	TriggerTests();
 	CardTests();
+	CardWriteTests();
 	WidescreenTests();
 	TouchTests();
 	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
