@@ -54,7 +54,13 @@ NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. S
 `peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
 Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-28, entry 33)
+## Where it stands (2026-10-28, entry 34)
+
+Entry 34: the connect to 127.0.0.2:443 never leaves the PS2 (no frame after the DNS query; likely its stack keeps
+127.x as loopback), and after ~14 000 status polls the game retries from the start. The server name needs an address
+outside 127.0.0.0/8 that reaches ob_server (decision pending). ob_server now logs each accept and handshake.
+
+Before entry 34:
 
 Entry 33: the game looks up `www01.kddi-mmbb.jp` (the adapter answers 127.0.0.2, logged in `pcsx2-dev9.log` in the
 boot's working dir) and asks the wrapper to connect there (fn 7), then polls the connection status (fn 15) without

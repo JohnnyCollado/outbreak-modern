@@ -18,6 +18,8 @@ namespace ob::server
 		// A new 8-digit session number (10000000..99999999) for the player at this address; the lobby later looks
 		// it up. Set by the server (accounts); tests give their own.
 		std::function<uint32_t(const std::string& clientAddress)> mintSession;
+		// One line per connection event (accepted, handshake result); from the server's thread. Empty = none.
+		std::function<void(const std::string& line)> log;
 	};
 
 	struct WebResponse

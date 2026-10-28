@@ -227,6 +227,8 @@ namespace ob::server
 						  std::to_string(static_cast<unsigned char>(ip[1])) + "." +
 						  std::to_string(static_cast<unsigned char>(ip[2])) + "." +
 						  std::to_string(static_cast<unsigned char>(ip[3]));
+			if (m_config.log)
+				m_config.log("[web] " + address + ": accepted");
 
 			mbedtls_ssl_context ssl;
 			mbedtls_ssl_init(&ssl);
@@ -237,9 +239,20 @@ namespace ob::server
 				if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
 					ok = false;
 			if (!ok)
+			{
 				m_failed++;
+				if (m_config.log)
+				{
+					char hex[16];
+					std::snprintf(hex, sizeof(hex), "-0x%04X", static_cast<unsigned>(-rc));
+					m_config.log("[web] " + address + ": handshake failed " + hex);
+				}
+			}
 			else
 			{
+				if (m_config.log)
+					m_config.log("[web] " + address + ": " + mbedtls_ssl_get_version(&ssl) + " " +
+								 mbedtls_ssl_get_ciphersuite(&ssl));
 				{
 					std::lock_guard<std::mutex> lock(s->lastMutex);
 					s->last = std::string(mbedtls_ssl_get_version(&ssl)) + " " + mbedtls_ssl_get_ciphersuite(&ssl);

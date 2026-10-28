@@ -18,6 +18,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -249,7 +251,14 @@ static void TestTlsServer()
 {
 	TlsWebServer server;
 	std::string error;
-	const bool started = server.start(TestWebConfig(), "127.0.0.1", 0, &error);
+	auto lines = std::make_shared<std::vector<std::string>>();
+	auto linesMutex = std::make_shared<std::mutex>();
+	WebConfig config = TestWebConfig();
+	config.log = [lines, linesMutex](const std::string& line) {
+		std::lock_guard<std::mutex> lock(*linesMutex);
+		lines->push_back(line);
+	};
+	const bool started = server.start(config, "127.0.0.1", 0, &error);
 	Check(started && server.port() != 0, "the TLS web server starts on a free loopback port");
 	if (!started)
 	{
@@ -282,6 +291,18 @@ static void TestTlsServer()
 	Check(server.lastSession().find("TLS-DHE-RSA-WITH-3DES-EDE-CBC-SHA") != std::string::npos,
 		"the server reports the negotiated suite");
 	server.stop();
+	// Each connection is logged when accepted (with its address) and when its handshake ends (protocol or error).
+	bool accepted = false, handshake = false;
+	{
+		std::lock_guard<std::mutex> lock(*linesMutex);
+		for (const std::string& line : *lines)
+		{
+			accepted |= line.find("[web] 127.0.0.1: accepted") != std::string::npos;
+			handshake |= line.find("[web] 127.0.0.1: TLSv1.0 TLS-DHE-RSA-WITH-3DES-EDE-CBC-SHA") != std::string::npos;
+		}
+	}
+	Check(accepted, "the TLS server logs an accepted connection with its address");
+	Check(handshake, "the TLS server logs the handshake's protocol and suite");
 }
 
 int main()

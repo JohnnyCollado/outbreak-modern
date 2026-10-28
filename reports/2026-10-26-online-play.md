@@ -536,6 +536,30 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   send words 8-9; on the adapter side, whether a TCP session is created (PCSX2 `TCP_Session` at DevCon level for one
   run, or netstat during the run).
 
+### 34. The connect to 127.0.0.2:443 never leaves the PS2: a loopback address stays inside its own stack
+
+- **ob_server logs connections (kept):** `WebConfig.log` (set from the server's log, as the lobby's): one line on
+  accept (`[web] <address>: accepted`) and one on the handshake (protocol and suite, or `handshake failed -0x....`).
+  Test first in `native/ob_server/tests`: 70/72 without, 72/72 with.
+- **Run** (same route; temporary prints in `net-src`'s `RPC.cpp`: fn 7/13/15/16/19/22 replies, fn 15 and 44
+  counted; DEV9 log at DevCon level for this run only, put back to info after; netstat every 20 s into
+  `C:\ob\net-logs\netstat-live.txt`):
+  - fn 7 (connect) send word 7 = `0x0200007F` = 127.0.0.2, word 8 = `0x0000BB01` = port 443. Its reply equals its
+    send buffer. fn 15 (status) answers the same words every time (word 7 `0x00020000`, word 8 `0x20000000`);
+    after ~14 000 polls the game closes (fn 13, then 22), NETHTTP goes to steps [11] [12] and starts again at [0]:
+    **that is the second setup of entry 32** (a retry after the connect never completes).
+  - `pcsx2-dev9.log` (DevCon): DHCP (two 342-byte frames, 144.8 s), then a 64-byte frame and the 78-byte DNS query
+    at 150.44 s ("www01.kddi-mmbb.jp found in hosts"), and **no frame sent after it**: no SYN reaches the adapter.
+  - ob_server: no `accepted` line; netstat: ob_server listening on 127.0.0.2:443/8300, never a connection to it.
+- **Why (likely, not yet proven):** 127.0.0.0/8 is the loopback network; a TCP/IP stack (AVE-TCP here) keeps
+  traffic to it inside the machine, so the PS2 connects to itself, where nothing listens, and never puts a frame on
+  the wire. It fits entry 25's PCSX2 run with the KDDI host → 127.0.0.2: DNS answered, "no TCP connection logged".
+  The adapter has no loopback mapping of its own: it opens a host socket to whatever address the PS2 sends
+  (`TCP_Session_Out.cpp:207-212`).
+- **So:** the host entry for `www01.kddi-mmbb.jp` (and the lobby name, the same) must be an address outside
+  127.0.0.0/8 that reaches ob_server from the host: e.g. the PC's LAN address with ob_server bound there. Decision
+  pending with the developer (binding on the LAN opens the ports to the local network).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
