@@ -921,7 +921,7 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Issue: imported driver folders with names the loader refuses.** Fixed: `DriverNames.kt` renames them at start
   and the choice follows (tests in `DriverNamesTest.kt`).
 
-### 54. Android: formatting a memory card freezes the game (open)
+### 54. Android: formatting a memory card freezes the game (fixed: PS2Recomp 0101)
 
 - **Seen:** on the Odin (and reported on the OnePlus), NETWORK PLAY → create the NET file → format: the game freezes.
   The developer reports a **normal format (not network play) freezes too** (2026-10-28). Windows formats the same
@@ -938,8 +938,18 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   `FileMemoryCard::Save` (`MemoryCardFile.cpp:441`, read, AND, write back). Not yet known why only on Android.
 - **PCSX2's console messages are lost on Android:** `pcsx2-dev9.log` goes to the working folder, not writable there,
   and nothing reaches logcat. Needed before the next step.
-- **Parked** (developer, 2026-10-28: the graphics driver bug first).
-- **Next:** route PCSX2's log to the app's files folder on Android, then compare the card commands with Windows.
+- **Parked** (developer, 2026-10-28: the graphics driver bug first), then resumed.
+- **Not a lost transfer:** a temporary trace of DMA 11/12 in `sio2_side.cpp` (`PS2X_SIO2_TRACE`, removed after)
+  showed no ignored transfer. First the format reads every sector (~4,300 a second, 60 fps), then erases and writes.
+  Each write batch's answer (DMA 12) came exactly **one second** after it was sent, in the same millisecond as an
+  `[fps]` line (18:21:55.922, 57.922, 58.922): one page a second, so the format looked frozen.
+- **Cause:** the runner's logcat thread (PS2Recomp `ps2xRuntime/src/main.cpp`) read its pipe with `fgets` on a
+  `FILE*`, holding that stream's lock while it waited; the card bridge's `FlushIfWritten` calls `fflush(nullptr)`
+  after each write, and bionic locks every stream to flush it, so each write waited for the next log line. Windows has
+  no such thread, which is why the same format finishes there. (bionic's locking is from memory, source not opened.)
+- **Fix:** PS2Recomp 0101: the thread reads the descriptor with `read()` (`runtime/ps2_log_pump.h`); tests written
+  first (LogPump, 3), 575/575. Odin, blank card: formatted at 60 fps (header "Sony PS2 Memory Card Format 1.2"), the
+  game on SAVE/LOAD, and the save folder's copy updated 2 s after the last write (18:29:19.9 → 18:29:21.9).
 
 ### 55. Android: a save folder is required before Play (developer's request, 2026-10-28)
 

@@ -1,0 +1,293 @@
+From 347878353595bf2e21c1f7c92f594e757756940e Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 18:26:02 -0400
+Subject: [PATCH] Android: the logcat thread reads its pipe with read(), not
+ fgets on a FILE*
+
+fgets held the reader stream's lock while it waited for a line, so every fflush(nullptr) in the process
+(the memory card's, after each write) waited for the next log line, about a second: a card format crawled
+at one page per second and the game looked frozen. Ps2LinePump (runtime/ps2_log_pump.h) splits the bytes
+into lines; ps2PumpLines reads the descriptor. Tests: LogPump (3).
+---
+ ps2xRuntime/include/runtime/ps2_log_pump.h |  81 ++++++++++++++++
+ ps2xRuntime/src/main.cpp                   |  21 +---
+ ps2xTest/CMakeLists.txt                    |   1 +
+ ps2xTest/src/main.cpp                      |   2 +
+ ps2xTest/src/ps2_log_pump_tests.cpp        | 106 +++++++++++++++++++++
+ 5 files changed, 195 insertions(+), 16 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_log_pump.h
+ create mode 100644 ps2xTest/src/ps2_log_pump_tests.cpp
+
+diff --git a/ps2xRuntime/include/runtime/ps2_log_pump.h b/ps2xRuntime/include/runtime/ps2_log_pump.h
+new file mode 100644
+index 0000000..30f7c82
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_log_pump.h
+@@ -0,0 +1,81 @@
++#ifndef PS2_LOG_PUMP_H
++#define PS2_LOG_PUMP_H
++
++#include <cstddef>
++#include <functional>
++
++#if defined(_WIN32)
++#include <io.h>
++#else
++#include <cerrno>
++#include <unistd.h>
++#endif
++
++// Lines from a pipe (Android: the runner's stdout/stderr, copied to logcat). The pipe is read with read() on the
++// descriptor, not fgets on a FILE*: a FILE* waiting in fgets holds its stream lock, and every fflush(nullptr) in the
++// process (the memory card's, after each write) then waited for the next line (reports/2026-10-26-online-play.md
++// entry 54).
++class Ps2LinePump
++{
++public:
++    static constexpr size_t kMaxLine = 1023; // a longer line comes out in pieces of this size
++
++    explicit Ps2LinePump(std::function<void(const char *)> emit) : m_emit(std::move(emit)) {}
++
++    void feed(const char *data, size_t size)
++    {
++        for (size_t i = 0; i < size; ++i)
++        {
++            if (data[i] == '\n')
++            {
++                flushLine();
++                continue;
++            }
++            if (m_size == kMaxLine)
++                flushLine();
++            m_line[m_size++] = data[i];
++        }
++    }
++
++    // End of input: an unterminated last line.
++    void finish()
++    {
++        if (m_size > 0)
++            flushLine();
++    }
++
++private:
++    void flushLine()
++    {
++        m_line[m_size] = '\0';
++        m_emit(m_line);
++        m_size = 0;
++    }
++
++    std::function<void(const char *)> m_emit;
++    char m_line[kMaxLine + 1] = {};
++    size_t m_size = 0;
++};
++
++// Reads fd until end of input or an error, one emit per line.
++inline void ps2PumpLines(int fd, std::function<void(const char *)> emit)
++{
++    Ps2LinePump pump(std::move(emit));
++    char buffer[4096];
++    for (;;)
++    {
++#if defined(_WIN32)
++        const int got = _read(fd, buffer, sizeof(buffer));
++#else
++        const ssize_t got = read(fd, buffer, sizeof(buffer));
++        if (got < 0 && errno == EINTR)
++            continue;
++#endif
++        if (got <= 0)
++            break;
++        pump.feed(buffer, static_cast<size_t>(got));
++    }
++    pump.finish();
++}
++
++#endif
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index c28d8af..0e43d60 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -22,6 +22,7 @@
+ 
+ #if defined(__ANDROID__)
+ #include <android/log.h>
++#include "runtime/ps2_log_pump.h"
+ #include <unistd.h>
+ #include <thread>
+ #include <cstdio>
+@@ -65,22 +66,10 @@ namespace
+ 
+         g_logcatThread = std::thread([]()
+                                      {
+-                                         FILE *reader = fdopen(g_logcatPipeFds[0], "r");
+-                                         if (!reader)
+-                                         {
+-                                             return;
+-                                         }
+-                                         char line[1024];
+-                                         while (fgets(line, sizeof(line), reader))
+-                                         {
+-                                             size_t len = std::strlen(line);
+-                                             if (len > 0 && line[len - 1] == '\n')
+-                                             {
+-                                                 line[len - 1] = '\0';
+-                                             }
+-                                             __android_log_write(ANDROID_LOG_INFO, "ps2x", line);
+-                                         }
+-                                         fclose(reader);
++                                         // read() on the fd, not fgets on a FILE*: see ps2_log_pump.h.
++                                         ps2PumpLines(g_logcatPipeFds[0], [](const char *line)
++                                                      { __android_log_write(ANDROID_LOG_INFO, "ps2x", line); });
++                                         close(g_logcatPipeFds[0]);
+                                          g_logcatPipeFds[0] = -1;
+                                      });
+         if (std::atexit(stopLogcatRedirect) != 0)
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 26a4b7e..677ecc9 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -41,6 +41,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_gs_external_tests.cpp
+     src/ps2_runtime_api_tests.cpp
+     src/ps2_fps_counter_tests.cpp
++    src/ps2_log_pump_tests.cpp
+     src/ps2_netcnf_tests.cpp
+     src/ps2_diag_hooks_tests.cpp
+     src/ps2_input_bindings_tests.cpp
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 1d18bfe..31d6734 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -22,6 +22,7 @@ void register_ps2_float_semantics_tests();
+ void register_ps2_gs_external_tests();
+ void register_ps2_runtime_api_tests();
+ void register_ps2_fps_counter_tests();
++void register_ps2_log_pump_tests();
+ void register_ps2_netcnf_tests();
+ void register_ps2_diag_hooks_tests();
+ void register_ps2_input_bindings_tests();
+@@ -53,6 +54,7 @@ int main()
+     register_ps2_gs_external_tests();
+     register_ps2_runtime_api_tests();
+     register_ps2_fps_counter_tests();
++    register_ps2_log_pump_tests();
+     register_ps2_netcnf_tests();
+     register_ps2_diag_hooks_tests();
+     register_ps2_input_bindings_tests();
+diff --git a/ps2xTest/src/ps2_log_pump_tests.cpp b/ps2xTest/src/ps2_log_pump_tests.cpp
+new file mode 100644
+index 0000000..0a92ea4
+--- /dev/null
++++ b/ps2xTest/src/ps2_log_pump_tests.cpp
+@@ -0,0 +1,106 @@
++#include "MiniTest.h"
++#include "runtime/ps2_log_pump.h"
++
++#include <chrono>
++#include <cstdio>
++#include <future>
++#include <string>
++#include <thread>
++#include <vector>
++
++#if defined(_WIN32)
++#include <fcntl.h>
++#include <io.h>
++#else
++#include <unistd.h>
++#endif
++
++namespace
++{
++    bool makePipe(int fds[2])
++    {
++#if defined(_WIN32)
++        return _pipe(fds, 4096, _O_BINARY) == 0;
++#else
++        return pipe(fds) == 0;
++#endif
++    }
++
++    void writeFd(int fd, const std::string &s)
++    {
++#if defined(_WIN32)
++        (void)_write(fd, s.data(), static_cast<unsigned>(s.size()));
++#else
++        (void)write(fd, s.data(), s.size());
++#endif
++    }
++
++    void closeFd(int fd)
++    {
++#if defined(_WIN32)
++        _close(fd);
++#else
++        close(fd);
++#endif
++    }
++}
++
++void register_ps2_log_pump_tests()
++{
++    MiniTest::Case("LogPump", [](TestCase &tc)
++    {
++        tc.Run("splits bytes into lines, whatever the chunks", [](TestCase &t)
++        {
++            std::vector<std::string> lines;
++            Ps2LinePump pump([&](const char *line) { lines.emplace_back(line); });
++            pump.feed("ab", 2);
++            pump.feed("c\nde", 4);
++            pump.feed("\n\n", 2);
++            pump.feed("tail", 4);
++            t.Equals(lines.size(), size_t(3), "three complete lines so far");
++            pump.finish();
++            t.Equals(lines.size(), size_t(4), "the unterminated tail at the end");
++            t.Equals(lines[0], std::string("abc"), "line 1");
++            t.Equals(lines[1], std::string("de"), "line 2");
++            t.Equals(lines[2], std::string(""), "an empty line stays a line");
++            t.Equals(lines[3], std::string("tail"), "the tail");
++        });
++
++        tc.Run("a line longer than the buffer comes out in pieces", [](TestCase &t)
++        {
++            std::vector<std::string> lines;
++            Ps2LinePump pump([&](const char *line) { lines.emplace_back(line); });
++            const std::string longLine(Ps2LinePump::kMaxLine + 10, 'x');
++            pump.feed((longLine + "\n").data(), longLine.size() + 1);
++            t.Equals(lines.size(), size_t(2), "two pieces");
++            t.Equals(lines[0].size(), size_t(Ps2LinePump::kMaxLine), "the first is the buffer's size");
++            t.Equals(lines[1].size(), size_t(10), "the rest");
++        });
++
++        // reports/2026-10-26-online-play.md entry 54: the Android logcat thread read the pipe with fgets on a FILE*,
++        // holding that stream's lock while it waited; every fflush(nullptr) (the memory card's, after each write)
++        // then waited for the next log line, about a second, so a card format crawled. The pump reads the fd itself.
++        tc.Run("pumping a pipe holds no stdio lock: fflush(nullptr) does not wait for a line", [](TestCase &t)
++        {
++            int fds[2] = {-1, -1};
++            t.IsTrue(makePipe(fds), "pipe");
++            std::vector<std::string> lines;
++            std::thread reader([&]() { ps2PumpLines(fds[0], [&](const char *line) { lines.emplace_back(line); }); });
++            std::this_thread::sleep_for(std::chrono::milliseconds(50)); // the pump is now waiting on the empty pipe
++            auto flushed = std::async(std::launch::async, []() { return std::fflush(nullptr); });
++            const bool prompt = flushed.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
++            t.IsTrue(prompt, "fflush(nullptr) returns while the pump waits");
++            writeFd(fds[1], "one\ntwo");
++            closeFd(fds[1]);
++            reader.join();
++            closeFd(fds[0]);
++            flushed.wait();
++            t.Equals(lines.size(), size_t(2), "both lines, the last at end of input");
++            if (lines.size() == 2)
++            {
++                t.Equals(lines[0], std::string("one"), "line 1");
++                t.Equals(lines[1], std::string("two"), "line 2");
++            }
++        });
++    });
++}
+-- 
+2.46.2.windows.1
+
