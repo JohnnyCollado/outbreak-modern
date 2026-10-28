@@ -243,6 +243,14 @@ std::string FetchTls(uint16_t port, int minor, int suite, const char* path); // 
 // The whole chain on loopback: quick login over TLS hands out a session, and the lobby accepts it.
 void TestServerChain()
 {
+	// Defaults: only this device (loopback) unless hosting is asked for, and the relay address handed to the game is
+	// the alias its adapter maps to loopback (the game cannot use 127.x: report entry 34; upstream/pcsx2 0003).
+	{
+		const ServerConfig defaults;
+		Check(defaults.bindAddress == "127.0.0.1", "the server listens on loopback only by default");
+		Check(defaults.hostAddress == std::array<uint8_t, 4>{192, 0, 2, 2},
+			"the relay address handed out by default is the alias 192.0.2.2");
+	}
 	Server server;
 	ServerConfig config;
 	config.bindAddress = "127.0.0.1";

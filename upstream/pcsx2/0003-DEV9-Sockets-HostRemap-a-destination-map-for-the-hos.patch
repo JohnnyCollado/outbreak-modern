@@ -1,0 +1,131 @@
+From d4de0c709d080274f45675af8d71d850933c6683 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 11:47:52 -0400
+Subject: [PATCH] DEV9 Sockets: HostRemap, a destination map for the host side
+ of TCP connections
+
+The PS2 keeps the address and port it connected to; only the host socket's connect() goes to the mapped one
+(Sessions::HostRemap::Set/Apply, applied in TCP_Session::SendConnect). A loopback destination is not bound to the
+adapter's address. No entries = unchanged behaviour.
+---
+ pcsx2/DEV9/Sessions/HostRemap.cpp             | 33 +++++++++++++++++++
+ pcsx2/DEV9/Sessions/HostRemap.h               | 26 +++++++++++++++
+ .../Sessions/TCP_Session/TCP_Session_Out.cpp  | 14 ++++++--
+ 3 files changed, 70 insertions(+), 3 deletions(-)
+ create mode 100644 pcsx2/DEV9/Sessions/HostRemap.cpp
+ create mode 100644 pcsx2/DEV9/Sessions/HostRemap.h
+
+diff --git a/pcsx2/DEV9/Sessions/HostRemap.cpp b/pcsx2/DEV9/Sessions/HostRemap.cpp
+new file mode 100644
+index 0000000..a00d881
+--- /dev/null
++++ b/pcsx2/DEV9/Sessions/HostRemap.cpp
+@@ -0,0 +1,33 @@
++// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
++// SPDX-License-Identifier: GPL-3.0+
++
++#include "HostRemap.h"
++
++#include <mutex>
++
++namespace Sessions::HostRemap
++{
++	static std::mutex s_lock;
++	static std::vector<Entry> s_entries;
++
++	void Set(std::vector<Entry> entries)
++	{
++		std::lock_guard lock(s_lock);
++		s_entries = std::move(entries);
++	}
++
++	bool Apply(PacketReader::IP::IP_Address* ip, u16* port)
++	{
++		std::lock_guard lock(s_lock);
++		for (const Entry& e : s_entries)
++		{
++			if (e.from != *ip || (e.fromPort != 0 && e.fromPort != *port))
++				continue;
++			*ip = e.to;
++			if (e.toPort != 0)
++				*port = e.toPort;
++			return true;
++		}
++		return false;
++	}
++} // namespace Sessions::HostRemap
+diff --git a/pcsx2/DEV9/Sessions/HostRemap.h b/pcsx2/DEV9/Sessions/HostRemap.h
+new file mode 100644
+index 0000000..1f5b775
+--- /dev/null
++++ b/pcsx2/DEV9/Sessions/HostRemap.h
+@@ -0,0 +1,26 @@
++// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
++// SPDX-License-Identifier: GPL-3.0+
++
++#pragma once
++
++#include "DEV9/PacketReader/IP/IP_Address.h"
++
++#include <vector>
++
++// Destinations the PS2 connects to that the host socket reaches elsewhere. The PS2 keeps seeing the address and
++// port it asked for; only the host side's connect() goes to the mapped one. Used by outbreak-modern to reach a server
++// on the host's loopback (the PS2's own stack never sends 127.x) and to move port 443 for Android hosts.
++namespace Sessions::HostRemap
++{
++	struct Entry
++	{
++		PacketReader::IP::IP_Address from;
++		u16 fromPort; // 0 = any port
++		PacketReader::IP::IP_Address to;
++		u16 toPort; // 0 = the same port
++	};
++
++	void Set(std::vector<Entry> entries);
++	// Rewrites ip/port (host byte order port) when an entry matches; true if one did.
++	bool Apply(PacketReader::IP::IP_Address* ip, u16* port);
++} // namespace Sessions::HostRemap
+diff --git a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+index bd1d6e5..330a71b 100644
+--- a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
++++ b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+@@ -17,6 +17,7 @@
+ #endif
+ 
+ #include "TCP_Session.h"
++#include "DEV9/Sessions/HostRemap.h"
+ 
+ using namespace PacketReader;
+ using namespace PacketReader::IP;
+@@ -158,8 +159,15 @@ namespace Sessions
+ 			return false;
+ 		}
+ 
++		// The host side may reach the destination elsewhere (HostRemap); the PS2 keeps destIP/destPort. A socket bound
++		// to the adapter's address cannot reach loopback, so a loopback destination is not bound.
++		IP_Address hostIP = destIP;
++		u16 hostPort = destPort;
++		HostRemap::Apply(&hostIP, &hostPort);
++		const bool loopback = hostIP.bytes[0] == 127;
++
+ 		int ret;
+-		if (adapterIP.integer != 0)
++		if (adapterIP.integer != 0 && !loopback)
+ 		{
+ 			sockaddr_in endpoint{};
+ 			endpoint.sin_family = AF_INET;
+@@ -206,8 +214,8 @@ namespace Sessions
+ 
+ 		sockaddr_in endpoint{};
+ 		endpoint.sin_family = AF_INET;
+-		endpoint.sin_addr = std::bit_cast<in_addr>(destIP);
+-		endpoint.sin_port = htons(destPort);
++		endpoint.sin_addr = std::bit_cast<in_addr>(hostIP);
++		endpoint.sin_port = htons(hostPort);
+ 
+ 		ret = connect(client, reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
+ 
+-- 
+2.46.2.windows.1
+

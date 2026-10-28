@@ -17,7 +17,7 @@ Everything decided and found is in git on `netplay-research`: the plan (`docs/pl
 | `C:\ob\pcsx2`, `pcsx2-deps` | PCSX2 v2.9.134 + its deps for the GS/DEV9 libraries | `tools/ob.sh pcsx2-gs` (clones and builds) |
 | `C:\ob\mbedtls\v2.28.10` | mbedTLS for ob_server's old TLS | `tools/net/mbedtls-build.sh` (clones from GitHub, builds); pin in `docs/ops/pins.md` |
 | `C:\ob\saves-net\Mcd001.ps2` | a formatted PCSX2 card with the game's NET save (made by the game itself: title → NETWORK PLAY → create) | `python -I tools/ob/mcd.py format C:\ob\saves-net\Mcd001.ps2`, then let the game create its NET file once (`tools/net/to-network.pad` route). `mcd.py netcnf` is optional: the client serves the settings (`PS2X_NETCNF=dhcp`) |
-| `ob_server.exe` running on 127.0.0.2 | the login/lobby server for the drives | `C:\ob\net-ob-server\ob_server.exe --bind 127.0.0.2` (see `native/ob_server/README` / `tools/ob_server_main.cpp`) |
+| `ob_server.exe` running (loopback only by default) | the login/lobby server for the drives | `C:\ob\net-ob-server\ob_server.exe` (see `native/ob_server/README` / `tools/ob_server_main.cpp`) |
 
 `tools/net/net-env.sh` holds the `OB_*` paths; edit it if the drives live elsewhere. The `up-*.sh` scripts commit,
 amend, export (`format-patch`), sync (`net-up` → `net-src`, keeping the generated `register_functions.cpp`) and
@@ -47,14 +47,23 @@ above; the first recompile is the one long build.
 
 ## Running the game to the network menu
 
-`tools/net/net-live.sh 1500` boots hidden with `PS2X_DEV9=pcsx2`, the game's two host names → 127.0.0.2,
+Start `C:\ob\net-ob-server\ob_server.exe` with no arguments (it listens on 127.0.0.1 only). `tools/net/net-live.sh
+1500` boots hidden with `PS2X_DEV9=pcsx2`, the game's two host names → the alias 192.0.2.2 with
+`PS2X_NET_REMAP=192.0.2.2=127.0.0.1` (the adapter connects there; the game cannot use 127.x, entry 34),
 `PS2X_SAVES=C:\ob\saves-net`, `PS2X_NETCNF=dhcp`, live pad on `\\.\pipe\obnet`. Then
 `python -I tools/ob/pad.py --pipe obnet --wait 150 --timeout 600 < tools/net/to-network.pad` drives title →
-NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. Setting 1", `press circle 8` is OK.
-`peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
-Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
+NETWORK PLAY → NET CONNECTION list; then `tools/net/to-lobby.pad` the same way: OK, login, handle name, lobby, room
+list, AREA 01, a new room's RULE screen (entry 40). `peek <addr> <1|2|4>` reads EE RAM (state block pointer at
+0x3065DC; see report entries 21-23 for the fields). Logs: `C:\ob\net-logs\boot-net-live.{log,err}`,
+`pcsx2-dev9.log`, ob_server's console; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-28, entry 38)
+## Where it stands (2026-10-28, entry 40)
+
+Entries 39-40: this PC's game reaches ob_server on loopback through the alias 192.0.2.2 (upstream/pcsx2 0003,
+nothing open to the network); it logs in, sets a handle, lists the areas and rooms and opens a new room's rules. The
+scenario list there is empty, and the game asks the server nothing for it. Next: where that list comes from.
+
+## Where it stood (2026-10-28, entry 38)
 
 Entry 38: with ob_server's certificate ending in 2049 (UTCTime) and the server names at the PC's LAN address, the
 game logs in over TLS, reaches the lobby (login, version) and shows Capcom's user registration screen. Open: the

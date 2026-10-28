@@ -16,8 +16,12 @@ namespace ob::server
 {
 	struct ServerConfig
 	{
-		std::string bindAddress;                         // "" = every interface
-		std::array<uint8_t, 4> hostAddress{127, 0, 0, 1}; // this device's LAN address, handed to the game for the relay
+		// Where it listens: loopback = this device only; "" = every interface (hosting for other devices).
+		std::string bindAddress = "127.0.0.1";
+		// The relay address handed to the game. Default: the alias this device's game reaches loopback through (its
+		// adapter's PS2X_NET_REMAP 192.0.2.2=127.0.0.1; the game cannot use 127.x, report entry 34). When hosting,
+		// this device's LAN address as other players reach it.
+		std::array<uint8_t, 4> hostAddress{192, 0, 2, 2};
 		uint16_t webPort = 443;                          // 18443 on an Android host (plan P8)
 		uint16_t lobbyPort = 8300;
 		uint16_t relayPort = 8690;

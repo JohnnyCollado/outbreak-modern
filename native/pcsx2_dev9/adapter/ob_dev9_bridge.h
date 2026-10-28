@@ -15,6 +15,23 @@ struct ob_dev9_host
 	uint8_t address[4];
 };
 
+// A destination the game connects to that the adapter's host socket reaches elsewhere (upstream/pcsx2 0003): the
+// game keeps seeing `from`; the host connects to `to`. For this device's own server: the game cannot use 127.x (its
+// stack keeps loopback inside, report entry 34), so its server names point at an alias such as 192.0.2.2 (the
+// adapter's private network) and the alias is remapped to 127.0.0.1. Ports: 0 = any (from) / unchanged (to); a
+// port pair also serves Android hosts (443 -> 18443, online-play plan P8). TCP only.
+struct ob_dev9_remap
+{
+	uint8_t from[4];
+	uint16_t from_port;
+	uint8_t to[4];
+	uint16_t to_port;
+};
+
+// Parses "from[:port]=to[:port]" entries separated by ';' (e.g. "192.0.2.2=127.0.0.1;192.0.2.2:443=127.0.0.1:18443")
+// into out (at most max); returns how many were read. A malformed entry is skipped and counted in *bad.
+uint32_t ob_dev9_parse_remaps(const char* text, ob_dev9_remap* out, uint32_t max, uint32_t* bad);
+
 struct ob_dev9_config
 {
 	const char* interface_name;  // host network interface for the Sockets adapter; null or "" = automatic
@@ -23,6 +40,8 @@ struct ob_dev9_config
 	// The adapter's own messages (DHCP, DNS answers, sessions; written only when something happens) go to this file,
 	// unless PCSX2's log file is already open (one per process: then they go there). null or "" = none.
 	const char* log_path;
+	const ob_dev9_remap* remaps;
+	uint32_t remap_count;
 };
 
 // Starts DEV9 with the Ethernet adapter in Sockets mode, its DHCP on and its internal DNS (no HDD). false: the adapter

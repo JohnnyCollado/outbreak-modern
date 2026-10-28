@@ -6,9 +6,15 @@
 // - a DHCP DISCOVER gets an OFFER with an address and a DNS server, and raises INTC line 13 (RXEND, unmasked);
 // - a DNS query for gate1.jp.dnas.playstation.org (configured in mixed case) gets the configured host address;
 // - the adapter's own messages reach the configured log file (the host-list answer is logged by name);
+// - a remapped destination (alias 192.0.2.2:4433 -> a listener on 127.0.0.1) connects, the game seeing the alias;
+// - PS2X_NET_REMAP's text form parses (address-only and address:port entries, malformed ones skipped);
 // - DMA 8 takes only psxDma8's CHCRs.
 // With no usable network interface the Sockets adapter can't start: the network checks are skipped, said so.
 #include "ob_dev9_bridge.h"
+
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -101,10 +107,10 @@ static void Send(const std::vector<uint8_t>& frame)
 }
 
 // Waits (advancing IOP time) for the next RX descriptor to fill; returns its frame, empty on timeout.
-static std::vector<uint8_t> Receive(bool* irq)
+static std::vector<uint8_t> Receive(bool* irq, int tries = 3000)
 {
 	const uint32_t bd = kBdRx + s_rxBd * 8;
-	for (int i = 0; i < 3000; i++)
+	for (int i = 0; i < tries; i++)
 	{
 		ob_dev9_advance(1000);
 		if (ob_dev9_take_interrupt())
@@ -134,14 +140,105 @@ static bool IsUdpFrom(const std::vector<uint8_t>& f, uint16_t sport)
 	return f.size() >= 42 && Get16(f, 12) == 0x0800 && f[23] == 17 && Get16(f, 34) == sport;
 }
 
+// Ethernet + IPv4 + TCP SYN (no options), with the IP and TCP checksums (RFC 793 pseudo header).
+static std::vector<uint8_t> TcpSynFrame(const uint8_t src[4], const uint8_t dst[4], uint16_t sport, uint16_t dport)
+{
+	std::vector<uint8_t> f(14 + 20 + 20, 0);
+	std::memset(&f[0], 0xFF, 6);
+	std::memcpy(&f[6], kPs2Mac, 6);
+	Put16(f, 12, 0x0800);
+	uint8_t* ip = &f[14];
+	ip[0] = 0x45;
+	Put16(f, 16, 40);
+	ip[8] = 64;
+	ip[9] = 6;
+	std::memcpy(ip + 12, src, 4);
+	std::memcpy(ip + 16, dst, 4);
+	Put16(f, 24, Sum16(ip, 20));
+	Put16(f, 34, sport);
+	Put16(f, 36, dport);
+	f[38] = 0; f[39] = 0; f[40] = 0x03; f[41] = 0xE8; // sequence 1000
+	f[46] = 0x50;                                  // header 20 bytes
+	f[47] = 0x02;                                  // SYN
+	Put16(f, 48, 8192);                            // window
+	std::vector<uint8_t> pseudo(12 + 20);
+	std::memcpy(&pseudo[0], src, 4);
+	std::memcpy(&pseudo[4], dst, 4);
+	pseudo[9] = 6;
+	pseudo[11] = 20;
+	std::memcpy(&pseudo[12], &f[34], 20);
+	Put16(f, 50, Sum16(pseudo.data(), pseudo.size()));
+	return f;
+}
+
+static bool IsTcpSynAckFrom(const std::vector<uint8_t>& f, const uint8_t ip[4], uint16_t sport)
+{
+	return f.size() >= 54 && Get16(f, 12) == 0x0800 && f[23] == 6 && std::memcmp(&f[26], ip, 4) == 0 &&
+		   Get16(f, 34) == sport && (f[47] & 0x12) == 0x12;
+}
+
+// A TCP listener on 127.0.0.1 at a free port (the stand-in for this device's own server).
+struct LoopbackListener
+{
+	SOCKET s = INVALID_SOCKET;
+	uint16_t port = 0;
+	LoopbackListener()
+	{
+		s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		sockaddr_in a{};
+		a.sin_family = AF_INET;
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		int len = sizeof(a);
+		if (s == INVALID_SOCKET || bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0 || listen(s, 1) != 0 ||
+			getsockname(s, reinterpret_cast<sockaddr*>(&a), &len) != 0)
+			return;
+		port = ntohs(a.sin_port);
+	}
+	~LoopbackListener()
+	{
+		if (s != INVALID_SOCKET)
+			closesocket(s);
+	}
+	bool Pending() const // a connection waits to be accepted
+	{
+		fd_set r;
+		FD_ZERO(&r);
+		FD_SET(s, &r);
+		timeval none{};
+		return select(static_cast<int>(s + 1), &r, nullptr, nullptr, &none) == 1;
+	}
+};
+
+// PS2X_NET_REMAP's text form (no network needed).
+static void TestParseRemaps()
+{
+	ob_dev9_remap r[4] = {};
+	uint32_t bad = 0;
+	const uint32_t n = ob_dev9_parse_remaps("192.0.2.2=127.0.0.1; 192.0.2.2:443=127.0.0.1:18443;nonsense;1.2.3=4.5.6.7",
+		r, 4, &bad);
+	Check(n == 2 && bad == 2, "two remaps read, two malformed entries skipped");
+	Check(r[0].from[0] == 192 && r[0].from[3] == 2 && r[0].from_port == 0 && r[0].to[0] == 127 && r[0].to[3] == 1 &&
+			  r[0].to_port == 0,
+		"an address-only remap keeps any port");
+	Check(r[1].from_port == 443 && r[1].to_port == 18443, "a remap with ports moves the port");
+	Check(ob_dev9_parse_remaps("", r, 4, &bad) == 0 && ob_dev9_parse_remaps(nullptr, r, 4, &bad) == 0,
+		"empty or missing text = no remaps");
+}
+
 int main()
 {
+	TestParseRemaps();
 	Check(ob_dev9_read8(kRev) == 0, "closed: DEV9 answers 0 (the driver's 'unknown dev9 hardware')");
 
 	const ob_dev9_host hosts[] = {{"GATE1.jp.dnas.playstation.org", {10, 1, 2, 3}}};
 	const char* kLog = "ob_dev9_tests.log";
 	std::remove(kLog);
-	const ob_dev9_config config{nullptr, hosts, 1, kLog};
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
+	LoopbackListener server;
+	const uint8_t kAlias[4] = {192, 0, 2, 2};
+	const ob_dev9_remap remaps[] = {{{192, 0, 2, 2}, 4433, {127, 0, 0, 1}, server.port}};
+	const ob_dev9_config config{nullptr, hosts, 1, kLog, remaps, 1};
 	if (!ob_dev9_open(&config))
 	{
 		std::printf("SKIP: no usable network interface for the Sockets adapter; network checks not run\n");
@@ -236,6 +333,21 @@ int main()
 	}
 	Check(log.find("gate1.jp.dnas.playstation.org found in hosts") != std::string::npos,
 		"the adapter's log names the host-list answer");
+
+	// A remapped destination: the game connects to the alias 192.0.2.2:4433; the host socket reaches the listener on
+	// 127.0.0.1, and the game's SYN-ACK still comes from 192.0.2.2:4433.
+	Check(server.port != 0, "a loopback listener for the remap test");
+	Send(TcpSynFrame(yiaddr, kAlias, 40001, 4433));
+	bool accepted = false, synAck = false;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10); // bounded: no answer = fail
+	while (!(accepted && synAck) && std::chrono::steady_clock::now() < deadline)
+	{
+		const std::vector<uint8_t> f = Receive(&irq, 50);
+		synAck |= IsTcpSynAckFrom(f, kAlias, 4433);
+		accepted |= server.Pending();
+	}
+	Check(accepted, "a connection to the remapped alias reaches the listener on 127.0.0.1");
+	Check(synAck, "the game's SYN-ACK comes from the alias address and port");
 
 	std::vector<uint8_t> ram(0x10000, 0);
 	Check(ob_dev9_dma(ram.data(), static_cast<uint32_t>(ram.size()), 0x100, (1u << 16) | 1u, 0x00000201u) ==

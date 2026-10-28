@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -243,9 +245,17 @@ ps2x::iop::Dev9Device* ps2CreateExternalDev9(const std::string& interfaceName, c
 	std::vector<ob_dev9_host> list;
 	for (const PS2Dev9Host& h : hosts)
 		list.push_back(ob_dev9_host{h.name.c_str(), {h.address[0], h.address[1], h.address[2], h.address[3]}});
+	// Destinations the host socket reaches elsewhere, PS2X_NET_REMAP ("192.0.2.2=127.0.0.1" for this device's own
+	// server: the game cannot use 127.x, reports/2026-10-26-online-play.md entry 34; upstream/pcsx2 0003).
+	ob_dev9_remap remaps[16];
+	uint32_t bad = 0;
+	const uint32_t remapCount = ob_dev9_parse_remaps(std::getenv("PS2X_NET_REMAP"), remaps, 16, &bad);
+	if (bad)
+		std::fprintf(stderr, "[dev9] PS2X_NET_REMAP: %u entr%s ignored (from[:port]=to[:port])\n", bad, bad == 1 ? "y" : "ies");
 	// The adapter's messages (DNS host-list answers, socket errors) -> pcsx2-dev9.log in the working dir, as PCSX2's
 	// own log goes to pcsx2-gs.log (pcsx2_side.cpp) when that one is open first.
-	const ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size()), "pcsx2-dev9.log"};
+	const ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size()), "pcsx2-dev9.log",
+		remaps, remapCount};
 	if (!ob_dev9_open(&config))
 	{
 		ob_dev9_close();

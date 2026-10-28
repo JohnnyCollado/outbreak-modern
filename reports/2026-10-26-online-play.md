@@ -646,6 +646,43 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   PC's LAN address, which opens 443/8300 to the local network); the route from the registration screen into the
   lobby (areas, rooms); the temporary prints in `net-src`.
 
+### 39. This device's game reaches its own ob_server through an alias (192.0.2.2 → 127.0.0.1), nothing on the LAN
+
+- **Developer's choice (2026-10-28):** option B of the address plan: the game's server names point at 192.0.2.2 (in
+  the adapter's private network, whose gateway is 192.0.2.1, `net.cpp:166`; the adapter answers ARP for any address
+  but the PS2's own, `sockets.cpp:303`), and the adapter's host socket connects to 127.0.0.1 instead; ob_server
+  serves loopback only unless hosting is asked for.
+- **upstream/pcsx2 0003** (`C:\ob\pcsx2` branch `ob-patches`, `d4de0c7`): `Sessions::HostRemap::Set/Apply` (new
+  `DEV9/Sessions/HostRemap.{h,cpp}`); `TCP_Session::SendConnect` connects the host socket to the mapped address and
+  port while the PS2 keeps `destIP`/`destPort`; a loopback destination is not bound to the adapter's address (a named
+  interface, as Android will use, binds first). No entries = unchanged. README row, pins.
+- **Our side:** `ob_dev9_config.remaps` (`ob_dev9_remap`: from, from port 0 = any, to, to port 0 = same), passed to
+  HostRemap in `ob_dev9_open`; `ob_dev9_parse_remaps` for `PS2X_NET_REMAP` ("192.0.2.2=127.0.0.1", ";"-separated,
+  ports optional), read by the runner's hook (`hook.cpp`). ob_server defaults: listens on 127.0.0.1 (was every
+  interface), hands out 192.0.2.2 as the relay address (was 127.0.0.1); hosting = `--bind ""`/LAN + `--host <LAN>`.
+  `tools/net/net-live.sh` now sets the alias and the remap.
+- **Tests first:** `pcsx2_dev9` remap test (a SYN to 192.0.2.2:4433 reaches a listener on 127.0.0.1, the SYN-ACK comes
+  from 192.0.2.2:4433): 17/19 without 0003, 19/19 with; parser test (address-only and address:port entries,
+  malformed ones skipped), 23/23 (this one was written with the parser, not seen failing first). ob_server defaults
+  test: 73/75 before, 75/75 after.
+- **Struggle:** the first remap test run hung past 10 minutes (no answer without the remap, and 20 × up-to-3000-tick
+  waits); stopped at once, the wait capped at 10 s of wall time; the failing run then took seconds.
+- **Live (loopback only; netstat: ob_server on 127.0.0.1:443/8300, nothing else):** `[web] 127.0.0.1: accepted`,
+  TLS ×3, quick login, `[lobby] 127.0.0.1: logged in`, version; the adapter logs TCP 443 ×3 and 8300.
+
+### 40. Into the lobby: handle name, areas, rooms, a new room's rules; the scenario list is empty
+
+- **Route** (live pad, then kept as `tools/net/to-lobby.pad`): registration → 登録しない; SELECT ID: handle name
+  "あ" on the kana keyboard (Start does not confirm; the 決定 key, bottom right, does) → "are you sure you want to use
+  this (HN)?" → 登録する; ob_server: `handle 0SFV4X`. Lobby "LOCAL" (ROOM LIST / DATABASE / PERSONAL RANK, 1P) →
+  ROOM LIST: AREA 01-07, 0 players → AREA 01: slots 1-5 "(free) Vacant" → slot 1: the RULE screen (room title,
+  password, four players, ten minutes, very hard, friendly fire off, scenario, character KEVIN, FINISH) → Triangle
+  (scenario): an empty framed list, still empty 5 s later (shots `l01`-`l13` in `C:\ob\frames-net-live`).
+- **ob_server** logged no unhandled question during any of it, so the game asks the server nothing for that list:
+  it is built from something already received (the area/room answers, or a login-time list) or from game data.
+- **Next:** where the scenario list comes from (the RULE screen's code in NETWK, against Bioserver1's create-room
+  replies: research note section 7 "6509 scenario", open question 3).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

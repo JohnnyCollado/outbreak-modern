@@ -3,9 +3,11 @@
 //
 //   ob_server [--host a.b.c.d] [--bind a.b.c.d] [--web-port N] [--lobby-port N] [--relay-port N]
 //
-// --host is this PC's LAN address as players reach it (handed to the game for the relay; default 127.0.0.1, enough
-// for players on this same PC). Players point their game at it in the Network settings (or, for now, with
-// PS2X_NET_HOSTS=www01.kddi-mmbb.jp=<host>). Ends with Ctrl+C.
+// By default it serves this PC only: it listens on 127.0.0.1, and the game on this PC reaches it through the alias
+// 192.0.2.2 (PS2X_NET_HOSTS=www01.kddi-mmbb.jp=192.0.2.2, PS2X_NET_REMAP=192.0.2.2=127.0.0.1: the game cannot use
+// 127.x, reports/2026-10-26-online-play.md entry 34). To host for other devices: --bind "" (every interface) or
+// --bind <LAN address>, and --host <LAN address> (handed to the game for the relay); their games point
+// www01.kddi-mmbb.jp at that address. Ends with Ctrl+C.
 #include "ob_server.h"
 
 #include <atomic>

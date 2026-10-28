@@ -1,0 +1,82 @@
+# Live-pad route after to-network.pad (send that first, then this), with tools/net/net-live.sh and ob_server.exe
+# on its defaults (report entries 39-40): on a card that holds BWNETCNF the game shows "Network configuration file
+# has loaded" instead of the NET CONNECTION list; the three downs + OK pass it and the game connects (TLS login,
+# lobby). Then: user registration -> "don't register" -> handle name "あ" -> confirm -> lobby LOCAL -> ROOM LIST ->
+# AREA 01 -> slot 1 (Vacant) -> RULE screen -> Triangle (scenario list; empty so far, entry 40).
+press down 8
+wait 60
+press down 8
+wait 60
+press down 8
+wait 60
+press circle 8
+wait 1800
+shot l00-registration
+# User registration: right = 登録しない (don't register).
+press right 8
+wait 30
+press circle 8
+wait 300
+shot l02-handle
+# Handle name: type あ (cursor starts there), then the 決定 key: down 3, right to the end of the bottom row.
+press circle 8
+wait 30
+press down 6
+wait 10
+press down 6
+wait 10
+press down 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press right 6
+wait 10
+press circle 8
+wait 240
+# "are you sure you want to use this (HN)?": left = 登録する (use it).
+press left 6
+wait 10
+press circle 8
+wait 300
+shot l08-lobby
+# Lobby LOCAL: ROOM LIST, AREA 01, slot 1 (Vacant: create a room), the RULE screen, Triangle = scenario list.
+press circle 8
+wait 240
+shot l09-areas
+press circle 8
+wait 240
+shot l10-rooms
+press circle 8
+wait 300
+shot l11-rule
+press triangle 8
+wait 300
+shot l12-scenario

@@ -8,9 +8,14 @@
 
 #include "Config.h"
 #include "DEV9/DEV9.h"
+#include "DEV9/Sessions/HostRemap.h"
 #include "common/Console.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -75,6 +80,19 @@ bool ob_dev9_open(const ob_dev9_config* config)
 	// level: DNS host-list answers, session and socket errors; not DevCon's line per packet.
 	if (config && config->log_path && config->log_path[0] && !Log::IsFileOutputEnabled())
 		Log::SetFileOutputLevel(LOGLEVEL_INFO, config->log_path);
+	// Destinations the host socket reaches elsewhere (upstream/pcsx2 0003, TCP_Session_Out.cpp SendConnect).
+	std::vector<Sessions::HostRemap::Entry> remaps;
+	for (uint32_t i = 0; config && i < config->remap_count; i++)
+	{
+		const ob_dev9_remap& r = config->remaps[i];
+		Sessions::HostRemap::Entry e{};
+		std::memcpy(e.from.bytes, r.from, 4);
+		e.fromPort = r.from_port;
+		std::memcpy(e.to.bytes, r.to, 4);
+		e.toPort = r.to_port;
+		remaps.push_back(e);
+	}
+	Sessions::HostRemap::Set(std::move(remaps));
 	s_irq = s_dmaDone = false;
 	s_irqIn = -1;
 	if (DEV9init() != 0)
@@ -165,4 +183,54 @@ bool ob_dev9_take_dma_done()
 	const bool r = s_dmaDone;
 	s_dmaDone = false;
 	return r;
+}
+
+// "a.b.c.d[:port]": the address and the port (0 when absent); false when malformed.
+static bool ParseEndpoint(const std::string& s, uint8_t ip[4], uint16_t* port)
+{
+	unsigned a, b, c, d, p = 0;
+	char tail = 0;
+	const size_t colon = s.find(':');
+	const std::string addr = s.substr(0, colon);
+	if (std::sscanf(addr.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 || a > 255 || b > 255 || c > 255 ||
+		d > 255)
+		return false;
+	if (colon != std::string::npos &&
+		(std::sscanf(s.c_str() + colon + 1, "%u%c", &p, &tail) != 1 || p == 0 || p > 65535))
+		return false;
+	ip[0] = static_cast<uint8_t>(a);
+	ip[1] = static_cast<uint8_t>(b);
+	ip[2] = static_cast<uint8_t>(c);
+	ip[3] = static_cast<uint8_t>(d);
+	*port = static_cast<uint16_t>(p);
+	return true;
+}
+
+uint32_t ob_dev9_parse_remaps(const char* text, ob_dev9_remap* out, uint32_t max, uint32_t* bad)
+{
+	uint32_t n = 0, skipped = 0;
+	std::string all = text ? text : "";
+	size_t start = 0;
+	while (start <= all.size())
+	{
+		const size_t end = std::min(all.find(';', start), all.size());
+		std::string entry = all.substr(start, end - start);
+		entry.erase(0, entry.find_first_not_of(' '));
+		entry.erase(entry.find_last_not_of(' ') + 1);
+		start = end + 1;
+		if (entry.empty())
+			continue;
+		const size_t eq = entry.find('=');
+		ob_dev9_remap r{};
+		if (eq == std::string::npos || n >= max || !ParseEndpoint(entry.substr(0, eq), r.from, &r.from_port) ||
+			!ParseEndpoint(entry.substr(eq + 1), r.to, &r.to_port))
+		{
+			skipped++;
+			continue;
+		}
+		out[n++] = r;
+	}
+	if (bad)
+		*bad = skipped;
+	return n;
 }
