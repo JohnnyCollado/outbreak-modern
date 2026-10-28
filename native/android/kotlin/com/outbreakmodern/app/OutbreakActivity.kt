@@ -43,6 +43,15 @@ class OutbreakActivity : NativeActivity() {
             if (discFd >= 0) Os.setenv("PS2X_GAME_PATH", "/proc/self/fd/$discFd", true)
         }
         Os.setenv("PS2X_LAUNCHER", "0", true)
+        // A driver folder imported before the importer's naming fix: renamed, and the choice follows (DriverNames.kt).
+        settings.get("gpu_driver", "system").let { was ->
+            val now = repairDriverFolders(java.io.File(settings.filesDir, "drivers"), was)
+            if (now != was) settings.set("gpu_driver", now)
+        }
+        // Online play until the Network page exists: <external files>/net.env, PS2X_ lines only (DevEnv.kt).
+        getExternalFilesDir(null)?.resolve("net.env")?.takeIf { it.isFile }?.let { file ->
+            for ((key, value) in parseDevEnv(file.readText())) Os.setenv(key, value, true)
+        }
         super.onCreate(savedInstanceState)
         window.immersive(underCutout = true)
     }

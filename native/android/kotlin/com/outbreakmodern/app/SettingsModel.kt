@@ -566,6 +566,10 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
 
     private fun driverPage(): SPage {
         val rows = mutableListOf<SRow>()
+        // Folders imported before the importer's naming fix get valid names, and the choice follows (DriverNames.kt).
+        val was = settings.get("gpu_driver", "system")
+        val repaired = repairDriverFolders(File(settings.filesDir, "drivers"), was)
+        if (repaired != was) settings.set("gpu_driver", repaired)
         val cur = settings.get("gpu_driver", "system")
         rows += SRow.Info("driver-hint", "The Vulkan driver the game draws with. Install several and choose between them; " +
             "the app needs a restart for a new choice to take effect.", Tone.MUTED)

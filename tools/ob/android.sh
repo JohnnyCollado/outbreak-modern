@@ -13,7 +13,7 @@
 #              keytool on first use, never in git); build tree $APK_DIR/gradle-build; log ob-android-gradle.log
 #   verify     NEEDED libraries and undefined dynamic symbols of the .so files against the NDK's API-29 system libs
 #   all        (default) every step above in order; a step that is up to date costs seconds
-# Env: OB_ROOT=C:/ob, OB_SRC, OB_ANDROID_R=$OB_ROOT/android-r, OB_ANDROID_NDK=<sdk>/ndk/27.0.12077973,
+# Env: OB_ROOT=C:/ob, OB_SRC, OB_ANDROID_R=$OB_ROOT/android-r, OB_ANDROID_APK=$OB_ROOT/android-apk, OB_ANDROID_NDK=<sdk>/ndk/27.0.12077973,
 #      OB_ANDROID_SDK=%LOCALAPPDATA%/Android/Sdk, OB_ANDROID_BT=<sdk>/build-tools/35.0.0, OB_JDK=Android Studio jbr.
 # Nothing here touches a device: install/run commands are in docs/ops/android.md.
 set -u
@@ -39,7 +39,7 @@ TC="$OB_ANDROID_NDK/build/cmake/android.toolchain.cmake"
 LLVM="$OB_ANDROID_NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
 SHADERC_SRC="$OB_ROOT/pcsx2-deps-build/shaderc-2026.2"
 SHADERC_B="$OB_ROOT/android-shaderc-build"
-APK_DIR="$OB_ROOT/android-apk"
+APK_DIR="${OB_ANDROID_APK:-$OB_ROOT/android-apk}" # OB_ANDROID_APK: another output folder (the net build, tools/net)
 KEYS="$OB_ROOT/android-keys"
 JOBS=16
 mkdir -p "$OB_LOGS"
@@ -109,7 +109,7 @@ step_configure() {
         "-DCMAKE_C_FLAGS_RELWITHDEBINFO=$RELFLAGS" "-DCMAKE_SHARED_LINKER_FLAGS=$SOLDFLAGS" -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF \
         -DPS2X_BUILD_ANALYZER=OFF -DPS2X_BUILD_RECOMP=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF \
         -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF "-DFETCHCONTENT_BASE_DIR=$OB_ROOT/android-fetch" \
-        "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=$OB_T/_deps/raylib-src" \
+        "-DFETCHCONTENT_SOURCE_DIR_RAYLIB=${OB_T_DEPS:-$OB_T/_deps}/raylib-src" \
         "-DPS2X_EXTERNAL_GS_DIR=$egs" "-DOB_PCSX2=$OB_PCSX2" "-DOB_PCSX2_DEPS=$OB_PCSX2_DEPS" "-DOB_ADRENOTOOLS=$OB_ADRENOTOOLS"         "-DPS2X_EXTERNAL_VU1_DIR=$evu" "-DOB_ARMSX2=$OB_ARMSX2" > "$log" 2>&1
     rc=$?
     echo "configure: exit $rc ($log)"

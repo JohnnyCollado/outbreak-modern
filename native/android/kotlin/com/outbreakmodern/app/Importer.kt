@@ -249,8 +249,8 @@ class Importer(private val context: Context, private val settings: Settings, pri
     }.getOrNull()
 
     // Letters, digits, ".", "_", "-" only: the game rejects any other driver name (gpu_driver.cpp IsValidDriverName),
-    // e.g. "turnip T30 (1)" was silently replaced by the system driver (2026-10-26).
-    private fun safe(name: String) = name.trim().replace(Regex("[^A-Za-z0-9._-]"), "_").trimStart('.').take(64).ifEmpty { "import" }
+    // e.g. "turnip T30 (1)" was silently replaced by the system driver (2026-10-26). DriverNames.kt holds the rule.
+    private fun safe(name: String) = safeDriverName(name)
 }
 
 fun gb(bytes: Long): String = when {
