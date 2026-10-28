@@ -195,6 +195,9 @@ namespace
 		qcom.driver_name = "Qualcomm Technologies Inc. Adreno Vulkan Driver";
 		obgpu::DeviceInfo turnip = qcom;
 		turnip.driver_name = "turnip Mesa driver";
+		turnip.device_name = "Adreno (TM) 740";
+		obgpu::DeviceInfo turnip8 = turnip; // the Odin 3 and the OnePlus 13 (reports/2026-10-24-android.md entry 17)
+		turnip8.device_name = "Adreno (TM) 830";
 		obgpu::DeviceInfo noname = qcom;
 		noname.driver_name.clear();
 		obgpu::DeviceInfo mali;
@@ -210,8 +213,16 @@ namespace
 			obgpu::SelfReadLine(a));
 		Check("auto line", obgpu::SelfReadLine(a) == "[gpu] self-read=copy (auto: Qualcomm's driver)", obgpu::SelfReadLine(a));
 		const obgpu::SelfReadDecision t = obgpu::DecideSelfRead(SelfRead::Auto, &turnip);
-		Check("auto on Turnip = PCSX2's choice", t.override_texture_barriers == -1 && !t.disable_framebuffer_fetch &&
+		Check("auto on Turnip, Adreno 7xx = PCSX2's choice", t.override_texture_barriers == -1 && !t.disable_framebuffer_fetch &&
 			t.road == "fetch" && t.why == "auto");
+		const obgpu::SelfReadDecision t8 = obgpu::DecideSelfRead(SelfRead::Auto, &turnip8);
+		Check("auto on Turnip, Adreno 8xx = barrier", t8.override_texture_barriers == 1 && t8.disable_framebuffer_fetch &&
+			obgpu::SelfReadLine(t8) == "[gpu] self-read=barrier (auto: Turnip on Adreno 8xx)", obgpu::SelfReadLine(t8));
+		const obgpu::SelfReadDecision f8 = obgpu::DecideSelfRead(SelfRead::Fetch, &turnip8);
+		Check("fetch forced on Turnip, Adreno 8xx", f8.override_texture_barriers == -1 && !f8.disable_framebuffer_fetch);
+		obgpu::DeviceInfo qcom8 = qcom;
+		qcom8.device_name = "Adreno (TM) 830";
+		Check("auto on Qualcomm's driver, Adreno 8xx = copy (unchanged)", obgpu::DecideSelfRead(SelfRead::Auto, &qcom8).road == "copy");
 		const obgpu::SelfReadDecision m = obgpu::DecideSelfRead(SelfRead::Auto, &mali);
 		Check("auto on Mali = PCSX2's choice (unchanged)", m.override_texture_barriers == -1 && !m.disable_framebuffer_fetch);
 		const obgpu::SelfReadDecision n = obgpu::DecideSelfRead(SelfRead::Auto, nullptr);

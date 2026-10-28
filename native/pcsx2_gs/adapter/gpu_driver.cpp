@@ -508,6 +508,26 @@ namespace obgpu
 			   n.find("turnip") == std::string::npos;
 	}
 
+	bool IsTurnipAdreno8(const DeviceInfo& d)
+	{
+		if (d.vendor_id != kVendorQualcomm)
+			return false;
+		std::string driver, device;
+		for (char c : d.driver_name)
+			driver += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		for (char c : d.device_name)
+			device += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		if (driver.find("turnip") == std::string::npos && driver.find("mesa") == std::string::npos)
+			return false;
+		// "Adreno (TM) 830": the first digit run after "adreno" is the model; 8xx is the 8 Elite generation.
+		const size_t at = device.find("adreno");
+		if (at == std::string::npos)
+			return false;
+		const size_t digit = device.find_first_of("0123456789", at);
+		return digit != std::string::npos && device[digit] == '8' && digit + 2 < device.size() &&
+			   std::isdigit(static_cast<unsigned char>(device[digit + 1])) && std::isdigit(static_cast<unsigned char>(device[digit + 2]));
+	}
+
 	SelfReadDecision DecideSelfRead(SelfRead setting, const DeviceInfo* device)
 	{
 		SelfReadDecision d;
@@ -515,8 +535,9 @@ namespace obgpu
 		if (setting == SelfRead::Auto)
 		{
 			const bool qualcomm = device && IsQualcommProprietary(*device);
-			road = qualcomm ? SelfRead::Copy : SelfRead::Fetch;
-			d.why = qualcomm ? "auto: Qualcomm's driver" : "auto";
+			const bool turnip8 = device && !qualcomm && IsTurnipAdreno8(*device);
+			road = qualcomm ? SelfRead::Copy : turnip8 ? SelfRead::Barrier : SelfRead::Fetch;
+			d.why = qualcomm ? "auto: Qualcomm's driver" : turnip8 ? "auto: Turnip on Adreno 8xx" : "auto";
 		}
 		else
 			d.why = "outbreak.ini";

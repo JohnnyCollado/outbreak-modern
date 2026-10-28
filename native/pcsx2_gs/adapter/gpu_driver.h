@@ -82,7 +82,7 @@ namespace obgpu
 	// Adreno and gates fetch off on the Qualcomm driver for Adreno 8xx (its GSDeviceVK.cpp, 90126bd, :4030-4146).
 	enum class SelfRead
 	{
-		Auto,    // copy on Qualcomm's own driver, PCSX2's choice elsewhere
+		Auto,    // copy on Qualcomm's own driver, barrier for Turnip on Adreno 8xx, PCSX2's choice elsewhere
 		Copy,    // texture barriers off: the renderer reads a copy of the target (OverrideTextureBarriers = 0)
 		Barrier, // in-pass read with texture barriers, no framebuffer fetch
 		Fetch,   // PCSX2's choice: framebuffer fetch where offered, else barriers
@@ -97,6 +97,9 @@ namespace obgpu
 	// Qualcomm's proprietary driver (not Turnip or another Mesa build) on a Qualcomm GPU. Without driver properties
 	// (no driverName) a Qualcomm GPU counts as the proprietary driver: Mesa's drivers always report a name.
 	bool IsQualcommProprietary(const DeviceInfo& d);
+	// Turnip (Mesa) on an Adreno 8xx (the 8 Elite's Adreno 830): its framebuffer fetch draws stale colour, title text
+	// and J's Bar's glows black; barriers draw them right (reports/2026-10-24-android.md entry 17).
+	bool IsTurnipAdreno8(const DeviceInfo& d);
 	// The two PCSX2 GS options it sets, and the log line's road and reason.
 	struct SelfReadDecision
 	{
