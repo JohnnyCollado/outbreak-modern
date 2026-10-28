@@ -635,6 +635,7 @@ namespace ob::server
 			s->host = c.account;
 			answer(c, q, {0, static_cast<uint8_t>(nr)});
 			broadcastSlot(c.area, c.room, nr);
+			log(c.address + ": creating game slot " + std::to_string(nr));
 			break;
 		}
 		case SCENESELECT:
@@ -642,6 +643,8 @@ namespace ob::server
 			if (Slot* s = slotOf(c.area, c.room, c.slot))
 				s->type = byte(1), s->scenario = byte(3);
 			answer(c, q, {0, static_cast<uint8_t>(c.slot), 0, byte(1), 0, byte(3)});
+			log(c.address + ": scenario type " + std::to_string(byte(1)) + ", scenario " + std::to_string(byte(3)) +
+				" (slot " + std::to_string(c.slot) + ")");
 			break;
 		}
 		case SLOTNAME:

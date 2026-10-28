@@ -788,6 +788,26 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - `net-gate.sh` (pcsx2-sw, 100 s): selftest 9/9, **3/3 gated green**, 3 advisory as usual; the J's Bar set skipped
   (no references on this branch).
 
+### 47. Net-tree suites fixed; FINISH sends the scenario and opens the room; how to offer more scenarios still open
+
+- **pcsx2_vu** built against `${OB_T}/_deps` (= `C:/ob/net-t/_deps`, absent: net-t borrows `C:/ob/t/_deps`,
+  `net-tools.sh:12`). `native/pcsx2_vu/CMakeLists.txt` now takes `OB_T_DEPS` (default `${OB_T}/_deps`, the main
+  tree unchanged); `ob.sh` passes it and reconfigures when the cached value differs; `net-env.sh` sets it to
+  `C:/ob/t/_deps` when present. **pcsx2_spu2**: `C:\ob\net-pcsx2-gs-build` had never been staged (no DLLs);
+  `ob.sh pcsx2-gs` in the net env (12 s, smoke PASS) copied z.dll and friends. Suites (152 s): ps2x 572/572,
+  iop 5/5, gs_cache 45/45, ob_diag 24/24, **pcsx2_vu 3/3**, **pcsx2_gs 86/86**, **pcsx2_spu2 7/7**, pcsx2_ipu
+  22/22, pcsx2_sio2 20/20, ob_server 84/84, pcsx2_dev9 23/23, ob_ui 118/118.
+- **ob_server logs** CREATESLOT ("creating game slot N") and SCENESELECT ("scenario type T, scenario S").
+- **Live (loopback):** `creating game slot 1` when the slot is chosen; on the RULE screen, **FINISH** sends
+  `scenario type 1, scenario 0` (record 0 with type 1, presumably a record byte), ob_server opens the slot, and the
+  game shows the room: START GAME / STANDBY / EXIT / MEMBER DATA, "Wait for the game to start", 1/4P (shot `p07`).
+  So no picker comes before the RULE screen; the Triangle view is the current scenario's details
+  (`func_005B0EF0`), not a list; the scenario row did not change with Circle or Right in entry 44's run.
+- **Route:** the handle keyboard ignores cursor moves for a while after a character is typed; `to-lobby.pad` waits
+  240 frames there and now ends with FINISH (the room), instead of Triangle.
+- **Open:** where the RULE screen's scenario choice is offered when more than one scenario is available (the row's
+  input handler; candidates for the count: record byte 0 or 1, which may be the "type" sent with 6509).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

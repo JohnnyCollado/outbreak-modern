@@ -2,7 +2,8 @@
 # on its defaults (report entries 39-40): on a card that holds BWNETCNF the game shows "Network configuration file
 # has loaded" instead of the NET CONNECTION list; the three downs + OK pass it and the game connects (TLS login,
 # lobby). Then: user registration -> "don't register" -> handle name "あ" -> confirm -> lobby LOCAL -> ROOM LIST ->
-# AREA 01 -> slot 1 (Vacant) -> RULE screen -> Triangle (scenario list; empty so far, entry 40).
+# AREA 01 -> slot 1 (Vacant) -> RULE screen -> FINISH: the game sends its scenario (6509) and waits in the room
+# (report entries 40, 44, 47).
 press down 8
 wait 60
 press down 8
@@ -18,9 +19,10 @@ wait 30
 press circle 8
 wait 300
 shot l02-handle
-# Handle name: type あ (cursor starts there), then the 決定 key: down 3, right to the end of the bottom row.
+# Handle name: type あ (cursor starts there), then the 決定 key: down 3, right to the end of the bottom row. The
+# cursor ignores moves for a while after the character is typed (entry 47): wait before moving it.
 press circle 8
-wait 30
+wait 240
 press down 6
 wait 20
 press down 6
@@ -77,6 +79,23 @@ shot l10-rooms
 press circle 8
 wait 300
 shot l11-rule
-press triangle 8
-wait 300
-shot l12-scenario
+# RULE: down 8 to FINISH (the cursor stops there), OK: the game sends the scenario and opens the room.
+press down 8
+wait 30
+press down 8
+wait 30
+press down 8
+wait 30
+press down 8
+wait 30
+press down 8
+wait 30
+press down 8
+wait 30
+press down 8
+wait 30
+press down 8
+wait 30
+press circle 8
+wait 400
+shot l12-room
