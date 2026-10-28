@@ -1,0 +1,119 @@
+From c90af32cf3c95b6d856756624df83bee30d565a7 Mon Sep 17 00:00:00 2001
+From: JohnnyCollado <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 06:05:18 -0400
+Subject: [PATCH] EE scheduler: semaphores with max_count <= 0 are created and
+ count without a limit
+
+Resident Evil Outbreak's NETHTTP overlay (func_006C5E28, the login session's setup) creates its four semaphores
+with max_count 0 and init_count 0. The EE kernel accepts them (the game logs in on PCSX2 with the real BIOS;
+Play!'s HLE kernel copies the counts without checks and its SignalSema never compares against the maximum).
+createSemaphore returned KE_ERROR for maxCount <= 0, so every CreateSema failed, the session was never set up
+and the game showed its communication error before any DNS query. signalSemaphore also returned KE_SEMA_OVF at
+count == maxCount, which would have dropped every signal on such a semaphore.
+
+Now maxCount <= 0 means no limit: creation only rejects a negative init_count or one above a positive maximum,
+and a signal without a waiter always counts. Semaphores with a positive maximum keep their limit.
+---
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp |  6 ++-
+ ps2xTest/src/ps2_runtime_kernel_tests.cpp  | 61 ++++++++++++++++++++++
+ 2 files changed, 65 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 5ae59f1..a75832f 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -892,7 +892,9 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
+ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
+ {
+     assertExecutor();
+-    if (maxCount <= 0 || initCount < 0 || initCount > maxCount)
++    // max_count <= 0 means no limit: the EE kernel accepts it (Outbreak's NETHTTP creates its semaphores with 0;
++    // Play!'s HLE kernel never checks the maximum).
++    if (initCount < 0 || (maxCount > 0 && initCount > maxCount))
+     {
+         return KE_ERROR;
+     }
+@@ -952,7 +954,7 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
+         publishSnapshot();
+         return id;
+     }
+-    if (object->count == object->maxCount)
++    if (object->maxCount > 0 && object->count == object->maxCount)
+     {
+         return KE_SEMA_OVF;
+     }
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index 3b05eef..1a87984 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -905,6 +905,67 @@ void register_ps2_runtime_kernel_tests()
+                      "ReleaseWaitThread must remove the exact semaphore waiter");
+         });
+ 
++        // Outbreak's NETHTTP (func_006C5E28) creates its four semaphores with max_count 0 and init_count 0; the EE
++        // kernel accepts them (Play!'s HLE kernel never checks the maximum), ours returned KE_ERROR and the login
++        // session was never set up (reports/2026-10-26-online-play.md entry 30). max_count <= 0 = no limit.
++        tc.Run("semaphores with max_count 0 are created and count without a limit (patch 0100)", [](TestCase &t)
++        {
++            TestEnv env;
++            EeScheduler &ee = env.runtime.eeScheduler();
++            ee.reset(env.rdram.data(), env.ctx);
++            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
++
++            const int id = ee.createSemaphore(0, 0, 0u, 0u);
++            t.IsTrue(id > 0, "CreateSema with max_count 0 must return a semaphore id, got " + std::to_string(id));
++            if (id <= 0)
++            {
++                return;
++            }
++            t.Equals(ee.signalSemaphore(id, false), id, "first signal without a waiter must count, not overflow");
++            t.Equals(ee.signalSemaphore(id, false), id, "second signal without a waiter must count, not overflow");
++            t.Equals(ee.semaphore(id)->count, 2, "two signals on a max_count 0 semaphore leave count 2");
++            t.Equals(ee.pollSemaphore(id), id, "first poll takes one count");
++            t.Equals(ee.pollSemaphore(id), id, "second poll takes the other");
++            t.Equals(ee.pollSemaphore(id), KE_SEMA_ZERO, "third poll finds the semaphore empty");
++
++            TestEnv blocked;
++            EeScheduler &bee = blocked.runtime.eeScheduler();
++            bee.reset(blocked.rdram.data(), blocked.ctx);
++            bee.bindMainContextForSyscall(blocked.ctx, blocked.rdram.data());
++            const int waitId = bee.createSemaphore(0, 0, 0u, 0u);
++            t.IsTrue(waitId > 0, "a second max_count 0 semaphore must be created too");
++            if (waitId <= 0)
++            {
++                return;
++            }
++            try
++            {
++                bee.waitSemaphore(waitId);
++            }
++            catch (const EeDispatcherTransfer &)
++            {
++            }
++            t.Equals(bee.signalSemaphore(waitId, false), waitId, "signal must hand the semaphore to its waiter");
++            t.Equals(getRegS32(bee.thread(1)->context, 2), waitId, "the woken waiter receives the semaphore id");
++            t.Equals(bee.semaphore(waitId)->count, 0, "a direct handoff leaves count 0");
++        });
++
++        tc.Run("semaphores with a positive max_count keep their limit and invalid counts stay rejected (patch 0100)",
++               [](TestCase &t)
++        {
++            TestEnv env;
++            EeScheduler &ee = env.runtime.eeScheduler();
++            ee.reset(env.rdram.data(), env.ctx);
++            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
++
++            const int id = ee.createSemaphore(0, 1, 0u, 0u);
++            t.IsTrue(id > 0, "max_count 1 semaphore is created");
++            t.Equals(ee.signalSemaphore(id, false), id, "first signal reaches the maximum");
++            t.Equals(ee.signalSemaphore(id, false), KE_SEMA_OVF, "second signal on max_count 1 still overflows");
++            t.Equals(ee.createSemaphore(-1, 0, 0u, 0u), KE_ERROR, "negative init_count is still rejected");
++            t.Equals(ee.createSemaphore(2, 1, 0u, 0u), KE_ERROR, "init_count above a positive max_count is still rejected");
++        });
++
+         tc.Run("event waiters are FIFO and clear modes apply before testing the next waiter", [](TestCase &t)
+         {
+             TestEnv env;
+-- 
+2.55.0.windows.3
+

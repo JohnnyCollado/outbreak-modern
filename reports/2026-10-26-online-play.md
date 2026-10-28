@@ -345,6 +345,140 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   `www01.kddi-mmbb.jp`, or a direct TCP connect); then the IOP side can be compared call by call.
 - **Not on the game's path (kept):** 0095 (ioman file operations). The settings card writer stays as a reference.
 
+### 25. PCSX2 reference: skipping DNAS is harmless; the real game resolves the login host 7.5 s after the link
+
+- **New machine first (2026-10-28):** the handoff (`docs/ops/online-play-handoff.md`) missed four inputs of
+  `net-recompile.sh`: `C:\ob\net-ovl\demo.toml` (hand-written, in no repo), `C:\ob\splat\SLPM_654.28` (splat asm),
+  `C:\ob\net-work\{SLPM_654.28, main-functions.csv}`, and `C:\ob\net-src` (a copy of `net-up`). Copied from the old PC;
+  then net-tools 570/570, recompile errors=0 for main and all 8 overlays, runner built (918/918). `mbedtls-build.bat`
+  hard-coded VS Community's vcvars; it now reads `OB_VCVARS`.
+- **Live PCSX2 on the fan server** (PCSX2 2.9 portable, DEV9 sockets, intercept DHCP, internal DNS with host entries
+  DNAS → 153.121.44.150, KDDI → 208.72.237.15): link up 269.9 s, first packet 285.4 s = DNS for
+  `gate1.jp.dnas.playstation.org`, DNAS over 443, then `www01.kddi-mmbb.jp` at 291 s, login pages over 443, lobby TCP
+  8300 at 729 s.
+- **The question:** does our DNAS skip (NETWK `func_0058B3D0` → return 1, `ob.sh recompile`) cut out setup the stack
+  needs? **Test:** the same two words as a PCSX2 cheat (`ps2_emu/cheats/SLPM-65428_32088394.pnach`, guarded by NETWK's
+  original `0x27BDFFE0` at 0x58B3D0 because GAME/DEMO share 0x540000), KDDI hosts → 127.0.0.2 so nothing reaches the
+  fan server with a cheat on. **Result:** link up 83.4 s, DNS for `www01.kddi-mmbb.jp` at 90.9 s (answered 127.0.0.2),
+  no DNAS query. No TCP connection logged to 127.0.0.2 (not followed up).
+- **So:** with the same skip the real game's stack sends a DNS query 7.5 s after the link; ours sends nothing and
+  shows 通信エラー after polling wrapper fn 56 for ~20 s. The wall is in our IOP/wrapper path, not in the skip.
+  Next: the game's AVE wrapper RPCs (sid 0x01270030) in PCSX2 from the lease to that DNS query, against ours.
+
+### 26. PCSX2 trace of the AVE wrapper: the game waits for fn 56 to answer 3 before it resolves a name
+
+- **How:** PCSX2 2.9 log breakpoints ("Log When Hit" + "Continue on hit"; log formats are not saved to the
+  debugger settings file, so typed in the dialog). The wrapper's client is `D_00309050`, bound in `func_001C3BD0`
+  (main 0x1C3C20, `sceSifBindRpc` 0x117558); all calls go through `sceSifCallRpc` 0x117728 with send = receive buffer
+  `D_00309080`, sync calls return at 0x1C3D60. Breakpoint 1 at 0x117728, condition `a0 == 0x309050`, logs fn/mode/
+  sizes and the buffer's first 8 words; breakpoint 2 at 0x1C3D60 logs v0 and the same 8 words after the reply.
+  Register-relative memory reads in a log format fail validation ("unaligned") because the dialog evaluates them
+  with the current registers; fixed addresses work. Normal fan-server settings, no cheat. Raw log kept in
+  `C:\ob\net-logs\pcsx2-ave-trace-20261028.log`.
+- **Sequence (fn decimal, word 6 of the reply in brackets):** 70/71/72 then 5, 41, 43, then 44 and 70 polled until
+  the link (smap 401.70 s); 46, 54; 56 → [1], [2], [3]; 55 (lease address in word 7), 1, 70 ×90, 48, 59, 49 (entry
+  24's 55/1/48/49); **30; 74 [4]; 70 ×25; 56 [3] 0.9 s after 74**; 70 …; then 5 s later **61** (send buffer starts
+  "gate"), **63** [-2, -2, 1] while the DNS query goes out, **62**, **7** (word 7 = 0x962C7999 = 153.121.44.150: connect;
+  PCSX2 opens TCP 443), then 15 (status), 16/19 (send/receive), 13, 22 (close). The same 61/63/62/7 pattern repeats
+  for `www01.kddi-mmbb.jp` after DNAS.
+- **So:** fn 56 is a state query, and "3" is what the game waits for before it starts name resolution (fn 61). Ours
+  polls fn 56 for ~20 s after 30/74 and never reaches fn 61, which fits "nothing is ever sent". Not yet checked:
+  what our fn 56 answers (needs a temporary log in `RPC.cpp` `sceSifCallRpc` for this client, as entry 24's was).
+
+### 27. Ours answers fn 56 the same; the game's own state machine keeps polling instead of moving on
+
+- **How:** a temporary `TEMP-AVE` log in `C:\ob\net-src`'s `RPC.cpp` (`SifCallRpc`: the request before
+  `handleRpc`, the reply in `completeClient`, client 0x309050 only; not in `net-up`, no patch), runner rebuilt
+  (`net-runner.sh`, 7 s), `net-live.sh` + `to-network.pad` + down ×3, ○. NET card: a copy of PCSX2's `Mem1.ps2`
+  (has `BISLPM-65428NETBIO` and `BWNETCNF`) as `C:\ob\saves-net\Mcd001.ps2`. 通信エラー reproduced on the new PC.
+  Trace kept in `C:\ob\net-logs\ours-ave-trace-20261028.err`.
+- **Result:** every call and every reply word (first 8 of 12) is identical to PCSX2's from fn 70 through 55/1/48/59/49,
+  30, 74 [4] and fn 56 [3]. **The difference is after that:** PCSX2 calls fn 56 twice after 74 (then 5 s later 61);
+  ours calls it ~48 more times (alternating with 70) and never calls 61. 52 fn 56 calls in total vs 12.
+- **Reading the code:** fn 56 is `func_001C4E70` (returns reply word 6), called only through `func_001C67A0`, which has
+  three callers: `func_001C5430`, `func_001CE100` (retries < 3, error code -0x54) and `func_001CEE40` (a state machine
+  on a byte state and a halfword timer: state 5 polls fn 56 and leaves when it answers -1/-2/0 or when the timer
+  runs out; state 6 sets the timer to 300). Which caller loops in our build, and why it does not leave, is the next
+  question: a timer that never runs down (frame/VBlank pacing) or a state written by something we do differently.
+- **The temporary log stays in `net-src` until that is answered**; revert with `up-sync.sh` (copies `net-up`'s
+  `RPC.cpp` back) before any gate run.
+
+### 28. In ours the loop is the connection check `func_001C5430` (mode 1), waiting for an event that was already taken
+
+- **How:** more `TEMP-AVE` prints in `net-src`'s generated runner files (`func_001C67A0` result + caller + flag +
+  mode, entries of `func_001C6890`, `func_001C6900`, `func_001C5320`, `func_001C5360`, `func_001CEE40`); runner rebuilt
+  (5-6 s) and the same live route, three runs (traces `ours-ave-trace{2,3,4}-20261028.err` in `C:\ob\net-logs`).
+  Note for next time: a running runner holds the exe (LNK1104); end it first. `sed` inserting `\n` into C strings
+  breaks them; use the editor.
+- **The game's flow** (static reading): `func_001CCA20` steps on `D_0031E7E0`; one step calls `func_001C5430(mode =
+  *D_0023BC54, D_0023BC38 == 1)` until it returns nonzero, the next runs `func_001CEE40` (polls fn 56, timer, then name
+  resolution). In mode 1, `func_001C5430` asks the state (fn 56) and then `func_001C6890`, which returns 1 only when
+  an "event" is pending: fn 70 reply word 6 nonzero, cached in `D_00309480`. `func_001CD440` (from `func_001CD6B0` and
+  `func_001CE100`) takes the event: `func_001C6900` clears the flag and calls fn 71.
+- **Ours:** mode = 1, `D_0023BC38` = 1. The first fn 70 (right after OK) answers word 6 = 1; `func_001CD440` peeks
+  and takes it at once (fn 71). After the lease, `func_001C5430` polls fn 56 (3) and fn 70 (word 6 = 0) ~35 times;
+  no new event, so it never returns nonzero and `func_001CEE40` never runs.
+- **PCSX2** shows the same fn 70 → 71 right after OK and word 6 = 0 for every fn 70 after the lease, yet it reaches
+  `func_001CEE40`'s behaviour (fn 56 twice, a 5 s wait, fn 61). Open: does PCSX2 also run in mode 1, and does its
+  `func_001C5430` see the event before `func_001CD440` takes it (an ordering/thread difference), or does it leave by
+  another path? Next: one PCSX2 run with log breakpoints at 0x1C6890 (ra, flag, mode), 0x1C6900 (ra) and
+  0x1CEE40 (ra), the same points ours prints.
+
+### 29. Correction to 28: the connection check is the main loop's periodic poll, not the gate
+
+- **PCSX2** (log breakpoints at 0x1C6890, 0x1C6900, 0x1CEE40; `C:\ob\net-logs\pcsx2-flag-trace-20261028.log`): mode 1
+  too; the first event is peeked and taken by `func_001CD440` right after OK, as in ours; `func_001C5430`'s peek never
+  sees an event; **`func_001CEE40` never runs**. Yet DNS goes out at 203.8 s and 210.2 s.
+- **Ours** (entry prints on `func_001C5430`, `func_001A87F0`, `func_001CCA20`; trace 5): `func_001CCA20` never runs;
+  `func_001A87F0` is the game's main loop (entered once from 0x100210): wait a frame (`func_001B9070`), and every 32
+  frames (`D_0023BBA4 & 0x1F`) call `func_001C5430`. So the 36 calls are the normal periodic check (PCSX2 calls it
+  a few seconds apart). **Entry 28's "the loop is the connection check" is wrong**: the check is a bystander.
+- **What issues the name lookup:** fn 61 = `func_001C4FF0` (62 = `func_001C5050`, 63 = `func_001C50A0`, 7 =
+  `func_001C4160`), called from `func_001C5B90` (← `func_001CD0D0`) and `func_001C6FD0` (← `func_001C7240`). Next: find
+  which of these runs in PCSX2 and not in ours, walking up until the two builds differ.
+
+### 30. Root cause: NETHTTP creates its semaphores with max_count 0; our CreateSema rejects them
+
+- **PCSX2** (log breakpoints at the four functions above; `C:\ob\net-logs\pcsx2-path-trace-20261028.log`): DNAS's
+  lookup comes from NETDNAS (`func_001C6FD0` ← 0x6CAB0C); the login lookup from **NETHTTP**: `func_001C7240` ←
+  0x6C51E4 (in `func_006C5158`) → `func_001C6FD0` → fn 61, 5.1 s after link with the DNAS skip.
+- **Ours, walking up with prints** (traces 6-11 in `C:\ob\net-logs`): none of the four runs; NETHTTP is loaded (CD
+  search for `\PROG\NETHTTP.BIN`). `func_006C5158` is reached only from the thread `func_006C5408`, created in
+  `func_006C5440` ← `func_006C56C0` ← `func_007136E0` = entry 4 of NETHTTP's step table `jtbl_00719EF0`. NETWK's
+  `func_0056EC80` runs a connection object's step function (`+0x118` → `+0x64`): ours goes [0], [1], [1], [2],
+  [11], [12], three times, never [4]. Step [2] (`func_00712F70`) goes to [11] with error 2 when
+  `func_006C0498` (create the session object) returns 0: its `calloc(1, 0x210)` works, `func_006C5E28` returns -1.
+  At its failure label: **all four `CreateSema` returned -1**; nothing after them ran (stacks 0, threads 0).
+- **Why:** `func_006C5E28` passes `ee_sema_t{max_count = 0, init_count = 0}` (names `D_0071A4B0`...). Our
+  `EeScheduler::createSemaphore` returns `KE_ERROR` for `maxCount <= 0` (`EeScheduler.cpp:895`). The real kernel
+  accepts it (the game works on PCSX2's real BIOS); Play!'s HLE kernel copies the values without checks and its
+  SignalSema never compares against the maximum ("TODO: Check maximum value"). Second trap behind it: our
+  `signalSemaphore` returns `KE_SEMA_OVF` when `count == maxCount` with no waiter, so a max-0 semaphore would drop
+  every signal.
+- **Also seen:** the second helper thread's entry `D_006C5BA8` lies inside `func_006C5AF8` (0x6C5AF8-0x6C5CD0), so
+  it has no recompiled entry; our `StartThread` would refuse it (`hasFunction`). It comes after the semaphores; to be
+  checked once they work.
+- **Proposed (awaiting the developer):** PS2Recomp 0100, tests first: max_count <= 0 = no limit (create accepts,
+  signal always counts), other semaphores unchanged.
+
+### 31. PS2Recomp 0100 (semaphores without a limit); the next wall is a thread that starts mid-function
+
+- **0100** (developer: "use your best judgement" → option A): `createSemaphore` accepts `maxCount <= 0` as no limit;
+  `signalSemaphore` overflows only below a positive maximum. Tests written first in PS2RuntimeKernel (two cases):
+  571/572 without, 572/572 with. Committed in `net-up` (`c90af32`), exported, README row, pins 0001-0100.
+- **Live** (`net-src` synced, runner rebuilt, same route; `C:\ob\net-logs\ours-fix0100-20261028.{err,log}`): NETHTTP's
+  setup now creates its semaphores (ids 36-39), both stacks and both threads (9, 10), then fails at the **second
+  `StartThread`**: its entry `D_006C5BA8` lies inside `func_006C5AF8` (0x6C5AF8-0x6C5CD0), so the runtime has no
+  function there (`StartThread` checks `hasFunction`) and returns KE_ERROR; setup still returns -1 and the game
+  still retries [0], [1], [2], [11], [12]. Next: a thread entry in the middle of a recompiled function (a new
+  function entry for 0x6C5BA8 in the overlay's function list, or the runtime starting the containing function at
+  that pc), tests first.
+- **State of `net-src`:** `up-sync.sh` restored `RPC.cpp`/`Thread.cpp` (their TEMP-AVE prints are gone); the
+  TEMP-AVE prints in the generated runner files (`func_001C67A0`, `func_001CEE40`, `func_001C5320/5360/6890/6900`,
+  `func_001C5430`, `func_001A87F0`, `func_001CCA20`, `func_001C5B90/6FD0/7240`, `func_001CD0D0`, nethttp
+  `6C0498/5158/5408/5440/5E28` and the 21 API entries) stay until the next `net-recompile.sh`, which regenerates
+  them. They exist only on the new PC.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

@@ -20,6 +20,9 @@ ps2_emu/
 __pycache__/
 .claude-state/
 
+# This PC's paths for the online-play harness (sourced by tools/net/net-env.sh)
+tools/net/net-env.local.sh
+
 # Johnny's local playtest launcher (machine-specific paths)
 play.bat
 

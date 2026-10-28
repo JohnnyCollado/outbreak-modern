@@ -1,0 +1,14 @@
+# PS2Recomp configuration for Outbreak's DEMO overlay (PROG/DEMO.BIN, MWo3 id 2 at 0x540000),
+# wrapped as an ELF by tools/mwo3_to_elf.py; function list from tools/splat_functions.py.
+
+[general]
+input = "demo.elf"
+ghidra_output = "demo-functions.csv"
+output = "./output-demo/"
+single_file_output = false
+patch_syscalls = false
+patch_cop0 = true
+patch_cache = true
+module = "demo"
+stubs = []
+skip = []

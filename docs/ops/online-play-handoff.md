@@ -3,7 +3,7 @@
 Everything decided and found is in git on `netplay-research`: the plan (`docs/plans/2026-10-26-online-play.md`,
 `docs/plans/2026-10-27-ob-server.md`), the research notes (`research/2026-10-2{6,7}-*.md`), the struggle report
 (`reports/2026-10-26-online-play.md`, entries 1-24: read 19-24 first), the PS2Recomp patches
-(`upstream/ps2recomp/0087-0099`, pins in `docs/ops/pins.md`), `native/ob_server`, `native/pcsx2_dev9`,
+(`upstream/ps2recomp/0087-0100`, pins in `docs/ops/pins.md`), `native/ob_server`, `native/pcsx2_dev9`,
 `tools/ob/mcd.py`, and the drive harness in `tools/net/` (copied from the ignored `.run/spike/`).
 
 ## What is not in git and how to get it back
@@ -12,7 +12,7 @@ Everything decided and found is in git on `netplay-research`: the plan (`docs/pl
 |---|---|---|
 | `D:\...\game_files\` | the disc, extracted (SLPM_654.28, `iop/modules`, `ntgui2`, saves) | `docs/ops/build.md`: extract your own disc image; never in git |
 | `C:\ob\up` | PS2Recomp git clone at `eb8688b` + patches 0001-0086 (`git am`) | `docs/ops/pins.md`; `tools/ob.sh` sets it up |
-| `C:\ob\net-up` | git worktree of `C:\ob\up`, branch `net-online` = main's 0086 + 0087-0099 | `git worktree add C:\ob\net-up -b net-online 30bd436`, then `git am upstream/ps2recomp/0087-*.patch ... 0099-*.patch` |
+| `C:\ob\net-up` | git worktree of `C:\ob\up`, branch `net-online` = main's 0086 + 0087-0100 | `git worktree add C:\ob\net-up -b net-online 30bd436`, then `git am upstream/ps2recomp/0087-*.patch ... 0100-*.patch` |
 | `C:\ob\net-src`, `net-r`, `net-work`, `net-ovl`, `net-t`, `net-logs`, `net-ioptests`, `net-ob-server`, `net-pcsx2-gs-build` | the online-play build trees (a copy of `net-up` + generated code, the runner, recompiler work dir, overlays, tools, logs) | `source tools/net/net-env.sh` then `tools/net/net-tools.sh` (tools + ps2x_tests), `tools/net/net-recompile.sh` (overlays incl. netwk/netaq/nethttp, ~20 min once), `tools/net/net-runner.sh` (runner only, seconds), `tools/net/dev9-tests.sh`, `tools/net/ob-server-tests.sh` |
 | `C:\ob\pcsx2`, `pcsx2-deps` | PCSX2 v2.9.134 + its deps for the GS/DEV9 libraries | `tools/ob.sh pcsx2-gs` (clones and builds) |
 | `C:\ob\mbedtls\v2.28.10` | mbedTLS for ob_server's old TLS | `tools/net/mbedtls-build.sh` (clones from GitHub, builds); pin in `docs/ops/pins.md` |
@@ -34,7 +34,7 @@ Download (all GitHub, public; the scripts pin the versions):
 
 | What | Command |
 |---|---|
-| PS2Recomp (`C:\ob\up`, branch `outbreak-patches` = `eb8688b` + our patches) | `git clone https://github.com/ran-j/PS2Recomp C:\ob\up; git -C C:\ob\up checkout -b outbreak-patches eb8688b; git -C C:\ob\up am (Get-ChildItem upstream\ps2recomp\00*.patch)` — 0001-0086 for main's tree; the online branch `net-online` adds 0087-0099 in a worktree (`git -C C:\ob\up worktree add C:\ob\net-up -b net-online`) |
+| PS2Recomp (`C:\ob\up`, branch `outbreak-patches` = `eb8688b` + our patches) | `git clone https://github.com/ran-j/PS2Recomp C:\ob\up; git -C C:\ob\up checkout -b outbreak-patches eb8688b; git -C C:\ob\up am (Get-ChildItem upstream\ps2recomp\00*.patch)` — 0001-0086 for main's tree; the online branch `net-online` adds 0087-0100 in a worktree (`git -C C:\ob\up worktree add C:\ob\net-up -b net-online`) |
 | PCSX2 v2.9.134 + its deps (zstd, shaderc, glslang, SPIRV, zlib, libpng; checksummed) | `bash tools/ob.sh pcsx2-gs` (clones, patches, builds) |
 | mbedTLS 2.28.10 | `git clone --depth 1 --branch v2.28.10 https://github.com/Mbed-TLS/mbedtls.git C:\ob\mbedtls\v2.28.10`, then `tools/net/mbedtls-build.sh` |
 | Outbreak decomp (names only, optional) | `git clone https://github.com/GalaxyNostalgia/Outbreak-decomp C:\ob\decomp-src` at `eb6af38` |
@@ -54,12 +54,28 @@ NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. S
 `peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
 Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-27, entry 24)
+## Where it stands (2026-10-28, entry 31)
 
-OK on the setting loads the drivers and DHCP completes (192.0.2.100 from PCSX2's internal server); the game then
-shows 通信エラー without sending any DNS, ARP or TCP. Open: what the AVE-TCP wrapper (sid 0x01270030) functions
-30/74/56 do and why nothing is transmitted. The planned check: a PCSX2 reference run of the same screen (what the
-real game sends right after the lease). Patch 0095 is correct but unused by this game.
+The cause of "nothing is sent after the lease" was found by comparing PCSX2 (log breakpoints) with the runner
+(temporary prints), entries 25-31: NETHTTP's login session setup (`func_006C5E28`) failed because our
+`CreateSema` rejected `max_count` 0. **PS2Recomp 0100** fixes that (572/572). The setup now fails one step later:
+its second helper thread starts at `0x6C5BA8`, inside the recompiled `func_006C5AF8`, and `StartThread` refuses an
+entry that is not a function start. Next: support that thread entry (tests first), then expect the DNS query for
+`www01.kddi-mmbb.jp`. Patch 0095 is correct but unused by this game.
+
+To continue on the old PC: `git pull`, then in `C:\ob\net-up` `git am upstream/ps2recomp/0100-*.patch` (net-online
+is at 0099 there), `tools/net/up-sync.sh`, `tools/net/net-runner.sh`. The overlay config `demo.toml` is now kept in
+`tools/net/demo.toml` (copy it to `$OB_OVL`).
+
+## Fresh machine: what the first recompile also needs (missed in the first version of this note)
+
+`net-recompile.sh` reads four things that are not rebuilt by the scripts above: `$OB_OVL\demo.toml` (in git now:
+`tools/net/demo.toml`), `$OB_SPLAT` = `C:\ob\splat\SLPM_654.28` (splat asm for main and the 8 overlays, from the
+decomp's `configure.py` or copied from a PC that has it), `$OB_WORK\{SLPM_654.28, main-functions.csv}` (the ELF
+from `game_files` and `tools/splat_functions.py` over the main asm), and `C:\ob\net-src` (a copy of `net-up`
+without its `.git` file). Machine paths (`OB_RUN`, `OB_VCVARS`, `OB_PY`, `OB_GRADLE_JDK`) go in the git-ignored
+`tools/net/net-env.local.sh`, sourced last by `net-env.sh`. A PCSX2 memory card that already has the game's NET
+save works as `C:\ob\saves-net\Mcd001.ps2`.
 
 ## Preferences carried in memory on the old PC (not in git)
 
