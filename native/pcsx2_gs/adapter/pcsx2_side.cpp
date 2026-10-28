@@ -311,8 +311,13 @@ namespace
 		// GS.AspectRatio at boot, which is not built here.
 		EmuConfig.CurrentAspectRatio = s_aspect;
 		EmuFolders::Textures = s_textures; // GSTextureReplacements reads <Textures>/<serial>/ at GSopen
-		// PCSX2's own log (swap chain present mode, fallbacks, resize errors) -> pcsx2-gs.log in the working dir.
+		// PCSX2's own log (swap chain present mode, fallbacks, resize errors, the Vulkan device's features, memory-card
+		// warnings) -> pcsx2-gs.log in the working dir; on Android the app's internal folder (the working dir is / there).
+#if defined(__ANDROID__)
+		Log::SetFileOutputLevel(LOGLEVEL_DEV, Path::Combine(EmuFolders::AppRoot, "pcsx2-gs.log").c_str());
+#else
 		Log::SetFileOutputLevel(LOGLEVEL_DEV, "pcsx2-gs.log");
+#endif
 		const GSVSyncMode vsync = !(s_child && s_visible) ? GSVSyncMode::Disabled
 			: s_vsync_pref == 0 ? GSVSyncMode::Disabled : s_vsync_pref == 2 ? GSVSyncMode::FIFO : GSVSyncMode::Mailbox;
 #if defined(__ANDROID__)

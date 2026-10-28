@@ -931,8 +931,15 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   Test: card in internal storage (`/data/user/0/com.outbreakmodern.app/files/memcards-int`, `PS2X_SAVES` in net.env).
   Result: same freeze; the internal card rewritten at 17:56:25, checked 17:56:56, still all `0xFF` (`od` shows one
   repeated `ff` line).
-- **Next:** compare the card driver's commands on Android with Windows (pcsx2_sio2 log) to see which write never
-  lands.
+- **Clue (18:03, new build, working copy `files/memcards/Mcd001.ps2`):** the only non-blank bytes are in pages
+  16370-16375 (the card's last blocks): each page's 16-byte ECC area holds `77 7f 7f` ×4, the ECC of all-zero data,
+  while the 512 data bytes stay `0xFF`. So the ECC writes land and the data writes do not (or are written as `0xFF`).
+  PCSX2's path: `MemoryCardProtocol::WriteData` (`C:\ob\pcsx2\pcsx2\SIO\Memcard\MemoryCardProtocol.cpp:208`) →
+  `FileMemoryCard::Save` (`MemoryCardFile.cpp:441`, read, AND, write back). Not yet known why only on Android.
+- **PCSX2's console messages are lost on Android:** `pcsx2-dev9.log` goes to the working folder, not writable there,
+  and nothing reaches logcat. Needed before the next step.
+- **Parked** (developer, 2026-10-28: the graphics driver bug first).
+- **Next:** route PCSX2's log to the app's files folder on Android, then compare the card commands with Windows.
 
 ### 55. Android: a save folder is required before Play (developer's request, 2026-10-28)
 
