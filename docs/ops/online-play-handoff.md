@@ -54,7 +54,13 @@ NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. S
 `peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
 Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-28, entry 34)
+## Where it stands (2026-10-28, entry 35)
+
+Entry 35: with the server names at the PC's LAN address the connection reaches ob_server, and the game's TLS
+client rejects ob_server's self-signed certificate (fatal alert 42 bad_certificate). Next: what NETHTTP verifies
+and what certificate the fan server sends.
+
+Before entry 35:
 
 Entry 34: the connect to 127.0.0.2:443 never leaves the PS2 (no frame after the DNS query; likely its stack keeps
 127.x as loopback), and after ~14 000 status polls the game retries from the start. The server name needs an address

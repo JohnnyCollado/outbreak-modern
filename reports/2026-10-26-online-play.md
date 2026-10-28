@@ -560,6 +560,26 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   127.0.0.0/8 that reaches ob_server from the host: e.g. the PC's LAN address with ob_server bound there. Decision
   pending with the developer (binding on the LAN opens the ports to the local network).
 
+### 35. With a LAN address the connection reaches ob_server; the game rejects its certificate (alert 42)
+
+- **Test (developer approved the LAN exposure for one run):** `PS2X_NET_HOSTS` with both names → 192.168.0.76 (this
+  PC's LAN address), `ob_server --bind 192.168.0.76`, otherwise as entry 34 (script kept out of git:
+  `net-live.sh` with the hosts changed). Server and runner stopped after; the LAN ports closed (netstat).
+- **Loopback confirmed as entry 34's cause:** the same route now connects. fn 7 to `0x4C00A8C0` = 192.168.0.76:443;
+  the adapter logs `Socket: Creating New TCP Connection to 443`; ob_server logs `[web] 192.168.0.76: accepted`.
+- **The handshake:** fn 16 sends a 0x66-byte TLS 1.0 ClientHello; fn 19 receives ob_server's reply (5 + 0x331
+  bytes: ServerHello and the Certificate); then fn 16 sends 7 bytes `15 03 01 00 02 02 2A` = a TLS alert, **fatal,
+  42 bad_certificate**, then 13/22 (close). ob_server logs `handshake failed -0x7280` (`MBEDTLS_ERR_SSL_CONN_EOF`:
+  the client closed). Three tries a few hundred ms apart, then the steps go [11] [12] [0] … as in entry 34.
+- **So:** the game's TLS client (NETHTTP) checks the server certificate, and ob_server's self-signed SHA-1
+  certificate for the site name (`tls_server.cpp:79-98`) does not pass. The note that self-signed is enough
+  (Bioserver1's README, cited in `tls_server.h`) does not hold for this client as configured; entry 25's PCSX2 run
+  against the fan server got through the login pages, so the fan server presents something it accepts.
+- **Next (research before code):** what NETHTTP verifies (built-in root certificates in the overlay's data, the
+  name match, the date, the signature algorithm) and what certificate the fan server sends (its published setup),
+  then make ob_server's certificate pass the same checks. Also open: the address to give the game in normal use
+  (entry 34).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
