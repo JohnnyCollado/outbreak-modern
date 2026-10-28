@@ -987,7 +987,7 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Fix:** `GameGsFixesFor` (`gpu_driver.{h,cpp}`) gives SLPM-65428 `UserHacks_Limit24BitDepth` = prioritise upper;
   the adapter sets it with `ManualUserHacks` (PCSX2 drops user hacks without it: `Pcsx2Config.cpp` MaskUserHacks).
   Tests first (3, did not build without the function), gpu_driver 76/76, ring 11/11, adapter 5/5. Windows,
-  plain `pcsx2-vk`: NET CONNECTION has its text (1,909 bright, `C:\obrames-fix-vk`). Installed on the Odin and
+  plain `pcsx2-vk`: NET CONNECTION has its text (1,909 bright, `C:\ob\frames-fix-vk`). Installed on the Odin and
   the OnePlus. Not yet checked: gameplay with 24-bit depth (J's Bar), and the menu-ordering issue the PCSX2 report
   also mentions.
 - The reference PCSX2's settings were put back (`inis/PCSX2.ini.bak-20261028-netgui`).
