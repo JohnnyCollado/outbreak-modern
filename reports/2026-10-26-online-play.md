@@ -831,6 +831,19 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Handle keyboard:** still unreliable from a fixed route: this run typed "ああ" (the IME conversion pending,
   yellow) and needed two presses of 決定 (commit, then confirm).
 
+### 49. START GAME: the game hands off to the relay, which ob_server does not have yet
+
+- **Run:** the unlocked card (entry 48), loopback; handle `M7HNNS`; RULE: one Right (零下), FINISH.
+- **SCENESELECT number:** 零下 sent `scenario type 1, scenario 1`, 発生 `scenario 0` (entry 48): the number is the
+  record's index (0-based), not record byte 2 (which is 2 for 零下). "Type 1" = record byte 0 or 1 (both 1 here).
+- **START GAME** (left of STANDBY): ob_server `game 2 starts: area 2 room 1 slot 1, 1 player(s)`; the game shows
+  its start screen (Kevin, handle M7HNNS, あ, RESULT POINT 32181 from the save; shot `v07`), then a black screen.
+- **Relay:** the adapter logs `Creating New TCP Connection to 8690` then `TCP: Connect error: 10061` (refused)
+  every 2-5 s from 316.8 s on: the game connects to the relay address ob_server handed out (192.0.2.2:8690, mapped
+  to 127.0.0.1:8690 by 0003) and nothing listens there: the relay is ob_server's next step (its plan's step D).
+- **So:** login, lobby, room, rules, scenario choice, room open and game start all work against ob_server on this
+  PC; the relay is the wall.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
