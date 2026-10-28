@@ -808,6 +808,29 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Open:** where the RULE screen's scenario choice is offered when more than one scenario is available (the row's
   input handler; candidates for the count: record byte 0 or 1, which may be the "type" sent with 6509).
 
+### 48. The developer was right: the scenarios offered come from the save; with an unlocked save all five cycle
+
+- **Developer (2026-10-28):** "it comes down to the save data"; supplied a fully unlocked online save as an
+  Action Replay Max `.max` and as a PS3 export (zip with `BISLPM-654284E455442494F.PSV` = `BISLPM-65428NETBIO`,
+  and `BISLPM-656924F4232.PSV`). Uploads in the session's upload folder; not in git.
+- **The run cards had no online save:** `C:\ob\saves-net\Mcd001.ps2` holds `BISLPM-65286NET` (another product
+  number) and `BWNETCNF`, no `BISLPM-65428NETBIO`. The developer's PCSX2 `Mem1.ps2` has one (261,320 bytes), but a
+  run with a copy of it went to the proxy settings and a connection menu without the client's "Setting 1" (stopped:
+  that route needs the network setup done by hand).
+- **PSV layout** (read from the file, psdevwiki refused the request): `\0VSP`, type 2 at 0x3C, file count at 0x64,
+  folder entry at 0x68 (attribute 0x8427, name at 0x80), one 0x3C-byte entry per file from 0xA0 (created, modified,
+  size, attribute 0x8497, name, data offset); data plain (`icon.sys` starts "PS2D"). A scratch script copied the four
+  files (the 261,320-byte save, two icons, icon.sys) onto a copy of the run card with `mcd.py`'s `Card.add_dir`:
+  `C:\ob\saves-net-unlocked\Mcd001.ps2`.
+- **Live (loopback, that card):** login, handle, lobby, room as before; on the RULE screen Right now cycles
+  **発生 → 零下 → 巣窟 → 獄炎 → 決意 → 発生**, ◀ ▶ arrows shown from the second on (shots `u15`-`u19`). FINISH on 発生
+  sent `scenario type 1, scenario 0`, the room opened. So ob_server's data file is right for all five, and the
+  number offered follows the player's online save (unlocks), not the server.
+- **Not checked:** the number FINISH sends for a later scenario (the run wrapped back to 発生 first); what the
+  `BISLPM-65692` save in the zip is.
+- **Handle keyboard:** still unreliable from a fixed route: this run typed "ああ" (the IME conversion pending,
+  yellow) and needed two presses of 決定 (commit, then confirm).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
