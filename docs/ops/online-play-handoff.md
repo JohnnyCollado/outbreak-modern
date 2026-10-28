@@ -54,7 +54,13 @@ NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. S
 `peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
 Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-28, entry 32)
+## Where it stands (2026-10-28, entry 33)
+
+Entry 33: the game looks up `www01.kddi-mmbb.jp` (the adapter answers 127.0.0.2, logged in `pcsx2-dev9.log` in the
+boot's working dir) and asks the wrapper to connect there (fn 7), then polls the connection status (fn 15) without
+end; ob_server sees no connection. Next: the TCP connect between the adapter and 127.0.0.2:443.
+
+Before entry 33:
 
 Entry 32: the thread entry is registered through PS2Recomp's `entry_points` (`tools/ob.sh` `ovl_entries`, checked
 after each overlay recompile); NETHTTP's four helper threads now start, twice, and the game sits on NOW LOADING with

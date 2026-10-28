@@ -243,7 +243,9 @@ ps2x::iop::Dev9Device* ps2CreateExternalDev9(const std::string& interfaceName, c
 	std::vector<ob_dev9_host> list;
 	for (const PS2Dev9Host& h : hosts)
 		list.push_back(ob_dev9_host{h.name.c_str(), {h.address[0], h.address[1], h.address[2], h.address[3]}});
-	const ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size())};
+	// The adapter's messages (DNS host-list answers, socket errors) -> pcsx2-dev9.log in the working dir, as PCSX2's
+	// own log goes to pcsx2-gs.log (pcsx2_side.cpp) when that one is open first.
+	const ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size()), "pcsx2-dev9.log"};
 	if (!ob_dev9_open(&config))
 	{
 		ob_dev9_close();

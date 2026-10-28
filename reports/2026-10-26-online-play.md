@@ -508,6 +508,31 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Next:** why the setup runs twice and where the second thread's work stops: the DNS query (a DEV9-side log of DNS
   questions, or PCSX2 log breakpoints in `func_006C5408`/`func_006C5158` against ours), then the TCP connect to 443.
 
+### 33. The name lookup and the connect go out; the game then polls the connection status (fn 15) forever
+
+- **DEV9's own log (kept):** `ob_dev9_config.log_path`; `ob_dev9_open` opens PCSX2's log file at info level when
+  none is open (one per process; info = DNS host-list answers and socket/session errors, not DevCon's line per
+  packet). The runner's hook passes `pcsx2-dev9.log` (working dir: `C:\ob\net-logs` for boots). Test first in
+  `native/pcsx2_dev9/tests`: the log names the host-list answer; 15/16 without, 16/16 with.
+- **Temporary prints (`net-src` only):** `RPC.cpp` `SifCallRpc` for the AVE wrapper client 0x309050 without fn
+  56/70 (fn, ra, first 8 send words, 48 bytes as text); NETHTTP's step runner `func_00712A60` (step byte `+0x40`,
+  printed when it changes); the `StartThread` print of entry 32.
+- **Live** (same route; `C:\ob\net-logs\boot-net-live.err`, `pcsx2-dev9.log`): wrapper 71, 72, 5, 41, 43, 44 ×97,
+  46, 54, 55, 1, 48, 59, 49, 30, 74 (as PCSX2, entry 26); NETHTTP steps [0] [1] [2] (threads 9-10) [3] [4] (threads
+  11-12); then **61** with `www01.kddi-mmbb.jp`, **63** ×3, **62**, and the adapter logs at 148.9 s
+  `DEV9: DNS: www01.kddi-mmbb.jp found in hosts`; then **7** (connect) with word 7 = `0x0200007F` = 127.0.0.2, the
+  ob_server address; then **15** (status) 14 109 times and nothing else. PCSX2 goes 7 → 15 → 16/19 (send/receive).
+  ob_server logged no connection; the adapter logged no socket error. This run went through the steps once (no
+  second setup as in entry 32's run; this run was slowed by the prints, so that difference may be timing).
+- **Pad route:** the fn 15 prints (2.3 MB of stderr) slowed the game enough that the route's last `wait 3600`
+  timed out; next time the print leaves out fn 15 (count only).
+- **Answer to entry 32's questions:** the DNS query does go out and is answered; the connect is issued to the right
+  address. The wall is now the TCP connect: whether the adapter's Sockets layer opens a host socket to 127.0.0.2:443
+  (SYN seen, host connect result) and what our fn 15 answers against PCSX2's.
+- **Next:** the fn 15 reply words in ours (reply side of `SifCallRpc`, as entry 27's log) and the port in fn 7's
+  send words 8-9; on the adapter side, whether a TCP session is created (PCSX2 `TCP_Session` at DevCon level for one
+  run, or netstat during the run).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

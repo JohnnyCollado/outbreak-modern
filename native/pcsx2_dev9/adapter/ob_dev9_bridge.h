@@ -20,6 +20,9 @@ struct ob_dev9_config
 	const char* interface_name;  // host network interface for the Sockets adapter; null or "" = automatic
 	const ob_dev9_host* hosts;
 	uint32_t host_count;
+	// The adapter's own messages (DHCP, DNS answers, sessions; written only when something happens) go to this file,
+	// unless PCSX2's log file is already open (one per process: then they go there). null or "" = none.
+	const char* log_path;
 };
 
 // Starts DEV9 with the Ethernet adapter in Sockets mode, its DHCP on and its internal DNS (no HDD). false: the adapter

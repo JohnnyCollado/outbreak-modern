@@ -5,6 +5,7 @@
 // - closed, DEV9 answers 0; open, the revision register reads 0x32 (the driver's "is a network adapter there");
 // - a DHCP DISCOVER gets an OFFER with an address and a DNS server, and raises INTC line 13 (RXEND, unmasked);
 // - a DNS query for gate1.jp.dnas.playstation.org (configured in mixed case) gets the configured host address;
+// - the adapter's own messages reach the configured log file (the host-list answer is logged by name);
 // - DMA 8 takes only psxDma8's CHCRs.
 // With no usable network interface the Sockets adapter can't start: the network checks are skipped, said so.
 #include "ob_dev9_bridge.h"
@@ -138,7 +139,9 @@ int main()
 	Check(ob_dev9_read8(kRev) == 0, "closed: DEV9 answers 0 (the driver's 'unknown dev9 hardware')");
 
 	const ob_dev9_host hosts[] = {{"GATE1.jp.dnas.playstation.org", {10, 1, 2, 3}}};
-	const ob_dev9_config config{nullptr, hosts, 1};
+	const char* kLog = "ob_dev9_tests.log";
+	std::remove(kLog);
+	const ob_dev9_config config{nullptr, hosts, 1, kLog};
 	if (!ob_dev9_open(&config))
 	{
 		std::printf("SKIP: no usable network interface for the Sockets adapter; network checks not run\n");
@@ -222,6 +225,17 @@ int main()
 			std::printf(" %02X", answer[i]);
 		std::printf("\n");
 	}
+	// DNS_Server.cpp logs a host-list answer ("DEV9: DNS: <name> found in hosts"); the adapter's log file has it.
+	std::string log;
+	if (FILE* f = std::fopen(kLog, "rb"))
+	{
+		char buf[4096];
+		for (size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;)
+			log.append(buf, n);
+		std::fclose(f);
+	}
+	Check(log.find("gate1.jp.dnas.playstation.org found in hosts") != std::string::npos,
+		"the adapter's log names the host-list answer");
 
 	std::vector<uint8_t> ram(0x10000, 0);
 	Check(ob_dev9_dma(ram.data(), static_cast<uint32_t>(ram.size()), 0x100, (1u << 16) | 1u, 0x00000201u) ==

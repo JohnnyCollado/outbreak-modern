@@ -8,6 +8,7 @@
 
 #include "Config.h"
 #include "DEV9/DEV9.h"
+#include "common/Console.h"
 
 #include <cstring>
 
@@ -70,6 +71,10 @@ bool ob_dev9_open(const ob_dev9_config* config)
 		e.Enabled = true;
 		d.EthHosts.push_back(e);
 	}
+	// DEV9's messages go through PCSX2's one log file (common/Console.cpp); open it only if nothing else has. Info
+	// level: DNS host-list answers, session and socket errors; not DevCon's line per packet.
+	if (config && config->log_path && config->log_path[0] && !Log::IsFileOutputEnabled())
+		Log::SetFileOutputLevel(LOGLEVEL_INFO, config->log_path);
 	s_irq = s_dmaDone = false;
 	s_irqIn = -1;
 	if (DEV9init() != 0)
