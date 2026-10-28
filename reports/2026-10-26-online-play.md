@@ -522,7 +522,10 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   11-12); then **61** with `www01.kddi-mmbb.jp`, **63** ×3, **62**, and the adapter logs at 148.9 s
   `DEV9: DNS: www01.kddi-mmbb.jp found in hosts`; then **7** (connect) with word 7 = `0x0200007F` = 127.0.0.2, the
   ob_server address; then **15** (status) 14 109 times and nothing else. PCSX2 goes 7 → 15 → 16/19 (send/receive).
-  ob_server logged no connection; the adapter logged no socket error. This run went through the steps once (no
+  The adapter logged no socket error (a failed host connect would log "TCP: Connect error", `TCP_Session_In.cpp:235`;
+  with interface "Auto" the socket is not bound to a LAN address, `sockets.cpp:137`). ob_server's empty log says
+  nothing: it prints no line on an accept or a handshake (`tls_server.cpp:219-246`), so whether a TCP connection
+  reached it is not known (correction made the same day; see the table below). This run went through the steps once (no
   second setup as in entry 32's run; this run was slowed by the prints, so that difference may be timing).
 - **Pad route:** the fn 15 prints (2.3 MB of stderr) slowed the game enough that the route's last `wait 3600`
   timed out; next time the print leaves out fn 15 (count only).
@@ -540,6 +543,7 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 | Answering DNAS/login inside the adapter avoids old TLS (research 5b) | The game does the TLS itself; the answering side must speak it | Game strings + corbin.zip guide while planning | plan P4 |
 | The in-game network code is in NETWK (milestone docs) | It is NETAQ (0x820000); NETWK is the lobby | Reading the overlays' code and strings | research 7.1 |
 | mbedTLS 2.28 needs `MBEDTLS_REMOVE_3DES_CIPHERSUITES` undefined for 3DES (said in the session) | That define only drops 3DES from the default list; a suite set explicitly still negotiates | The control handshake on the stock build negotiated it | plan P4 result |
+| No connection reached ob_server (entry 33, its empty log) | ob_server logs nothing on accept or handshake; unknown | Reading `tls_server.cpp` while planning the next step | entry 33 |
 
 ## Still open
 

@@ -58,7 +58,7 @@ Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
 Entry 33: the game looks up `www01.kddi-mmbb.jp` (the adapter answers 127.0.0.2, logged in `pcsx2-dev9.log` in the
 boot's working dir) and asks the wrapper to connect there (fn 7), then polls the connection status (fn 15) without
-end; ob_server sees no connection. Next: the TCP connect between the adapter and 127.0.0.2:443.
+end; whether a TCP connection reaches ob_server is unknown (it logs no accepts). Next: the TCP connect between the adapter and 127.0.0.2:443.
 
 Before entry 33:
 
