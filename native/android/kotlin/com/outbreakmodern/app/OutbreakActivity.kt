@@ -35,6 +35,8 @@ class OutbreakActivity : NativeActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     // The touch controls (TouchOverlay.kt): a window over the game, made once the game's window is attached.
     private var touch: TouchOverlay? = null
+    // The memory cards: the game plays on a working copy, copied out to the chosen save folder (SaveCards.kt).
+    private var cards: CardSync? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val settings = Settings(this)
@@ -52,6 +54,11 @@ class OutbreakActivity : NativeActivity() {
         getExternalFilesDir(null)?.resolve("net.env")?.takeIf { it.isFile }?.let { file ->
             for ((key, value) in parseDevEnv(file.readText())) Os.setenv(key, value, true)
         }
+        // After net.env: the save folder decides where the cards are. The launcher copied them in at Play.
+        TreeCardFolder.chosen(this, settings)?.let { tree ->
+            Os.setenv("PS2X_SAVES", settings.workCardsDir.path, true)
+            cards = CardSync(settings.workCardsDir, TreeCardFolder(this, tree))
+        }
         super.onCreate(savedInstanceState)
         window.immersive(underCutout = true)
     }
@@ -68,10 +75,13 @@ class OutbreakActivity : NativeActivity() {
 
     override fun onPause() {
         touch?.releaseAll() // nothing stays pressed while the game is in the background
+        cards?.flush() // the player may leave the app here: the save folder gets the latest cards
         super.onPause()
     }
 
     override fun onDestroy() {
+        cards?.stop()
+        cards = null
         touch?.destroy()
         touch = null
         scope.cancel()
@@ -99,6 +109,7 @@ class OutbreakActivity : NativeActivity() {
     private fun quitToLauncher(model: SettingsModel) {
         touch?.destroy()
         touch = null
+        cards?.flush() // a copy this process can't finish stays marked: the next Play completes it
         startActivity(Intent(this, LauncherActivity::class.java).putExtra(LauncherActivity.EXTRA_FROM_GAME, true)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
         nativeMenuClosed(true, model.inputChanged, model.settingsChanged)

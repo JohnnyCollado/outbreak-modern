@@ -909,6 +909,44 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Scripts:** `tools/net/two-clients-to-room.sh` drives both clients from boot to the host's room with the guest
   joined (the name keyboard steps from entries 47-51).
 
+### 53. Android: the net build on the OnePlus 13 and the Odin 3, against ob_server on the PC (LAN)
+
+- **Build:** `tools/net/net-android.sh` (own NDK tree `C:\ob\net-android-r`, APK folder `C:\ob\net-android-apk`;
+  raylib from `OB_T_DEPS`). Installed on both phones (developer's go-ahead, 2026-10-28). Commit `ae446f2`.
+- **net.env** (`<external files>/net.env`, `PS2X_` lines only, `DevEnv.kt`): the game's server names → the PC
+  (192.168.0.76), `ob_server --bind 192.168.0.76 --host 192.168.0.76 --trace`.
+- **Issue: "Auto" network interface fails on Android.** PCSX2's `GetAdapterAuto` needs a gateway from
+  `/proc/net/route`, which Android does not let apps read. Fix for now: `PS2X_NET_IF=wlan0` in net.env; the app
+  should pass the Wi-Fi interface itself (standalone host work).
+- **Issue: imported driver folders with names the loader refuses.** Fixed: `DriverNames.kt` renames them at start
+  and the choice follows (tests in `DriverNamesTest.kt`).
+
+### 54. Android: formatting a memory card freezes the game (open)
+
+- **Seen:** on the Odin (and reported on the OnePlus), NETWORK PLAY → create the NET file → format: the game freezes.
+  The developer reports a **normal format (not network play) freezes too** (2026-10-28). Windows formats the same
+  blank card fine (`net-live-blank.sh`).
+- **Measured:** while frozen, the card file keeps being rewritten (modification time advancing) but stays all `0xFF`.
+- **Ruled out: slow shared storage.** Hypothesis was that FUSE writes on `/sdcard` made the card driver time out.
+  Test: card in internal storage (`/data/user/0/com.outbreakmodern.app/files/memcards-int`, `PS2X_SAVES` in net.env).
+  Result: same freeze; the internal card rewritten at 17:56:25, checked 17:56:56, still all `0xFF` (`od` shows one
+  repeated `ff` line).
+- **Next:** compare the card driver's commands on Android with Windows (pcsx2_sio2 log) to see which write never
+  lands.
+
+### 55. Android: a save folder is required before Play (developer's request, 2026-10-28)
+
+- **Request:** "have users picking a save folder for memory cards to be a requirement for booting the game." Plan
+  approved ("Yes, build it").
+- **Design:** the game opens its cards by path (`native/pcsx2_sio2`), and a folder from Android's picker has no
+  path, so the game plays on a **working copy in internal storage** (`PS2X_SAVES`), copied in from the chosen folder
+  at Play and back out while it runs (2 s after the last write, on pause, at quit). A copy changed since its last
+  copy-out is marked unsynced and wins over the folder's at the next Play, so a killed game loses nothing; the mark
+  is cleared only by a copy-out with no write during it. The old default folder's cards move in on first use.
+- **Code:** `SaveCards.kt` (rules, `TreeCardFolder`, `CardSync`), the Play gate and picker in `LauncherActivity.kt`,
+  the Memory cards page in `SettingsModel.kt`, `PS2X_SAVES` + watcher in `OutbreakActivity.kt` (set after net.env,
+  so the chosen folder wins). Tests first: `SaveCardsTest.kt` (10).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

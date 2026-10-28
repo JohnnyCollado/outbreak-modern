@@ -16,6 +16,7 @@ interface PickHost {
     fun pickDisc()
     fun pickTree(kind: ImportKind)
     fun pickZip(kind: ImportKind)
+    fun pickSaveFolder()
 }
 
 /**
@@ -526,8 +527,12 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
         val rows = mutableListOf<SRow>()
         val dir = settings.memcardsDir()
         rows += SRow.Header("h-folder", "Save folder")
-        rows += SRow.Info("folder", dir.path, Tone.MUTED)
-        rows += SRow.Info("folder-hint", "A new card is created here. The game asks to format it the first time you save.", Tone.MUTED)
+        val chosen = TreeCardFolder.chosen(context, settings)
+        if (chosen != null) rows += SRow.Info("folder", TreeCardFolder.label(chosen), Tone.GOOD)
+        else rows += SRow.Info("folder", "Not chosen yet: choose one to play", Tone.BAD)
+        rows += SRow.Action("folder-pick", if (chosen == null) "Choose save folder" else "Change save folder") { host?.pickSaveFolder() }
+        rows += SRow.Info("folder-hint", "Your memory cards are kept in this folder. A new card is created there; the game asks to " +
+            "format it the first time you save.", Tone.MUTED)
         rows += SRow.Header("h-cards", "Cards")
         for (slot in 0..1) {
             val name = if (slot == 0) "Mcd001.ps2" else "Mcd002.ps2"

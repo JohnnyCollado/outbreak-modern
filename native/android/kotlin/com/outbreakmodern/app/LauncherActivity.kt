@@ -31,6 +31,7 @@ class LauncherActivity : ComponentActivity(), PickHost {
 
     private val pickDiscLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(::onDisc) }
     private val pickTreeLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { startTree(it) } }
+    private val pickSaveLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(::onSaveFolder) }
     private val pickZipLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { startZip(it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,7 +50,7 @@ class LauncherActivity : ComponentActivity(), PickHost {
             withContext(Dispatchers.IO) { model.refreshDisc() }
             // "Show this screen at start-up" off: straight into the game when the disc checks out (not when the player
             // just quit the game to get here).
-            if (settings.ui("launcher", "on") == "off" && model.disc.verified && savedInstanceState == null &&
+            if (settings.ui("launcher", "on") == "off" && blocker() == null && savedInstanceState == null &&
                 !intent.getBooleanExtra(EXTRA_FROM_GAME, false)) play()
         }
         setContent {
@@ -61,10 +62,11 @@ class LauncherActivity : ComponentActivity(), PickHost {
                     subtitle = "Resident Evil Outbreak File #1 (SLPM-65428)",
                     pages = pages, nav = nav,
                     footerLabels = listOf("Quit", "Play"),
-                    footerDim = listOf(false, !model.disc.verified),
+                    footerDim = listOf(false, blocker() != null),
                     footerActions = { if (it == 0) askQuit() else play() },
                     status = model.statusLine(
                         if (!model.disc.verified) (if (model.discName.isEmpty()) "Choose your game disc to play" else "Disc not verified")
+                        else if (blocker() != null) "Choose a save folder to play"
                         else "Settings save as you change them"
                     ),
                     backLabel = "quit", startLabel = "play",
@@ -100,10 +102,17 @@ class LauncherActivity : ComponentActivity(), PickHost {
 
     private fun play() {
         if (nav.progress != null) return
-        if (!model.disc.verified) {
-            nav.tab = 0
+        blocker()?.let { why ->
+            // The page that fixes it: the disc on Game, the save folder on Memory cards.
+            nav.tab = if (!model.disc.verified) 0 else model.pages().indexOfFirst { it.title == "Memory cards" }.coerceAtLeast(0)
             nav.level = Level.LIST
-            model.note(if (model.discName.isEmpty()) "Choose your game disc first" else model.disc.message)
+            model.note(why)
+            return
+        }
+        // The working copy made current from the save folder (SaveCards.kt); no game without it.
+        val synced = syncCardsIn(settings.workCardsDir, TreeCardFolder(this, TreeCardFolder.chosen(this, settings)!!), settings.legacyCardsDir())
+        if (synced.isNotEmpty()) {
+            model.note(synced)
             return
         }
         if (settings.ui("card_backup", "on") == "on") {
@@ -121,6 +130,10 @@ class LauncherActivity : ComponentActivity(), PickHost {
         am.runningAppProcesses?.filter { it.processName == "$packageName:game" }?.forEach { Process.killProcess(it.pid) }
     }
 
+    /** Why Play can't start yet (the disc, then the save folder), or null. */
+    private fun blocker(): String? = playBlocker(model.disc.verified,
+        if (model.discName.isEmpty()) "" else model.disc.message, TreeCardFolder.chosen(this, settings) != null)
+
     // ---- PickHost ----
     override fun pickDisc() = pickDiscLauncher.launch(arrayOf("application/x-iso9660-image", "application/octet-stream", "*/*"))
 
@@ -132,6 +145,25 @@ class LauncherActivity : ComponentActivity(), PickHost {
     override fun pickZip(kind: ImportKind) {
         pendingKind = kind
         pickZipLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+    }
+
+    override fun pickSaveFolder() = pickSaveLauncher.launch(null)
+
+    private fun onSaveFolder(uri: Uri) {
+        val kept = runCatching { contentResolver.takePersistableUriPermission(uri, TreeCardFolder.FLAGS) }.isSuccess
+        if (!kept) {
+            model.note("That folder can't be used for saves. Choose a folder on this device.")
+            return
+        }
+        TreeCardFolder.chosen(this, settings)?.takeIf { it != uri }?.let { old ->
+            runCatching { contentResolver.releasePersistableUriPermission(old, TreeCardFolder.FLAGS) }
+        }
+        settings.saveFolderFile.writeText(uri.toString())
+        // The cards there now become the game's; a folder without cards receives the current ones.
+        lifecycleScope.launch {
+            val err = withContext(Dispatchers.IO) { syncCardsIn(settings.workCardsDir, TreeCardFolder(this@LauncherActivity, uri), settings.legacyCardsDir()) }
+            model.note(err.ifEmpty { "Save folder: ${TreeCardFolder.label(uri)}" })
+        }
     }
 
     private fun onDisc(uri: Uri) {

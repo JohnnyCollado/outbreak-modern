@@ -15,6 +15,10 @@ class Settings(context: Context) {
     val outbreakIni = File(filesDir, "outbreak.ini").path
     val inputIni = File(filesDir, "input.ini").path
     val gameUriFile = File(filesDir, "game-uri.txt")
+    /** The save folder the player chose (a document tree, SaveCards.kt). */
+    val saveFolderFile = File(filesDir, "save-folder-uri.txt")
+    /** The game's working copy of the cards, in internal storage (PS2X_SAVES; copied to and from the save folder). */
+    val workCardsDir = File(context.filesDir, "memcards")
     val serial = "SLPM-65428"
 
     fun get(key: String, def: String = ""): String =
@@ -49,7 +53,10 @@ class Settings(context: Context) {
         else -> File(filesDir, value)
     }
 
-    fun memcardsDir(): File = resolve(get("saves")) ?: File(filesDir, "memcards")
+    fun memcardsDir(): File = workCardsDir
+
+    /** Where the cards lived before the save folder: the "saves" setting, else memcards in the external files dir. */
+    fun legacyCardsDir(): File = resolve(get("saves")) ?: File(filesDir, "memcards")
 
     // ---- the game disc: a document picked earlier (permission kept), else the one .iso in the files dir ----
     fun savedDiscUri(): Uri? = runCatching { gameUriFile.readText().trim() }.getOrNull()
