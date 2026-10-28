@@ -704,6 +704,25 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   server's bytes with credit, ob_server being AGPL as the research note's option 3 says) and see whether the list
   fills; (b) find the RULE screen's list code in NETWK and the condition per entry.
 
+### 42. Settled by reading NETWK: the scenario list is the login data file (6881/6882), which ob_server leaves empty
+
+Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat asm (`C:\ob\splat\SLPM_654.28\en\netwk`):
+- **The RULE screen** (`func_005B01E0`): after the "scenario" label (`D_005FA4D8`, 0x5B06A4) it draws
+  `func_00552A80(D_0062E236)`, the name of the selected scenario.
+- **The name lookup** `func_00552A80`: record `i` = base + i × 72 (0x48); the name is at +3; a negative word at
+  +0x44 means "no scenario" (returns 0). Base = `func_00552A60()` = `*(0x3065F4) + 0x15540`.
+- **Who fills it** (`func_0054E7A0`): memset 0x2100 bytes at that base, then memcpy from the first downloaded
+  piece (size and address from the 12-byte piece list `D_005FFEC0`, filled through `func_005D0F60`).
+- **The piece list** (`func_005D0FF0`): from the buffer `D_0068AF30`, a count byte (`func_005587A0`) then one
+  big-endian 4-byte size per piece (`func_005587D0`) into the 12-byte entries at `D_00687718`: the INFOSIZES
+  (0x6881) answer; the bytes come with INFOCHUNK (0x6882) (ob_server's names, `lobby.cpp:42`).
+- **So:** ob_server answers INFOSIZES with zeros (count 0, `lobby.cpp:496`), the record area stays cleared, every
+  record's name is "" and its +0x44 word 0 (not negative), and the list shows empty rows. The fan server's file
+  matches this layout: it starts `01 01 01` then 発生 at byte 3 (record 0's name).
+- **Not yet known:** the meaning of record bytes 0-2, of the bytes after the name (the fan file has `09 02 03 04…`
+  there) and of the +0x44 word; how many records; what the file's other pieces hold (the fan file also has
+  disc IDs, "BIOHAZARD OUTBREAK" and `<BODY>…<END>` message text).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
