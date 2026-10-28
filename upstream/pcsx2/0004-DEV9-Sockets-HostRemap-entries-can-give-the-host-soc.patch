@@ -1,0 +1,89 @@
+From e27b590fb9ebeeb9dd0a3bc93ee7a8e3449f2c71 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 15:52:08 -0400
+Subject: [PATCH] DEV9 Sockets: HostRemap entries can give the host socket's
+ own (source) address
+
+Bound before connect() when set (0.0.0.0 = the host picks, as before). Lets two clients on one host reach a server
+on loopback as different addresses (127.0.0.1, 127.0.0.2).
+---
+ pcsx2/DEV9/Sessions/HostRemap.cpp                   |  4 +++-
+ pcsx2/DEV9/Sessions/HostRemap.h                     |  6 ++++--
+ pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp | 11 +++++++----
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/pcsx2/DEV9/Sessions/HostRemap.cpp b/pcsx2/DEV9/Sessions/HostRemap.cpp
+index a00d881..be0b57c 100644
+--- a/pcsx2/DEV9/Sessions/HostRemap.cpp
++++ b/pcsx2/DEV9/Sessions/HostRemap.cpp
+@@ -16,9 +16,10 @@ namespace Sessions::HostRemap
+ 		s_entries = std::move(entries);
+ 	}
+ 
+-	bool Apply(PacketReader::IP::IP_Address* ip, u16* port)
++	bool Apply(PacketReader::IP::IP_Address* ip, u16* port, PacketReader::IP::IP_Address* source)
+ 	{
+ 		std::lock_guard lock(s_lock);
++		source->integer = 0;
+ 		for (const Entry& e : s_entries)
+ 		{
+ 			if (e.from != *ip || (e.fromPort != 0 && e.fromPort != *port))
+@@ -26,6 +27,7 @@ namespace Sessions::HostRemap
+ 			*ip = e.to;
+ 			if (e.toPort != 0)
+ 				*port = e.toPort;
++			*source = e.source;
+ 			return true;
+ 		}
+ 		return false;
+diff --git a/pcsx2/DEV9/Sessions/HostRemap.h b/pcsx2/DEV9/Sessions/HostRemap.h
+index 1f5b775..e8ee367 100644
+--- a/pcsx2/DEV9/Sessions/HostRemap.h
++++ b/pcsx2/DEV9/Sessions/HostRemap.h
+@@ -18,9 +18,11 @@ namespace Sessions::HostRemap
+ 		u16 fromPort; // 0 = any port
+ 		PacketReader::IP::IP_Address to;
+ 		u16 toPort; // 0 = the same port
++		PacketReader::IP::IP_Address source; // the host socket's own address; 0.0.0.0 = the host picks
+ 	};
+ 
+ 	void Set(std::vector<Entry> entries);
+-	// Rewrites ip/port (host byte order port) when an entry matches; true if one did.
+-	bool Apply(PacketReader::IP::IP_Address* ip, u16* port);
++	// Rewrites ip/port (host byte order port) when an entry matches, and gives its source (0.0.0.0 if none); true if
++	// one did.
++	bool Apply(PacketReader::IP::IP_Address* ip, u16* port, PacketReader::IP::IP_Address* source);
+ } // namespace Sessions::HostRemap
+diff --git a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+index 330a71b..ad1d8d2 100644
+--- a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
++++ b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+@@ -160,18 +160,21 @@ namespace Sessions
+ 		}
+ 
+ 		// The host side may reach the destination elsewhere (HostRemap); the PS2 keeps destIP/destPort. A socket bound
+-		// to the adapter's address cannot reach loopback, so a loopback destination is not bound.
++		// to the adapter's address cannot reach loopback, so a loopback destination is not bound to it; an entry's own
++		// source address (a second client on the same host) is bound instead.
+ 		IP_Address hostIP = destIP;
++		IP_Address source{};
+ 		u16 hostPort = destPort;
+-		HostRemap::Apply(&hostIP, &hostPort);
++		HostRemap::Apply(&hostIP, &hostPort, &source);
+ 		const bool loopback = hostIP.bytes[0] == 127;
++		const IP_Address bindIP = source.integer != 0 ? source : (loopback ? IP_Address{} : adapterIP);
+ 
+ 		int ret;
+-		if (adapterIP.integer != 0 && !loopback)
++		if (bindIP.integer != 0)
+ 		{
+ 			sockaddr_in endpoint{};
+ 			endpoint.sin_family = AF_INET;
+-			endpoint.sin_addr = std::bit_cast<in_addr>(adapterIP);
++			endpoint.sin_addr = std::bit_cast<in_addr>(bindIP);
+ 
+ 			ret = bind(client, reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
+ 
+-- 
+2.46.2.windows.1
+

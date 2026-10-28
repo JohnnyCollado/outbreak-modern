@@ -26,9 +26,12 @@ struct ob_dev9_remap
 	uint16_t from_port;
 	uint8_t to[4];
 	uint16_t to_port;
+	// The host socket's own address (0.0.0.0 = the host picks): a second client on the same PC uses 127.0.0.2 so the
+	// server, which tells players apart by address, sees two players (upstream/pcsx2 0004). Text form "...@a.b.c.d".
+	uint8_t source[4];
 };
 
-// Parses "from[:port]=to[:port]" entries separated by ';' (e.g. "192.0.2.2=127.0.0.1;192.0.2.2:443=127.0.0.1:18443")
+// Parses "from[:port]=to[:port][@source]" entries separated by ';' (e.g. "192.0.2.2=127.0.0.1;192.0.2.2:443=127.0.0.1:18443")
 // into out (at most max); returns how many were read. A malformed entry is skipped and counted in *bad.
 uint32_t ob_dev9_parse_remaps(const char* text, ob_dev9_remap* out, uint32_t max, uint32_t* bad);
 

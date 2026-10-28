@@ -207,6 +207,16 @@ struct LoopbackListener
 		timeval none{};
 		return select(static_cast<int>(s + 1), &r, nullptr, nullptr, &none) == 1;
 	}
+	uint32_t AcceptPeer() const // accepts the waiting connection; its source address (host order), 0 if none
+	{
+		sockaddr_in a{};
+		int len = sizeof(a);
+		const SOCKET c = accept(s, reinterpret_cast<sockaddr*>(&a), &len);
+		if (c == INVALID_SOCKET)
+			return 0;
+		closesocket(c);
+		return ntohl(a.sin_addr.s_addr);
+	}
 };
 
 // PS2X_NET_REMAP's text form (no network needed).
@@ -221,6 +231,11 @@ static void TestParseRemaps()
 			  r[0].to_port == 0,
 		"an address-only remap keeps any port");
 	Check(r[1].from_port == 443 && r[1].to_port == 18443, "a remap with ports moves the port");
+	Check(r[0].source[0] == 0, "no @source = the host picks the source address");
+	Check(ob_dev9_parse_remaps("192.0.2.2=127.0.0.1@127.0.0.2", r, 4, &bad) == 1 && bad == 0 && r[0].source[0] == 127 &&
+			  r[0].source[3] == 2 && r[0].to[3] == 1,
+		"@source gives the host socket's own address (a second client on the same PC)");
+	Check(ob_dev9_parse_remaps("192.0.2.2=127.0.0.1@nope", r, 4, &bad) == 0 && bad == 1, "a malformed @source is skipped");
 	Check(ob_dev9_parse_remaps("", r, 4, &bad) == 0 && ob_dev9_parse_remaps(nullptr, r, 4, &bad) == 0,
 		"empty or missing text = no remaps");
 }
@@ -237,8 +252,9 @@ int main()
 	WSAStartup(MAKEWORD(2, 2), &wsa);
 	LoopbackListener server;
 	const uint8_t kAlias[4] = {192, 0, 2, 2};
-	const ob_dev9_remap remaps[] = {{{192, 0, 2, 2}, 4433, {127, 0, 0, 1}, server.port}};
-	const ob_dev9_config config{nullptr, hosts, 1, kLog, remaps, 1};
+	const ob_dev9_remap remaps[] = {{{192, 0, 2, 2}, 4433, {127, 0, 0, 1}, server.port, {}},
+		{{192, 0, 2, 2}, 4434, {127, 0, 0, 1}, server.port, {127, 0, 0, 2}}};
+	const ob_dev9_config config{nullptr, hosts, 1, kLog, remaps, 2};
 	if (!ob_dev9_open(&config))
 	{
 		std::printf("SKIP: no usable network interface for the Sockets adapter; network checks not run\n");
@@ -348,6 +364,19 @@ int main()
 	}
 	Check(accepted, "a connection to the remapped alias reaches the listener on 127.0.0.1");
 	Check(synAck, "the game's SYN-ACK comes from the alias address and port");
+	Check(accepted && server.AcceptPeer() == 0x7F000001u, "without @source the server sees 127.0.0.1");
+
+	// The same with @source 127.0.0.2: the server sees the connection from 127.0.0.2 (two clients on one PC are told
+	// apart by address).
+	Send(TcpSynFrame(yiaddr, kAlias, 40002, 4434));
+	accepted = false;
+	const auto deadline2 = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (!accepted && std::chrono::steady_clock::now() < deadline2)
+	{
+		Receive(&irq, 50);
+		accepted |= server.Pending();
+	}
+	Check(accepted && server.AcceptPeer() == 0x7F000002u, "with @source 127.0.0.2 the server sees 127.0.0.2");
 
 	std::vector<uint8_t> ram(0x10000, 0);
 	Check(ob_dev9_dma(ram.data(), static_cast<uint32_t>(ram.size()), 0x100, (1u << 16) | 1u, 0x00000201u) ==

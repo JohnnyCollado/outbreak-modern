@@ -80,7 +80,8 @@ bool ob_dev9_open(const ob_dev9_config* config)
 	// level: DNS host-list answers, session and socket errors; not DevCon's line per packet.
 	if (config && config->log_path && config->log_path[0] && !Log::IsFileOutputEnabled())
 		Log::SetFileOutputLevel(LOGLEVEL_INFO, config->log_path);
-	// Destinations the host socket reaches elsewhere (upstream/pcsx2 0003, TCP_Session_Out.cpp SendConnect).
+	// Destinations the host socket reaches elsewhere, and from which address (upstream/pcsx2 0003-0004,
+	// TCP_Session_Out.cpp SendConnect).
 	std::vector<Sessions::HostRemap::Entry> remaps;
 	for (uint32_t i = 0; config && i < config->remap_count; i++)
 	{
@@ -90,6 +91,7 @@ bool ob_dev9_open(const ob_dev9_config* config)
 		e.fromPort = r.from_port;
 		std::memcpy(e.to.bytes, r.to, 4);
 		e.toPort = r.to_port;
+		std::memcpy(e.source.bytes, r.source, 4);
 		remaps.push_back(e);
 	}
 	Sessions::HostRemap::Set(std::move(remaps));
@@ -221,9 +223,15 @@ uint32_t ob_dev9_parse_remaps(const char* text, ob_dev9_remap* out, uint32_t max
 		if (entry.empty())
 			continue;
 		const size_t eq = entry.find('=');
+		const size_t at = entry.find('@');
 		ob_dev9_remap r{};
-		if (eq == std::string::npos || n >= max || !ParseEndpoint(entry.substr(0, eq), r.from, &r.from_port) ||
-			!ParseEndpoint(entry.substr(eq + 1), r.to, &r.to_port))
+		uint16_t sourcePort = 0;
+		const bool sourceOk = at == std::string::npos ||
+			(at > eq && ParseEndpoint(entry.substr(at + 1), r.source, &sourcePort) && sourcePort == 0);
+		if (eq == std::string::npos || n >= max || !sourceOk ||
+			!ParseEndpoint(entry.substr(0, eq), r.from, &r.from_port) ||
+			!ParseEndpoint(entry.substr(eq + 1, at == std::string::npos ? std::string::npos : at - eq - 1), r.to,
+				&r.to_port))
 		{
 			skipped++;
 			continue;
