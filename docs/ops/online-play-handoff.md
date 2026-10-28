@@ -54,7 +54,13 @@ NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. S
 `peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
 Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-28, entry 31)
+## Where it stands (2026-10-28, entry 32)
+
+Entry 32: the thread entry is registered through PS2Recomp's `entry_points` (`tools/ob.sh` `ovl_entries`, checked
+after each overlay recompile); NETHTTP's four helper threads now start, twice, and the game sits on NOW LOADING with
+no connection to ob_server. Next: why the setup repeats and whether the DNS query goes out. Both PCs are at 0100.
+
+Before entry 32:
 
 The cause of "nothing is sent after the lease" was found by comparing PCSX2 (log breakpoints) with the runner
 (temporary prints), entries 25-31: NETHTTP's login session setup (`func_006C5E28`) failed because our

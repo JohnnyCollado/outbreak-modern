@@ -226,6 +226,20 @@ cmd_test() {
     return $red
 }
 
+# Thread entries that splat folds into the function before them, because that function is a thread loop that never
+# returns: each must be registered, or StartThread refuses it (no function there). NETHTTP's second helper thread
+# (reports/2026-10-26-online-play.md entries 31-32).
+ovl_entries() { case "$1" in nethttp) echo 0x6C5BA8 ;; esac; }
+# Every entry of overlay $1 is in its generated function table (output-$1 in the current folder).
+check_ovl_entries() {
+    local a ok=0
+    for a in $(ovl_entries "$1"); do
+        grep -q "// 0x$(echo "${a#0x}" | tr A-F a-f)\$" "output-$1/$1_register_functions.cpp" ||
+            { echo "$1: entry $a not registered"; ok=1; }
+    done
+    return $ok
+}
+
 cmd_recompile() {
     local bad=0 o up asm e
     # Main ELF (recomp-cycle.sh).
@@ -270,6 +284,8 @@ cmd_recompile() {
         "$PY" -I "$REPO/tools/mwo3_to_elf.py" "$OB_RUN/PROG/$up.BIN" "$o.elf" || return 1
         "$PY" -I "$REPO/tools/splat_functions.py" "$asm" "$o-functions.csv" || return 1
         sed -e "s/demo/$o/g" demo.toml > "$o.gen.toml"
+        e=$(ovl_entries "$o" | sed 's/[^ ]*/"&"/g; s/ /, /g')
+        [ -n "$e" ] && sed -i "/^\[general\]/a entry_points = [$e]" "$o.gen.toml"
         # NETWK's DNAS step (func_0058B3D0: loads NETDNAS, runs Sony's check, returns 1 on success) becomes "return 1":
         # NETDNAS has code scrambled at rest that can't be recompiled, our client skips DNAS (plan P4 result), and
         # nothing after it reads its result (reports/2026-10-26-online-play.md entry 13). jr $ra; addiu $v0,$zero,1.
@@ -279,6 +295,7 @@ cmd_recompile() {
         e=$(grep -c '\[error\]' "recomp-$o.log")
         echo "$o: errors=$e warnings=$(grep -c '\[warn' "recomp-$o.log") files=$(ls "output-$o" | wc -l)"
         [ "$e" = 0 ] || bad=1
+        check_ovl_entries "$o" || bad=1
         w=$(cygpath -w "$OB_OVL/output-$o")
         srcs+=("$w\\*.cpp")
         hdrs+=("$w\\${o}_recompiled_functions.h" "$w\\${o}_recompiled_stubs.h")

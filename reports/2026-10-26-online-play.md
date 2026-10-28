@@ -479,6 +479,35 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   `6C0498/5158/5408/5440/5E28` and the 21 API entries) stay until the next `net-recompile.sh`, which regenerates
   them. They exist only on the new PC.
 
+### 32. NETHTTP's second thread entry registered (entry_points); all four helper threads start, still no connection
+
+- **Old PC caught up first:** `net-up` was at 0099; `git am` of 0100 (`584265b`), `up-sync.sh` (EeScheduler.cpp and
+  the kernel tests), runner 11 s.
+- **Cause, read from the generated code:** `0x6C5BA8` opens with its own prologue (`addiu $sp, -0x60`, saves of
+  s0-s2/ra). The code before it, `0x6C5AF8`-`0x6C5BA4`, is a thread loop that ends in a backward `b` and never
+  returns, so splat found no end and folded the next routine in (`nethttp-functions.csv`: `func_006C5AF8` up to
+  `0x6C5CD0`).
+- **Fix, no PS2Recomp change:** PS2Recomp's `[general] entry_points` already registers an address inside a function
+  as an entry of that function (`config_manager.cpp:96`, `ps2_recompiler.cpp:1944`, `function_table_emitter.cpp:108`;
+  its own test at `ps2_recompiler_tests.cpp:1473`). `tools/ob.sh`: `ovl_entries` lists the entries per overlay
+  (NETHTTP: `0x6C5BA8`), written into that overlay's generated config; `check_ovl_entries` after each overlay
+  recompile fails the recompile when one is not in the generated function table. Check written first: it failed on
+  the old output ("entry 0x6C5BA8 not registered") and passes after (`nethttp_register_functions.cpp:1982`). Full
+  `net-recompile.sh` 47 s, errors 0 everywhere, 2 generated files changed.
+- **Live** (`net-live.sh`, `to-network.pad` + three downs and OK; `C:\ob\net-logs\boot-net-live.err`, temporary
+  `TEMP-AVE StartThread` print in `net-src`'s `Thread.cpp`): NETHTTP's threads 9-12 start (`0x6C5AF8`, `0x6C5BA8`,
+  `0x6C5440`, `0x6C5408`, all registered), then the same four again (13-16): the setup runs a second time. The
+  screen stays on NOW LOADING (no 通信エラー within ~4 min); no TCP connection to ob_server on 127.0.0.2 (netstat).
+  Not known yet: whether the DNS query goes out (our DEV9 adapter does not log it).
+- **On this PC the route differs:** its card holds BWNETCNF (entry 20), so after NETWORK PLAY the game shows
+  "Network configuration file has loaded from MEMORY CARD slot 1" instead of the NET CONNECTION list, and the route's
+  downs + OK only dismiss that. Screens in `C:\ob\frames-net-live`.
+- **`StartThread` refuses an entry silently** (KE_ERROR, no message): that hid this wall from the first live runs.
+- **State of `net-src`:** the `TEMP-AVE StartThread` print stays in `Thread.cpp` for the next step; `up-sync.sh`
+  restores it.
+- **Next:** why the setup runs twice and where the second thread's work stops: the DNS query (a DEV9-side log of DNS
+  questions, or PCSX2 log breakpoints in `func_006C5408`/`func_006C5158` against ours), then the TCP connect to 443.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
