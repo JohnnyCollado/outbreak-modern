@@ -321,6 +321,30 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **State for the next session:** `C:\ob\saves-net\Mcd001.ps2` is the pre-`BWNETCNF` card again (the client
   serves the settings; `Mcd001.with-bwnetcnf.ps2` kept beside it). Temporary diagnostics removed from `net-src`.
 
+### 24. OK works: the game loads its network drivers and gets a DHCP lease; it stops before any DNS or TCP
+
+- **How OK was found:** a first-call trace (a temporary log of each first dispatch into the overlay range, in
+  `net-src`'s `lookupFunction`) showed the OK path ending in main 0x1cb640 → 0x1cae40: "stop and unload the USB
+  device searcher" through the EE kernel's own `sceSifStopModule`/`UnloadModule` wrappers (unnamed in the symbol
+  database, so not replaced by HLE). They bind Sony's loadfile RPC server (sid 0x80000006), ask its version
+  (function 255, must read "2800", compared at 0x1ec2ac) and call 7/8. Our IOP had no such server: the bind left
+  `cd->server` null and the game retried forever, so the screen's logic stopped (its frame counter froze) while
+  the picture stayed. **PS2Recomp 0099** (test first, 570/570): the IOP subsystem binds that sid and answers 255,
+  7, 8 and 9.
+- **Then:** OK → hardware check → DEVGLUE, AVEDHCP, AVEPPP, AVEWRAPE, SMAP load (LOADHIGH), NETCNF/NETCNFIF are
+  stopped (7/8 ids 22/21), SMAP negotiates the link, **DHCP works end to end** through PCSX2's adapter (DISCOVER →
+  OFFER → REQUEST → ACK: 192.0.2.100/24, router and DNS 192.0.2.1, domain "PCSX2"; a temporary frame log in
+  `dev9_side.cpp`, reverted). The AVE-TCP wrapper (sid 0x01270030) then returns the lease (fn 55/1/48/49: address,
+  mask, domain, DNS server), fn 30 and 74 run, fn 56 is polled for ~20 s, and the game shows 通信エラーが発生しました
+  ("a communication error occurred, connect again"). **No DNS query, ARP or TCP SYN ever reaches the adapter**, and
+  no request to the wrapper names the game's host: the stack never tries to send after the lease. AVE-TCP's imports
+  are all handled (no alarms: thbase 35-38 unused; DelayThread/Sleep/Wakeup/semaphores); SMAP hits modload 16/17/22
+  unhandled at init (three calls, likely module queries).
+- **Still open:** what fn 30/74/56 are (the wrapper's protocol is Capcom's, undocumented) and why nothing is
+  transmitted. The PCSX2 reference run will show what the real game sends right after DHCP (DNS for
+  `www01.kddi-mmbb.jp`, or a direct TCP connect); then the IOP side can be compared call by call.
+- **Not on the game's path (kept):** 0095 (ioman file operations). The settings card writer stays as a reference.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

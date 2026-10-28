@@ -1,0 +1,199 @@
+From 2c4d622d4e2efb27e4c51e76ffc42d9f2b35fbb3 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 20:24:40 -0400
+Subject: [PATCH] IOP: the loadfile RPC server (sid 0x80000006) binds and
+ serves version, stop, unload and search by name
+
+The EE kernel's own sceSifStopModule / sceSifUnloadModule / sceSifSearchModuleByName wrappers bind to Sony's
+loadfile RPC server (sid 0x80000006, ps2sdk loadfile.h), ask its version (function 255, four ASCII bytes that
+must read "2800") and call functions 7, 8 and 9. The runtime replaces those wrappers by name where the symbol
+database names them, but Resident Evil Outbreak's copies (main 0x11bab8/0x11be88/0x11c090) are unnamed and run
+as guest code: sceSifBindRpc left cd->server null (no IOP server for the sid), the wrapper returned -1, and the
+game's loop "stop the USB device searcher before loading the network driver" (0x1cae40) retried forever: its
+NET CONNECTION screen froze on OK.
+
+IopSubsystem now treats the sid as bindable and answers: 255 -> "2800"; 7 stop {id, ...} -> {0, the module's
+stop result} through stopModule (HLE or emulated), or {-1, 0} for an unknown id; 8 unload {id} -> {0}; 9 search
+{name} -> {id or -1} through findModuleByName. Loads (0, 1, 4-6) stay with the named EE wrappers.
+
+Test (written first): ps2x_tests PS2SifRpc, bind to 0x80000006 sets cd->server; 255 replies "2800"; LIBSD is
+found by 9, stopped by 7 (reply {0, 0}, then not found), unloaded by 8 (0); an unknown id's stop fails. Fails
+without: 569/570.
+---
+ ps2xIOP/src/iop_subsystem.cpp      | 55 ++++++++++++++++++++-
+ ps2xTest/src/ps2_sif_rpc_tests.cpp | 77 ++++++++++++++++++++++++++++++
+ 2 files changed, 131 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index 04f19d9..f82e1b2 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -1,6 +1,7 @@
+ #include "ps2x/iop/iop_subsystem.h"
+ 
+ #include "iop_service.h"
++#include "rpc_reply.h"
+ #include "iop_module_manager.h"
+ #include "emulator/iop_emulator.h"
+ #include "module_factories.h"
+@@ -227,9 +228,25 @@ namespace ps2x::iop
+         return RpcAbi::RuntimeDefault;
+     }
+ 
++    namespace
++    {
++        // Sony's loadfile RPC server (sid 0x80000006, ps2sdk loadfile.h), which the EE kernel's own
++        // sceSifStopModule / sceSifUnloadModule / sceSifSearchModuleByName wrappers bind to, ask the version (255,
++        // must read "2800") and call. Loads
++        // (0, 1, 4-6) are answered by the runtime's named HLE of the EE wrappers; a game whose wrappers are
++        // not replaced by name (Resident Evil Outbreak, main 0x11be88 / 0x11c090) retried the bind forever
++        // while cd->server stayed null, and its network menu froze on OK (patch 0099).
++        constexpr uint32_t kLoadfileSid = 0x80000006u;
++        constexpr uint32_t kLoadfileStop = 7u;        // send {int id; int arglen; ...; char args[]}: reply {ret, result}
++        constexpr uint32_t kLoadfileUnload = 8u;      // send {int id}: reply {ret}
++        constexpr uint32_t kLoadfileSearchName = 9u;  // send {char name[]}: reply {id or -1}
++        constexpr uint32_t kLoadfileVersion = 255u;   // reply: the IOP loadfile module's version, 4 ASCII bytes
++        constexpr uint32_t kLoadfileVersionBytes = 0x30303832u; // "2800": what the EE kernel wrapper expects (RE Outbreak 0x1ec2ac)
++    }
++
+     bool IopSubsystem::canBindRpc(uint32_t sid) const noexcept
+     {
+-        if (m_impl->routes.find(sid) != m_impl->routes.end())
++        if (sid == kLoadfileSid || m_impl->routes.find(sid) != m_impl->routes.end())
+         {
+             return true;
+         }
+@@ -238,6 +255,42 @@ namespace ps2x::iop
+ 
+     RpcResult IopSubsystem::handleRpc(const RpcRequest &request)
+     {
++        if (request.sid == kLoadfileSid)
++        {
++            RpcResult result;
++            result.handled = true;
++            result.resultAddress = request.receive.address;
++            uint32_t reply[2] = {static_cast<uint32_t>(-1), 0u};
++            uint32_t id = 0u;
++            (void)m_impl->host.readGuest(request.send.address, &id, sizeof(id));
++            if (request.function == kLoadfileStop)
++            {
++                int32_t stopResult = 0;
++                if (stopModule(static_cast<int32_t>(id), &stopResult))
++                {
++                    reply[0] = 0u;
++                    reply[1] = static_cast<uint32_t>(stopResult);
++                }
++            }
++            else if (request.function == kLoadfileUnload)
++            {
++                // The image is released by the stop; a known or already released id unloads fine.
++                reply[0] = 0u;
++            }
++            else if (request.function == kLoadfileVersion)
++            {
++                reply[0] = kLoadfileVersionBytes;
++            }
++            else if (request.function == kLoadfileSearchName)
++            {
++                char name[64] = {};
++                (void)m_impl->host.readGuest(request.send.address, name, sizeof(name) - 1u);
++                const int32_t found = findModuleByName(name);
++                reply[0] = static_cast<uint32_t>(found > 0 ? found : -1);
++            }
++            (void)detail::writeRpcWords(m_impl->host, request.receive, reply);
++            return result;
++        }
+         const auto route = m_impl->routes.find(request.sid);
+         detail::IopService *hle = route != m_impl->routes.end() ? route->second : nullptr;
+ 
+diff --git a/ps2xTest/src/ps2_sif_rpc_tests.cpp b/ps2xTest/src/ps2_sif_rpc_tests.cpp
+index b9d927a..aa4123f 100644
+--- a/ps2xTest/src/ps2_sif_rpc_tests.cpp
++++ b/ps2xTest/src/ps2_sif_rpc_tests.cpp
+@@ -293,6 +293,83 @@ void register_ps2_sif_rpc_tests()
+                      "client server pointer must stay null until the emulated IRX registers its SID");
+         });
+ 
++        tc.Run("loadfile RPC (0x80000006) binds and stops, unloads and finds modules", [](TestCase &t)
++        {
++            // Sony's loadfile RPC server: the EE kernel's own sceSifStopModule/UnloadModule/SearchModuleByName
++            // wrappers bind to it and call functions 7, 8 and 9 (ps2sdk loadfile.h). A game whose wrappers are
++            // not replaced by name (Resident Evil Outbreak, main 0x11be88/0x11c090) retried the bind forever
++            // when cd->server stayed null, so its network menu froze on OK.
++            TestEnv env;
++            constexpr uint32_t kClientAddr = 0x00021F00u;
++            constexpr uint32_t kPathAddress = 0x00021000u;
++            constexpr uint32_t kSend = 0x00022000u;
++            constexpr uint32_t kRecv = 0x00022400u;
++            constexpr uint32_t kLoadfileSid = 0x80000006u;
++            const auto putString = [&](uint32_t at, std::string_view text)
++            {
++                std::memcpy(env.rdram.data() + at, text.data(), text.size());
++                env.rdram[at + text.size()] = 0u;
++            };
++            const auto replyWord = [&](uint32_t index)
++            {
++                int32_t value = 0;
++                std::memcpy(&value, env.rdram.data() + kRecv + index * 4u, sizeof(value));
++                return value;
++            };
++
++            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
++            putString(kPathAddress, "rom0:LIBSD");
++            setRegU32(env.ctx, 4, kPathAddress);
++            setRegU32(env.ctx, 5, 0u);
++            setRegU32(env.ctx, 6, 0u);
++            SifLoadModule(env.rdram.data(), &env.ctx, &env.runtime);
++            const int32_t libsdId = getRegS32(env.ctx, 2);
++            t.IsTrue(libsdId > 0, "LIBSD loads");
++
++            setRegU32(env.ctx, 4, kClientAddr);
++            setRegU32(env.ctx, 5, kLoadfileSid);
++            setRegU32(env.ctx, 6, 0u);
++            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
++            t.Equals(getRegS32(env.ctx, 2), KE_OK, "binding the loadfile server completes");
++            const SifRpcClientData client = readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr);
++            t.IsTrue(client.server != 0u, "the loadfile server is bound (cd->server set): the kernel wrappers poll it");
++
++            // After binding, the kernel wrapper asks function 255 for the IOP loadfile version and compares the
++            // four bytes with "2800" (the value its data holds at 0x1ec2ac); anything else fails every call.
++            std::memset(env.rdram.data() + kSend, 0, 16u);
++            std::memset(env.rdram.data() + kRecv, 0xEE, 16u);
++            ps2x::iop::RpcResult version = callIop(env, kLoadfileSid, 255u, kSend, 0u, kRecv, 4u);
++            t.IsTrue(version.handled, "version (255) is served");
++            t.IsTrue(std::memcmp(env.rdram.data() + kRecv, "2800", 4) == 0, "the version reply is \"2800\"");
++
++            std::memset(env.rdram.data() + kSend, 0, 512u);
++            putString(kSend, "libsd");
++            std::memset(env.rdram.data() + kRecv, 0xEE, 16u);
++            ps2x::iop::RpcResult search = callIop(env, kLoadfileSid, 9u, kSend, 32u, kRecv, 4u);
++            t.IsTrue(search.handled, "search by name (9) is served");
++            t.Equals(replyWord(0), libsdId, "search by name returns the module id");
++
++            std::memset(env.rdram.data() + kSend, 0, 512u);
++            writeGuestU32(env.rdram.data(), kSend, static_cast<uint32_t>(libsdId));
++            std::memset(env.rdram.data() + kRecv, 0xEE, 16u);
++            ps2x::iop::RpcResult stop = callIop(env, kLoadfileSid, 7u, kSend, 512u, kRecv, 8u);
++            t.IsTrue(stop.handled, "stop (7) is served");
++            t.Equals(replyWord(0), 0, "stop returns 0 in the reply's first word");
++            t.Equals(replyWord(1), 0, "stop writes the module's stop result (0) in the second word");
++            t.IsTrue(env.runtime.findIopModuleByName("libsd") <= 0, "the module is gone after the stop");
++
++            writeGuestU32(env.rdram.data(), kSend, static_cast<uint32_t>(libsdId));
++            std::memset(env.rdram.data() + kRecv, 0xEE, 16u);
++            ps2x::iop::RpcResult unload = callIop(env, kLoadfileSid, 8u, kSend, 16u, kRecv, 4u);
++            t.IsTrue(unload.handled, "unload (8) is served");
++            t.Equals(replyWord(0), 0, "unload returns 0");
++
++            writeGuestU32(env.rdram.data(), kSend, 777u);
++            std::memset(env.rdram.data() + kRecv, 0xEE, 16u);
++            (void)callIop(env, kLoadfileSid, 7u, kSend, 512u, kRecv, 8u);
++            t.IsTrue(replyWord(0) < 0, "stopping an unknown id fails");
++        });
++
+         tc.Run("register bind call updates descriptors and payload", [](TestCase &t)
+         {
+             TestEnv env;
+-- 
+2.46.2.windows.1
+
