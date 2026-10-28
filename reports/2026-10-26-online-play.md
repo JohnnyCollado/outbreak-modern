@@ -607,6 +607,26 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Next:** the game's own verdict: its `scePrintf` lines are compiled out (`ps2_log.h` `AGRESSIVE_LOGS` 0,
   `TTY.cpp:16`); a temporary print of those lines in `net-src` names the failing check for ob_server's certificate.
 
+### 37. The game's verdict: OpenSSL cannot decode ob_server's certificate (ASN.1 error), before any of its own checks
+
+- **How:** a temporary print in `net-src`'s `TTY.cpp` `scePrintf` of every line whose format string lies in NETHTTP
+  (0x6C0000-0x720000); runner 8 s; one LAN run as entry 35 (developer approved; server and runner stopped after,
+  LAN ports closed).
+- **Seen:** three connections, each `SSL Handshake failure. err = 0xd07e095` (printed from ra 0x6CBF88), and nothing
+  else from NETHTTP: none of `func_006CD388`'s lines ("recved cert", dates, CA match). So the handshake fails inside
+  OpenSSL while it reads the certificate, before the game's own check runs; entry 36's checks are not the wall yet.
+- **The code:** OpenSSL packs errors as library << 24 | function << 12 | reason: library 0x0D = ASN1; in OpenSSL
+  0.9.6's `crypto/asn1/asn1.h` (GitHub tag `OpenSSL_0_9_6`, read 2026-10-28) function 126 = `d2i_ASN1_BYTES` and
+  reason 149 = `WRONG_TAG`: a field of ob_server's certificate has a type tag this decoder does not expect. Sony's
+  build may number them differently: matching them to this binary's error sites was not finished (unverified).
+- **Where ob_server's certificate differs from the fan one that passes** (`tls_server.cpp:79-103` against entry 36):
+  X.509 **v3** (fan: v1, no extensions); validity to **2099**, which DER writes as GeneralizedTime (fan: UTCTime to
+  2026); self-signed (fan: issued by a separate CA sent in the chain); SHA-1 (fan: SHA-256). OpenSSL 0.9.6 itself
+  reads both time types (`x_val.c`, `d2i_ASN1_TIME`), but an older Sony copy may read only UTCTime. Leading
+  suspects: the GeneralizedTime end date, then the v3 version field.
+- **State of `net-src`:** the `TTY.cpp` print stays for the next run, with entry 32-34's prints; `up-sync.sh`
+  removes them.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
