@@ -580,6 +580,33 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
   then make ob_server's certificate pass the same checks. Also open: the address to give the game in normal use
   (entry 34).
 
+### 36. What NETHTTP checks in the server certificate, and what the fan server sends (research, no code)
+
+- **NETHTTP's TLS:** Sony's `libhttp` 1.2.61 (`nethttp.bin 0x5A980`) on OpenSSL of the 0.9.6 era (strings dated
+  06-Mar-2001); CA certificates load from a file or from memory ("cert file = %s", `BIO_new_mem`, 0x5A9F0-0x5AB20).
+- **The only built-in CA in the whole game:** a PEM at `nethttp.bin 0x59AF0` (838 bytes): C=US, O=RSA Data
+  Security, Inc., OU=Secure Server Certification Authority, valid 1994-11-09 to 2010-01-07. No other PEM in any
+  PROG overlay or the main ELF; "VeriSign" appears in none of them as text. (Scan script kept out of git.)
+- **The check, `func_006CD388`** (static reading of the splat asm, nethttp `text.s` around 0x6CD388; messages
+  printed through `scePrintf`): no certificate → -0x7D3; each received certificate printed; dates against the current
+  time (`func_006CCE10`; the date parser `func_006CCD48` takes UTCTime of 13 and GeneralizedTime of 15 characters,
+  so ob_server's 2099 end date parses); a loop matching the received certificates against a CA list (`func_0070C0A0`
+  / `0070C0B0` / `0070C0D0` / `0070C360`) → "Could not match client certificate to Server CA!!" (-0x7D6); on a
+  match, the commonName against the host name (`func_006CCC00`, only on one branch) → -0x7D7; then
+  `func_0070D2E0` → "X509 verification failed." (-0x7D1).
+- **The fan server** (TAB64-K/ps2-outbreak-server, `dnas/Dockerfile`, read 2026-10-28): one Apache site on 443 for
+  every name, `SSLCertificateFile /etc/dnas/cert-jp.pem`, chain `ca-cert.pem`, `ServerName
+  gate1.jp.dnas.playstation.org`. `cert-jp.pem` (decoded here): subject CN=gate1.jp.dnas.playstation.org,
+  O=Cyberpunks; issuer "C=US, O=VeriSign, Inc., OU=Class 3 Public Primary Certification Authority" (a CA the fans
+  made, their own key; `ca-cert.pem` is that CA, self-signed, 2016-04-18 to 2026-04-16); **sha256WithRSA**,
+  1024-bit key; valid until 2026-04-16 (expired now). Its README's "self-signed works" is not what it serves.
+- **What does not add up yet:** entry 25's PCSX2 run passed the login pages with that certificate: wrong host name
+  for www01, an issuer name that is not the built-in CA, a SHA-256 signature a 2001 OpenSSL cannot check (and, if the
+  run's clock was 2026-10, an expired one). So the game's check is looser than the reading above, or its CA list is
+  filled at run time from somewhere else (NETDNAS's data is scrambled at rest, entry 3). Unverified.
+- **Next:** the game's own verdict: its `scePrintf` lines are compiled out (`ps2_log.h` `AGRESSIVE_LOGS` 0,
+  `TTY.cpp:16`); a temporary print of those lines in `net-src` names the failing check for ob_server's certificate.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
