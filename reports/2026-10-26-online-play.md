@@ -683,6 +683,27 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **Next:** where the scenario list comes from (the RULE screen's code in NETWK, against Bioserver1's create-room
   replies: research note section 7 "6509 scenario", open question 3).
 
+### 41. Where the RULE screen's scenario list could come from (research, not settled)
+
+- **ob_server's answers with guessed contents** (`lobby.cpp`): INFOSIZES/INFOCHUNK (6881/6882) answered "no file"
+  (`:496-504`), RANKINGS 207 zero bytes (`:505-511`), fixed bytes for UNK61A1 (`:459`) and UNK6308 (`:547`).
+- **The 6881/6882 data file** (research note section 7, open point 1): the fan server's `Packet6881.java`
+  (TAB64-K/ps2-outbreak-server, bioserver1, read 2026-10-28; described, nothing copied): one byte array of several
+  thousand bytes, served in slices (header: index, offset and size big-endian, then the bytes); it starts
+  `01 01 01`, Shift-JIS 発生 ("Outbreak"), "outbreak", and holds `SLPM-65428/65429/65430`, `BIOHAZARD OUTBREAK`,
+  a `BIOHAZARD OUTBREAK BR` marker and Shift-JIS message blocks in `<BODY>…<END>`; no plain scenario list seen.
+- **The scenario titles are the game's own:** the main ELF holds 発生, 零下, 巣窟, 獄炎, 決意 at 0x231C48-0x231C68
+  (file offset 0x131E48), through the pointer table `D_002167B0`; the only code using that table is
+  `func_001AE160` (called from 0x1B96FC), which clears the 0x4234-byte block at `D_00301D60`, sets bits in a
+  bitfield at `+0x4094` from the list `D_002167D0` (ends at -1) and copies the titles in: game progress/state data
+  (reading, unverified). NETWK's asm has no direct reference to `D_00301D60` or that bitfield.
+- **So, open:** the list is empty either because the game lists only scenarios a server-sent table enables (the
+  6881 file is the leading candidate: its first bytes are a per-title header), or because it lists scenarios the
+  player's data marks as available, and this NET card's data has none. Not settled by reading so far.
+- **Cheapest decisive tests:** (a) serve a 6881 file for one run (from our own reading of its format, or the fan
+  server's bytes with credit, ob_server being AGPL as the research note's option 3 says) and see whether the list
+  fills; (b) find the RULE screen's list code in NETWK and the condition per entry.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
