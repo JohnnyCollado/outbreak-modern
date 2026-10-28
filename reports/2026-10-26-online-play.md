@@ -723,6 +723,25 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   there) and of the +0x44 word; how many records; what the file's other pieces hold (the fan file also has
   disc IDs, "BIOHAZARD OUTBREAK" and `<BODY>…<END>` message text).
 
+### 43. The login data file's first piece, mapped from NETWK's readers (base = `*(0x3065F4) + 0x15540`, 0x2100 bytes)
+
+| Offset | What | Reader (NETWK) | Use |
+|---|---|---|---|
+| `+0x000 + i×0x48` | scenario record `i` (at most 48 up to 0xD80) | `func_00552A80` and the helpers below | |
+| record `+0` | byte, not read by the helpers | — | open |
+| record `+1` | byte | `func_00552BA0` | callers (`func_005B0110`, `func_005B1620`, the RULE screen) add 0x5F: an index into a label or picture table |
+| record `+2` | byte | `func_00552B40` | stored in `D_0062DCBC` before `func_0054ECE0` (`func_005D1670`); `D_0062DCBC` is cleared at reset: likely the scenario number the game starts or sends |
+| record `+3` | name, Shift-JIS, to `+0x43` | `func_00552A80` | the scenario row's text |
+| record `+0x44` | s32: offset into the text area; < 0 = no scenario | `func_00552A80`, `func_00552AE0` | `func_005B0EF0` draws the text at `+0xE08 + offset` (the description) |
+| `+0xD83` | byte: on/off | `func_00552C40` via `func_005432C0` | every caller (`func_005A8B20`, `005AF520`, `005B0110`, `005B1620`, `005B5420`) skips the scenario path when 0 |
+| `+0xDA8 + i×0x20` | 32-byte strings (up to 3 before 0xE08) | `func_00552C00` | formatted with `%s %s`, `%s%s` (`func_005511B0`), `%s%s%s` (`func_005B5420`): titles or headings |
+| `+0xE08` … `+0x2100` | text area | `func_00552AE0` | descriptions; the fan file has `<BODY>…<END>` markup texts |
+
+- **Still open:** record byte 0; what byte 1 + 0x5F selects; whether byte 2 is the number the create-room request
+  (6509, "scenario") sends; how the selection popup counts its rows (records until `+0x44` < 0, or a count
+  elsewhere: after the memset every unused record has `+0x44` = 0, which reads as "present"); the file's other
+  pieces (the size list allows several; only piece 0 is copied here).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
