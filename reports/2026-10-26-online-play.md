@@ -990,6 +990,11 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   plain `pcsx2-vk`: NET CONNECTION has its text (1,909 bright, `C:\ob\frames-fix-vk`). Installed on the Odin and
   the OnePlus. Not yet checked: gameplay with 24-bit depth (J's Bar), and the menu-ordering issue the PCSX2 report
   also mentions.
+- **Regression, caught by the developer (OnePlus and Odin, 2026-10-28):** J's Bar broke with *prioritise upper*:
+  see-through, blotchy characters, background polygons through the foreground. Windows `pcsx2-vk`, `gate/jsbar.script`,
+  frame 250: off = right, upper = broken the same way, **lower = right**; lower also brings the network text back
+  (1,909 bright, run `hk-d24lower`). Changed to prioritise lower (test first: 75/76 against 1, 76/76 after). I had
+  shipped upper with J's Bar unchecked (noted as not checked): a depth setting must be checked in 3D before shipping.
 - The reference PCSX2's settings were put back (`inis/PCSX2.ini.bak-20261028-netgui`).
 
 ## Mistakes and corrections

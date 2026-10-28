@@ -116,7 +116,8 @@ namespace obgpu
 	// PCSX2 fixes this game needs that its GameIndex does not have yet (the adapter sets them in GSOptions).
 	struct GameGsFixes
 	{
-		// GSOptions::UserHacks_Limit24BitDepth: 0 off, 1 prioritise upper, 2 prioritise lower. Outbreak: 1. Its network
+		// GSOptions::UserHacks_Limit24BitDepth: 0 off, 1 prioritise upper, 2 prioritise lower. Outbreak: 2 (upper made
+		// J's Bar's characters see-through and its background cut through them, 2026-10-28). Its network
 		// settings screens (NTGUI2) draw no text with 32-bit depth on the hardware renderers: a depth precision issue
 		// (PCSX2 issue #13704, lightningterror; reports/2026-10-26-online-play.md entry 56).
 		int limit_24bit_depth = 0;

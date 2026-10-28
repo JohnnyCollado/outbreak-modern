@@ -250,7 +250,9 @@ namespace
 	void TestGameFixes()
 	{
 		const obgpu::GameGsFixes outbreak = obgpu::GameGsFixesFor("SLPM-65428");
-		Check("game fixes: Outbreak limits depth to 24 bits (upper)", outbreak.limit_24bit_depth == 1);
+		// Prioritise lower: upper broke J's Bar's depth (see-through characters, background through the foreground;
+		// developer, OnePlus and Odin, 2026-10-28; Windows pcsx2-vk jsbar-250 off / upper / lower).
+		Check("game fixes: Outbreak limits depth to 24 bits (lower)", outbreak.limit_24bit_depth == 2);
 		Check("game fixes: another serial has none", obgpu::GameGsFixesFor("SLUS-20765").limit_24bit_depth == 0);
 		Check("game fixes: no serial has none", obgpu::GameGsFixesFor("").limit_24bit_depth == 0);
 	}

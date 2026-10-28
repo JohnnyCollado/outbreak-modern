@@ -571,7 +571,7 @@ namespace obgpu
 	{
 		GameGsFixes f;
 		if (serial == "SLPM-65428")
-			f.limit_24bit_depth = 1;
+			f.limit_24bit_depth = 2; // lower: upper broke J's Bar (see gpu_driver.h)
 		return f;
 	}
 
