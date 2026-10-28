@@ -556,11 +556,13 @@ cmd_pcsx2_gs() {
 pcsx2_vu_build() {
     local src="${OB_PCSX2:-$OB_ROOT/pcsx2}" deps="${OB_PCSX2_DEPS:-$OB_ROOT/pcsx2-deps}"
     local b="$OB_PCSX2_VU_BUILD" log="$OB_LOGS/ob-pcsx2-vu.log" rc start
+    # raylib's folder: the tools build's FetchContent dir (net-env.sh points it at C:/ob/t's, which net-t borrows).
+    local tdeps="${OB_T_DEPS:-$OB_T/_deps}"
     [ -f "$OB_R/ps2xRuntime/ps2_runtime.lib" ] || { echo "pcsx2_vu: $OB_R/ps2xRuntime/ps2_runtime.lib missing; run ob.sh recompile first"; return 1; }
     start=$(date +%s)
     mkdir -p "$b"
-    { { [ -f "$b/build.ninja" ] ||
-          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src"               -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T" ${OB_PCSX2_VU_CMAKE_EXTRA:-}; } &&
+    { { { [ -f "$b/build.ninja" ] && grep -qxF "OB_T_DEPS:PATH=$tdeps" "$b/CMakeCache.txt"; } ||
+          vc cmake -S "$REPO/native/pcsx2_vu" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_PCSX2="$src"               -DOB_PCSX2_DEPS="$deps" -DOB_SRC="$OB_SRC" -DOB_R="$OB_R" -DOB_T="$OB_T" -DOB_T_DEPS="$tdeps" ${OB_PCSX2_VU_CMAKE_EXTRA:-}; } &&
       vc cmake --build "$b" -j $JOBS; } > "$log" 2>&1
     rc=$?
     echo "pcsx2_vu: build exit $rc in $(( $(date +%s) - start )) s ($log)"
