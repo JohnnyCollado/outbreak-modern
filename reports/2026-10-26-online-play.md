@@ -844,6 +844,30 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **So:** login, lobby, room, rules, scenario choice, room open and game start all work against ob_server on this
   PC; the relay is the wall.
 
+### 50. Two clients on one PC: both log in, one hosts, the other joins; start shows both players; the joiner stalls
+
+- **Developer (2026-10-28):** permission to drive the game builds; "two clients … a multiplayer game".
+- **Telling two clients apart:** ob_server keys players by address, and Windows sources every loopback connection
+  from 127.0.0.1 (checked: a listener on 127.0.0.2 still sees 127.0.0.1), but a socket bound to 127.0.0.2 first is
+  seen as 127.0.0.2 (checked). **upstream/pcsx2 0004** (`ob-patches` `e27b590`): a HostRemap entry may give the host
+  socket's source address, bound before `connect()`; `ob_dev9_remap.source`, text `from=to@source`. Tests first:
+  pcsx2_dev9 26/28 without, 28/28 with (the parser, and a SYN through a remap with source 127.0.0.2 accepted from
+  127.0.0.2). Runner rebuilt.
+- **Second client:** `tools/net/net-live2.sh` (pad `obnet2`, logs `C:\ob\net-logs2`, card `C:\ob\saves-net2`
+  by default; this run used `C:\ob\saves-net-unlocked2`, a copy of entry 48's card), remap `@127.0.0.2`.
+- **Live (both at once, loopback):** ob_server: two quick logins (127.0.0.1, 127.0.0.2), both lobby logins and
+  versions, handles `LPHPUT` (client 1) and `85S49U` (client 2). Client 1 hosts: slot 1, 零下 (`scenario type 1,
+  scenario 1`), opened. Client 2's room list shows room 1 "零下 DVD-ROM 1/4P Join in" (after a refresh; at first
+  "(free) Vacant"); Join: MEMBER LIST (host あ / LPHPUT / KEVIN, scenario 零下, own character MARK, ENTER);
+  ob_server `127.0.0.2: joined game slot 1 as player 2`; the host's room shows **2/4P** and "Left: 9m 14s".
+  Host → START GAME: `game 2 starts: … 2 player(s)`, and the host's start screen shows **KEVIN LPHPUT and MARK
+  85S49U** (shot `w08-c1-start`), then black and the relay refusals (8690) as in entry 49.
+- **Gaps:** client 2 stays on its MEMBER LIST after ENTER (no further screen, never followed the start, never tried
+  the relay): it waits for something ob_server does not send after a join. ob_server also logged `unhandled
+  question 0x670D (22 bytes)` from the host (events, research note section 4: "later").
+- **Next:** what the joiner waits for after ENTER (the join answers 6502/6503/6505/6506 against Bioserver1's join
+  flow); then the relay (step D).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
