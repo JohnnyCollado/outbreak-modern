@@ -16,8 +16,10 @@
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -195,7 +197,9 @@ static void TestWebPages()
 }
 
 // One HTTPS GET over loopback with the protocol version and the single suite given; returns the body ("" on failure).
-std::string FetchTls(uint16_t port, int minor, int suite, const char* path)
+// peerCert: the server's certificate as sent (DER), when given.
+static std::string FetchTlsCert(uint16_t port, int minor, int suite, const char* path,
+	std::vector<unsigned char>* peerCert)
 {
 	mbedtls_net_context net;
 	mbedtls_ssl_context ssl;
@@ -228,6 +232,9 @@ std::string FetchTls(uint16_t port, int minor, int suite, const char* path)
 	while (ok && (rc = mbedtls_ssl_handshake(&ssl)) != 0)
 		if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
 			ok = false;
+	if (ok && peerCert)
+		if (const mbedtls_x509_crt* crt = mbedtls_ssl_get_peer_cert(&ssl))
+			peerCert->assign(crt->raw.p, crt->raw.p + crt->raw.len);
 	if (ok)
 	{
 		const std::string request = std::string("GET ") + path + " HTTP/1.0\r\nUser-Agent: test\r\n\r\n";
@@ -244,6 +251,11 @@ std::string FetchTls(uint16_t port, int minor, int suite, const char* path)
 	mbedtls_entropy_free(&entropy);
 	const size_t body = response.find("\r\n\r\n");
 	return body == std::string::npos ? std::string() : response.substr(body + 4);
+}
+
+std::string FetchTls(uint16_t port, int minor, int suite, const char* path)
+{
+	return FetchTlsCert(port, minor, suite, path, nullptr);
 }
 
 // The login pages over the TLS the PS2's browser may speak (protocol and suite each forced by the client).
@@ -290,6 +302,16 @@ static void TestTlsServer()
 	Check(start.find("<!--CRS-game-start-->") != std::string::npos, "the game-start page over TLS");
 	Check(server.lastSession().find("TLS-DHE-RSA-WITH-3DES-EDE-CBC-SHA") != std::string::npos,
 		"the server reports the negotiated suite");
+	// The game's OpenSSL fails to decode ob_server's certificate with an ASN.1 wrong-tag error (report entry 37):
+	// both validity dates are UTCTime (tag 0x17, 13 bytes), as the fan server's certificate that it accepts; a
+	// GeneralizedTime (tag 0x18, years 2050 on) is not. Validity = SEQUENCE of two UTCTimes: 30 1E 17 0D .. 17 0D ..
+	std::vector<unsigned char> cert;
+	FetchTlsCert(server.port(), MBEDTLS_SSL_MINOR_VERSION_1, MBEDTLS_TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
+		"/00000002/CRS-top.jsp", &cert);
+	const unsigned char utcValidity[] = {0x30, 0x1E, 0x17, 0x0D};
+	const auto at = std::search(cert.begin(), cert.end(), std::begin(utcValidity), std::end(utcValidity));
+	Check(!cert.empty() && at != cert.end() && at + 4 + 13 + 1 < cert.end() && at[4 + 13] == 0x17,
+		"the certificate's validity dates are both UTCTime (the PS2's OpenSSL reads them)");
 	server.stop();
 	// Each connection is logged when accepted (with its address) and when its handshake ends (protocol or error).
 	bool accepted = false, handshake = false;

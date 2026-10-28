@@ -54,7 +54,13 @@ NETWORK PLAY → NET CONNECTION list; `press down 8 / wait 60` ×3 reaches "1. S
 `peek <addr> <1|2|4>` reads EE RAM (state block pointer at 0x3065DC; see report entries 21-23 for the fields).
 Logs: `C:\ob\net-logs\boot-net-live.{log,err}`; shots: `C:\ob\frames-net-live`.
 
-## Where it stands (2026-10-28, entry 35)
+## Where it stands (2026-10-28, entry 38)
+
+Entry 38: with ob_server's certificate ending in 2049 (UTCTime) and the server names at the PC's LAN address, the
+game logs in over TLS, reaches the lobby (login, version) and shows Capcom's user registration screen. Open: the
+address for normal use (127.x stays inside the PS2, entry 34) and the route on into the lobby.
+
+Before entry 38:
 
 Entry 35: with the server names at the PC's LAN address the connection reaches ob_server, and the game's TLS
 client rejects ob_server's self-signed certificate (fatal alert 42 bad_certificate). Next: what NETHTTP verifies

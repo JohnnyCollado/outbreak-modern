@@ -76,7 +76,9 @@ namespace ob::server
 			return std::string(what) + ": " + text;
 		}
 
-		// A self-signed certificate for the site name, SHA-1 signed (what 2003 clients verify), valid 2003-2099.
+		// A self-signed certificate for the site name, SHA-1 signed (what 2003 clients verify), valid 2003-2049: both
+		// dates stay UTCTime (DER writes 2050 on as GeneralizedTime, which the game's OpenSSL fails to decode with
+		// an ASN.1 wrong-tag error; report entry 37).
 		int makeCertificate(TlsWebServer::State* s, const std::string& host, std::string* error)
 		{
 			int rc = mbedtls_pk_setup(&s->key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
@@ -100,7 +102,7 @@ namespace ob::server
 			mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
 			mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA1);
 			mbedtls_x509write_crt_set_serial(&crt, &serial);
-			mbedtls_x509write_crt_set_validity(&crt, "20030101000000", "20991231235959");
+			mbedtls_x509write_crt_set_validity(&crt, "20030101000000", "20491231235959");
 			std::vector<unsigned char> der(4096);
 			rc = mbedtls_x509write_crt_der(&crt, der.data(), der.size(), mbedtls_ctr_drbg_random, &s->drbg);
 			mbedtls_x509write_crt_free(&crt);

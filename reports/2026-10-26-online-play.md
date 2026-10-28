@@ -627,6 +627,25 @@ emulates the network adapter with PCSX2's DEV9. Struggles below are logged as th
 - **State of `net-src`:** the `TTY.cpp` print stays for the next run, with entry 32-34's prints; `up-sync.sh`
   removes them.
 
+### 38. ob_server's certificate ends in 2049 (UTCTime): login over TLS, the lobby, and the game's first lobby screen
+
+- **Fix (test first):** `ob_server_tests` checks that the certificate the server sends has both validity dates as
+  UTCTime (DER `30 1E 17 0D … 17 0D …`): 72/73 before, 73/73 after. `tls_server.cpp`: end date 2099 → 2049 (DER
+  writes 2050 on as GeneralizedTime). The test client got `FetchTlsCert` (the peer certificate); `FetchTls` keeps
+  its signature for `lobby_tests.cpp`.
+- **Live** (LAN run as entry 35, developer approved; server and runner stopped after, LAN ports closed): ob_server
+  logs three connections on 443, each `TLSv1.0 TLS-RSA-WITH-3DES-EDE-CBC-SHA`, `quick login, session 67560268`, then
+  on 8300 `[lobby] 192.168.0.76: logged in` and `game version '0311172218'`. The adapter: DNS for www01 twice, TCP
+  443 ×3, TCP 8300. No NETHTTP `scePrintf` lines at all (no handshake failure, and no line from `func_006CD388`'s
+  checks either). Screen (`C:\ob\frames-net-live\n11-lobby.png`): Capcom's ユーザー登録/変更 (user registration,
+  "register/change" or "don't register"), waiting for the pad: the route ended there.
+- **So:** entry 37's decode error was the GeneralizedTime end date; a self-signed v3 SHA-1 certificate passes
+  otherwise (the fan README's "self-signed works" holds once the dates are UTCTime). The v1 fallback was not needed.
+  Entry 36's question (why the fan certificate passes the CA check) is moot for us for now.
+- **Still open:** the address the game gets in normal use (entry 34: 127.x stays inside the PS2; this run used the
+  PC's LAN address, which opens 443/8300 to the local network); the route from the registration screen into the
+  lobby (areas, rooms); the temporary prints in `net-src`.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
