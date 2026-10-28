@@ -742,6 +742,24 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   elsewhere: after the memset every unused record has `+0x44` = 0, which reads as "present"); the file's other
   pieces (the size list allows several; only piece 0 is copied here).
 
+### 44. ob_server builds its own data file: the rules screen shows 発生 and its description; only one scenario offered
+
+- **Build (test first):** `native/ob_server/src/datafile.{h,cpp}` builds piece 0 from entry 43's layout, nothing
+  from other servers: records 0-4 = the five titles (Shift-JIS, from the main program's table), byte 0 = 1, byte 1
+  = 1, byte 2 = 1-5 (guesses), +0x44 = offsets of `<BODY>English title<END>` texts at +0xE08; records 5-47 marked
+  absent (-1); +0xD83 = 1; "BIOHAZARD OUTBREAK" at +0xDA8 (0xE08 + texts = 3,712 bytes). 6881 answers `01` + the
+  size big-endian; 6882 answers `[piece][offset BE][size BE][size low 2][bytes]`, clamped; each 6882 request is
+  logged. ob_server tests: 75/84 against an empty stub, 84/84 with the builder.
+- **Live (loopback):** after the lobby login the game asked 6882 eight times, `00 00000000 00000200`,
+  `00 00000200 00000200`, … to `00 00000E00 00000200`: **piece 0, offset, 0x200 bytes**, as the fan description
+  said. The RULE screen's scenario row now reads **発生** with a small icon (byte 1 + 0x5F, presumably); Triangle
+  shows 発生 and the text "Outbreak" (shots `m07`, `m13` in `C:\ob\frames-net-live`). Only 発生 is offered:
+  Down/Circle on the Triangle screen and Right on the scenario row do not change it.
+- **So:** the list's content is right; the number of scenarios offered comes from a field not yet mapped (record
+  byte 0 or 1, or +0xD80-0xD82, or the 0xDA8 strings).
+- **Route:** `to-lobby.pad` fell out of step at the handle keyboard (the cursor never reached 決定 with 10-frame
+  waits after the extra download); finished by hand with 20-frame waits, now in the file.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

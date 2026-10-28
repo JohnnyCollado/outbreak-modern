@@ -2,6 +2,7 @@
 // Command numbers and answer layouts: research/2026-10-27-lobby-protocol.md section 4 and the lobby study it cites.
 #include "lobby.h"
 
+#include "datafile.h"
 #include "net.h"
 #include "protocol.h"
 
@@ -108,6 +109,7 @@ namespace ob::server
 	{
 		Accounts* accounts = nullptr;
 		LobbyConfig config;
+		const std::vector<uint8_t> dataFile = loginDataFile(); // 6881/6882 (datafile.h)
 		net::Socket listener = net::kInvalid;
 		std::list<Client> clients;
 		Slot slots[kAreas][kRooms][kSlots];
@@ -493,13 +495,19 @@ namespace ob::server
 			}
 			answer(c, q);
 			break;
-		case INFOSIZES: answer(c, q, {0, 0, 0, 0, 0}); break; // no info file (open point 1: tried first)
+		// The login data file (datafile.h): its first piece is the room rules' scenario list (report entries 42-44).
+		case INFOSIZES: answer(c, q, infoSizesAnswer(dataFile)); break;
 		case INFOCHUNK:
 		{
-			std::vector<uint8_t> a(p.begin(), p.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(5, p.size())));
-			a.resize(5, 0);
-			a.insert(a.end(), {0, 0, 0, 0, 0, 0});
-			answer(c, q, a);
+			std::string raw;
+			for (size_t i = 0; i < std::min<size_t>(p.size(), 12); i++)
+			{
+				char t[4];
+				std::snprintf(t, sizeof(t), "%02X", p[i]);
+				raw += t;
+			}
+			log(c.address + ": data file request " + raw + " (" + std::to_string(p.size()) + " bytes)");
+			answer(c, q, infoChunkAnswer(dataFile, p));
 			break;
 		}
 		case RANKINGS:

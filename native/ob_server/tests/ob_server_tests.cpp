@@ -7,6 +7,7 @@
 //   ae af a6 af b5 af a9 a0 a7 ac, packet id low byte 0x9B) into "0311172218", and round-trips;
 // - the session number's 10 digits decode the capture's "2374125810" with packet id 0x4592 into 59318000, and
 //   encode back.
+#include "datafile.h"
 #include "protocol.h"
 #include "tls_server.h"
 #include "web.h"
@@ -327,8 +328,52 @@ static void TestTlsServer()
 	Check(handshake, "the TLS server logs the handshake's protocol and suite");
 }
 
+// The login data file (6881/6882), its first piece being the room rules' scenario list (report entries 42-43).
+static void TestDataFile()
+{
+	const std::vector<uint8_t> f = loginDataFile();
+	Check(f.size() > kDataText && f.size() <= kDataMax, "the data file's first piece fits the game's 0x2100 bytes");
+	auto s32 = [&](size_t at) {
+		return static_cast<int32_t>(f[at] | f[at + 1] << 8 | f[at + 2] << 16 | static_cast<uint32_t>(f[at + 3]) << 24);
+	};
+	const char* titles[kScenarioCount] = {"\x94\xAD\x90\xB6", "\x97\xEB\x89\xBA", "\x91\x83\x8C" "\x41",
+		"\x8D\x96\x89\x8A", "\x8C\x88\x88\xD3"};
+	bool names = f.size() >= kDataRecords * kDataRecordSize, texts = names, numbers = names;
+	for (int i = 0; names && i < kScenarioCount; i++)
+	{
+		const uint8_t* r = &f[i * kDataRecordSize];
+		names &= std::strcmp(reinterpret_cast<const char*>(r + kDataRecordName), titles[i]) == 0;
+		const int32_t t = s32(i * kDataRecordSize + kDataRecordText);
+		texts &= t >= 0 && kDataText + t < f.size() && f[kDataText + t] != 0;
+		numbers &= r[2] == i + 1;
+	}
+	Check(names, "records 0-4 carry the five File #1 titles (Shift-JIS, from byte 3)");
+	Check(texts, "each scenario record points into the text area at a non-empty text");
+	Check(numbers, "record byte 2 is the scenario number, 1-5");
+	bool unused = names;
+	for (size_t i = kScenarioCount; unused && i < kDataRecords; i++)
+		unused &= s32(i * kDataRecordSize + kDataRecordText) < 0;
+	Check(unused, "every other record is marked absent (+0x44 < 0; the game clears to 0, which reads as present)");
+	Check(f.size() > kDataEnabled && f[kDataEnabled] != 0, "the on/off byte at +0xD83 is on");
+
+	const std::vector<uint8_t> sizes = infoSizesAnswer(f);
+	Check(sizes.size() == 5 && sizes[0] == 1 &&
+			  (static_cast<size_t>(sizes[1]) << 24 | sizes[2] << 16 | sizes[3] << 8 | sizes[4]) == f.size(),
+		"6881 answers one piece and its size, big-endian");
+	// 6882: piece 0, offset 0x100, 0x40 bytes; and a request running past the end is clamped.
+	const std::vector<uint8_t> chunk = infoChunkAnswer(f, {0, 0, 0, 1, 0, 0, 0, 0, 0x40});
+	Check(chunk.size() == 11 + 0x40 && chunk[0] == 0 && chunk[3] == 1 && chunk[8] == 0x40 && chunk[10] == 0x40 &&
+			  std::equal(chunk.begin() + 11, chunk.end(), f.begin() + 0x100),
+		"6882 answers [piece][offset][size][size low 2] and the bytes asked for");
+	const uint32_t near = static_cast<uint32_t>(f.size() - 8);
+	const std::vector<uint8_t> tail = infoChunkAnswer(f, {0, static_cast<uint8_t>(near >> 24),
+		static_cast<uint8_t>(near >> 16), static_cast<uint8_t>(near >> 8), static_cast<uint8_t>(near), 0, 0, 1, 0});
+	Check(tail.size() == 11 + 8 && tail[8] == 8, "a 6882 request past the end is clamped to what is left");
+}
+
 int main()
 {
+	TestDataFile();
 	TestHeader();
 	TestLobbyStream();
 	TestRelayStream();

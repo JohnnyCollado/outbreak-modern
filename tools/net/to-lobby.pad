@@ -22,48 +22,48 @@ shot l02-handle
 press circle 8
 wait 30
 press down 6
-wait 10
+wait 20
 press down 6
-wait 10
+wait 20
 press down 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press right 6
-wait 10
+wait 20
 press circle 8
 wait 240
 # "are you sure you want to use this (HN)?": left = 登録する (use it).
 press left 6
-wait 10
+wait 20
 press circle 8
 wait 300
 shot l08-lobby

@@ -23,7 +23,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0057 NEW) # mbedTLS 2.28's old cmake_minimum_require
 add_compile_definitions("MBEDTLS_USER_CONFIG_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls_config_ob.h\"")
 add_subdirectory("${OB_MBEDTLS}" "${CMAKE_CURRENT_BINARY_DIR}/mbedtls" EXCLUDE_FROM_ALL)
 
-add_library(ob_server STATIC src/protocol.cpp src/web.cpp src/tls_server.cpp src/net.cpp src/accounts.cpp src/lobby.cpp
+add_library(ob_server STATIC src/datafile.cpp src/protocol.cpp src/web.cpp src/tls_server.cpp src/net.cpp src/accounts.cpp src/lobby.cpp
     src/ob_server.cpp)
 target_include_directories(ob_server PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(ob_server PUBLIC mbedtls mbedx509 mbedcrypto)
