@@ -11,6 +11,7 @@ namespace ob::server
 		lobby.relayPort = config.relayPort;
 		lobby.messageOfTheDay = config.messageOfTheDay;
 		lobby.log = config.log;
+		lobby.trace = config.trace;
 		if (!m_lobby.start(m_accounts, lobby, config.bindAddress, config.lobbyPort, error))
 			return false;
 

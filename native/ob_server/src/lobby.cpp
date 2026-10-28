@@ -39,7 +39,7 @@ namespace ob::server
 			UNK6601 = 0x6601, UNK6602 = 0x6602, RULESCOUNT = 0x6603, RULEDESCRIPT = 0x6604, RULEATTRIB = 0x6605,
 			RULEVALUE = 0x6606, RULEATTCOUNT = 0x6607, ATTRDESCRIPT = 0x6608, SLOTNAME = 0x6609, SLOTPASSWD = 0x660A,
 			SETRULE = 0x660B, UNK660C = 0x660C, ATTRATTRIB = 0x660E,
-			CHATIN = 0x6701, CHATOUT = 0x6702,
+			CHATIN = 0x6701, CHATOUT = 0x6702, EVENTDAT = 0x670D, EVENTDATBC = 0x670E,
 			INFOSIZES = 0x6881, INFOCHUNK = 0x6882,
 			GETREADY = 0x6910, PLAYERCOUNT = 0x6911, PLAYERNUMBER = 0x6912, PLAYERSTAT = 0x6913, GAMEDIFF = 0x6914,
 			GAMESESSION = 0x6915, GSINFO = 0x6916, PLAYERSCORE = 0x6917,
@@ -140,8 +140,23 @@ namespace ob::server
 			p.pid = packetId;
 			p.error = error;
 			p.payload = std::move(payload);
+			if (config.trace)
+				trace(c, "->", p);
 			const std::vector<uint8_t> bytes = encode(p);
 			c.out.insert(c.out.end(), bytes.begin(), bytes.end());
+		}
+		// --trace: one line per packet in or out (kind, command, packet id, size, first bytes).
+		void trace(const Client& c, const char* dir, const Packet& p)
+		{
+			char t[64];
+			std::snprintf(t, sizeof(t), " %s k%u 0x%04X pid %u, %zu bytes:", dir, p.kind, p.cmd, p.pid, p.payload.size());
+			std::string line = c.address + t;
+			for (size_t i = 0; i < std::min<size_t>(p.payload.size(), 16); i++)
+			{
+				std::snprintf(t, sizeof(t), " %02X", p.payload[i]);
+				line += t;
+			}
+			log(line);
 		}
 		void answer(Client& c, const Packet& q, std::vector<uint8_t> payload = {}) { send(c, Kind::Tell, q.cmd, q.pid, std::move(payload)); }
 		void answerError(Client& c, const Packet& q, const std::string& message)
@@ -395,6 +410,8 @@ namespace ob::server
 		const uint8_t key = static_cast<uint8_t>(q.pid & 0xFF);
 		const int nr = getU16(p, 0);
 		auto byte = [&](size_t i) { return i < p.size() ? p[i] : uint8_t(0); };
+		if (config.trace)
+			trace(c, "<-", q);
 
 		if (q.kind == static_cast<uint8_t>(Kind::Tell))
 		{
@@ -807,6 +824,31 @@ namespace ob::server
 				s->reset();
 				broadcastSlot(area, room, slot);
 			}
+			break;
+		}
+		case EVENTDAT:
+		{
+			// A message to one player by handle (the host's game sends one to a player who has just joined; the
+			// joiner waits for it, report entry 51): two scrambled strings, the recipient's handle and the event.
+			// Answered with the recipient's handle; passed on as EVENTDATBC [sender's handle][event], both decoded, to
+			// that player only (Bioserver1 Packet.getEvenData + sendEventDat).
+			size_t next = 0;
+			const auto to = readScrambledString(p, 0, key, &next);
+			const auto event = to ? readScrambledString(p, next, key) : std::nullopt;
+			if (!to || !event)
+			{
+				answerError(c, q, "<LF=6><BODY><CENTER>not possible<END>");
+				break;
+			}
+			std::vector<uint8_t> a;
+			putString(a, *to);
+			answer(c, q, a);
+			std::vector<uint8_t> out;
+			putString(out, c.handle.id);
+			putString(out, *event);
+			for (Client& o : clients)
+				if (o.loggedIn && !o.closing && &o != &c && o.handle.id == *to)
+					send(o, Kind::Broadcast, EVENTDATBC, pid(), out);
 			break;
 		}
 		case LOGOUT:

@@ -198,6 +198,26 @@ void TestLobby()
 	const Packet* join = b.ask(0x6406, u16(1));
 	Check(join && !join->error && join->payload == std::vector<uint8_t>({0, 1}), "the guest joins slot 1");
 	Check(a.waitFor(0x6503, Kind::Broadcast) != nullptr, "the host is told a player joined");
+
+	// EVENTDAT 0x670D (report entry 51): the host's game sends a message to the new player by handle right after the
+	// join, and the joiner waits for it on its member list. The request: two scrambled strings, the recipient's
+	// handle and the event (each [length:2][sum:2][bytes], the key restarting at 0); the server answers the sender
+	// with the recipient's handle and passes [sender's handle][event], both decoded as [length:2][bytes], to that
+	// player alone as EVENTDATBC 0x670E (Bioserver1 Packet.getEvenData + sendEventDat, read 2026-10-28).
+	const std::string event("\x01\x02\x7C\x7E\x10\x20\x30\x40", 8);
+	std::vector<uint8_t> eventReq;
+	GameClient::putScrambled(eventReq, handleB, static_cast<uint16_t>(a.pid + 1));
+	GameClient::putScrambled(eventReq, event, static_cast<uint16_t>(a.pid + 1));
+	const Packet* eventAns = a.ask(0x670D, eventReq);
+	std::vector<uint8_t> toB;
+	putString(toB, handleB);
+	Check(eventAns && !eventAns->error && eventAns->payload == toB, "EVENTDAT is answered with the recipient's handle");
+	const Packet* eventIn = b.waitFor(0x670E, Kind::Broadcast);
+	std::vector<uint8_t> fromA;
+	putString(fromA, handleA);
+	putString(fromA, event);
+	Check(eventIn && eventIn->payload == fromA,
+		"the recipient gets EVENTDATBC: the sender's handle and the event, decoded");
 	const Packet* full = b.ask(0x6404, u16(1));
 	Check(full && full->payload.size() == 3 && full->payload[2] == 4, "two of two players: the slot is full");
 

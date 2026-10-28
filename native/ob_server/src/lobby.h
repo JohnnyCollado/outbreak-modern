@@ -24,6 +24,7 @@ namespace ob::server
 		std::string messageOfTheDay;                        // game markup; empty = none
 		int heartbeatSeconds = 30;                          // HEARTBEAT broadcast; CONNCHECK at twice this
 		std::function<void(const std::string&)> log;        // one line per notable event; may be empty
+		bool trace = false;                                 // also one line per packet in and out (ob_server --trace)
 	};
 
 	class LobbyServer

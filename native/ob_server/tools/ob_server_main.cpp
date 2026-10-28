@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // ob_server.exe: the built-in server as a console program for a dedicated PC (plan decision N6).
 //
-//   ob_server [--host a.b.c.d] [--bind a.b.c.d] [--web-port N] [--lobby-port N] [--relay-port N]
+//   ob_server [--host a.b.c.d] [--bind a.b.c.d] [--web-port N] [--lobby-port N] [--relay-port N] [--trace]
 //
 // By default it serves this PC only: it listens on 127.0.0.1, and the game on this PC reaches it through the alias
 // 192.0.2.2 (PS2X_NET_HOSTS=www01.kddi-mmbb.jp=192.0.2.2, PS2X_NET_REMAP=192.0.2.2=127.0.0.1: the game cannot use
@@ -58,6 +58,8 @@ int main(int argc, char** argv)
 			config.lobbyPort = static_cast<uint16_t>(std::atoi(value)), i++;
 		else if (arg == "--relay-port" && value)
 			config.relayPort = static_cast<uint16_t>(std::atoi(value)), i++;
+		else if (arg == "--trace")
+			config.trace = true;
 		else
 		{
 			std::cerr << "usage: ob_server [--host a.b.c.d] [--bind a.b.c.d] [--web-port N] [--lobby-port N] "

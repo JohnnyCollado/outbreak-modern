@@ -868,6 +868,27 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Next:** what the joiner waits for after ENTER (the join answers 6502/6503/6505/6506 against Bioserver1's join
   flow); then the relay (step D).
 
+### 51. The joiner's stall: EVENTDAT (0x670D) was answered empty and never passed on; fixed, both players start
+
+- **Developer:** fix what is broken before new work (saved as a standing rule).
+- **Finding it:** `ob_server --trace` (new, `LobbyConfig.trace`/`ServerConfig.trace`): one line per packet in and
+  out. After the join (6406 answered `00 01`, the room told) the joiner sent **nothing** on ENTER, while the host
+  sent 0x670D (22 bytes) and ob_server answered it empty ("unhandled question").
+- **What 0x670D is** (Bioserver1, read 2026-10-28: `Commands.java` EVENTDAT = 0x670D, EVENTDATBC = 0x670E;
+  `PacketHandler.sendEventDat`; `Packet.getEvenData`): a message to one player by handle. The request holds two
+  scrambled strings (the recipient's handle, the event; each `[length:2][sum:2][bytes]`, key restarting at 0); the
+  server answers the sender with the recipient's handle and sends EVENTDATBC `[sender's handle][event]`, both
+  decoded as `[length:2][bytes]`, to that player only. The host's game sends it to a player who has just joined.
+- **Fix (tests first, `lobby_tests.cpp`):** 84/86 without, then a first version that passed the event bytes on
+  still scrambled (the joiner still waited); the test corrected to the decoded form (85/86), the handler then
+  decodes both strings: 86/86.
+- **Live (two clients, loopback, `--trace`):** host → `0x670D` to the joiner's handle; ob_server answers
+  `00 06 RIYMEL`, sends the joiner `0x670E` `00 06 <host handle> 00 08 …`; the joiner then asks 640A, 6403, 6409,
+  6412, 640B, sends 6504 and shows the room: "Wait for the game to start", 2/4P, STANDBY / EXIT / MEMBER DATA
+  (shot `z04` in `C:\ob\frames-net-live2`). Host → START GAME: `game 2 starts … 2 player(s)`; **both** clients show
+  the start screen with KEVIN and MARK (`z05`), then **both** connect to the relay 8690 and are refused.
+- **So:** two players get from login to a started game together; the relay is the wall for both.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

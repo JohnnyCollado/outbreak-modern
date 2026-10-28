@@ -27,6 +27,7 @@ namespace ob::server
 		uint16_t relayPort = 8690;
 		std::string messageOfTheDay;
 		std::function<void(const std::string&)> log;
+		bool trace = false; // the lobby logs every packet in and out (--trace)
 	};
 
 	class Server
