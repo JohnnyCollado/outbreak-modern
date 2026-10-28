@@ -567,6 +567,14 @@ namespace obgpu
 		return "[gpu] self-read=" + d.road + " (" + d.why + ")";
 	}
 
+	GameGsFixes GameGsFixesFor(std::string_view serial)
+	{
+		GameGsFixes f;
+		if (serial == "SLPM-65428")
+			f.limit_24bit_depth = 1;
+		return f;
+	}
+
 	std::string FormatStamps(std::vector<FileStamp> files)
 	{
 		std::sort(files.begin(), files.end(), [](const FileStamp& a, const FileStamp& b) { return a.name < b.name; });

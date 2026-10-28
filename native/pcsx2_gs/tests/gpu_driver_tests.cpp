@@ -245,6 +245,15 @@ namespace
 		Check("stamps: mtime change differs", a != obgpu::FormatStamps({{"meta.json", 7, 6}, {"vulkan.x.so", 100, 9}}));
 		Check("stamps: empty folder", obgpu::FormatStamps({}).empty());
 	}
+	// PCSX2 issue #13704 (reports/2026-10-26-online-play.md entry 56): the network settings screens draw no text with
+	// the hardware renderer; limiting depth to 24 bits brings it back.
+	void TestGameFixes()
+	{
+		const obgpu::GameGsFixes outbreak = obgpu::GameGsFixesFor("SLPM-65428");
+		Check("game fixes: Outbreak limits depth to 24 bits (upper)", outbreak.limit_24bit_depth == 1);
+		Check("game fixes: another serial has none", obgpu::GameGsFixesFor("SLUS-20765").limit_24bit_depth == 0);
+		Check("game fixes: no serial has none", obgpu::GameGsFixesFor("").limit_24bit_depth == 0);
+	}
 } // namespace
 
 int main()
@@ -256,6 +265,7 @@ int main()
 	TestLines();
 	TestSelfRead();
 	TestStamps();
+	TestGameFixes();
 	std::printf("Passed: %d\nTotal Tests: %d\n", g_passed, g_total);
 	return g_passed == g_total ? 0 : 1;
 }

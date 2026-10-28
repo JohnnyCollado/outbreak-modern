@@ -264,6 +264,14 @@ namespace
 		// outbreak.ini says otherwise. Software renderer: unused.
 		o.OverrideTextureBarriers = s_self_read_road.override_texture_barriers;
 		o.DisableFramebufferFetch = s_self_read_road.disable_framebuffer_fetch;
+		// Fixes this game needs from PCSX2 (gpu_driver.h GameGsFixesFor): PCSX2 keeps a user hack only with
+		// ManualUserHacks on (Pcsx2Config.cpp MaskUserHacks); the others stay at their defaults.
+		const obgpu::GameGsFixes fixes = obgpu::GameGsFixesFor(ob_disc_serial);
+		if (fixes.limit_24bit_depth != 0)
+		{
+			o.ManualUserHacks = true;
+			o.UserHacks_Limit24BitDepth = static_cast<GSLimit24BitDepth>(fixes.limit_24bit_depth);
+		}
 		return o;
 	}
 

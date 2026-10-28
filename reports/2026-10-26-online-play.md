@@ -964,6 +964,34 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   the Memory cards page in `SettingsModel.kt`, `PS2X_SAVES` + watcher in `OutbreakActivity.kt` (set after net.env,
   so the chosen folder wins). Tests first: `SaveCardsTest.kt` (10).
 
+### 56. NET CONNECTION's settings screens draw no text with PCSX2's hardware renderer (fixed: 24-bit depth)
+
+- **Seen (developer, Odin, 2026-10-28):** NETWORK PLAY → create the NET file → YES: the following screens (title bar,
+  list with ▲/▼, help box, ○/×) have no text at all. Same on `gs_self_read = barrier` and `copy`: not the Turnip fix.
+- **Not the disc:** the phones run `Biohazard - Outbreak (English v2.1).iso`; it matches `game_files` in 90 files
+  incl. `SLPM_654.28`; only `NETBIO00.DAT`'s directory size is 12 KiB shorter (the 6 sectors before `NETBIO01.DAT`,
+  a name index; the bytes are on the ISO). A size-corrected copy made no difference.
+- **Not Android:** the Odin's card got the NET file (`BISLPM-65286NET`) and the game loaded NETCNF/NETCNFIF (Sony's
+  network settings screens, `NTGUI2` on the disc). On Windows with the same ISO: `[gs] backend=cpu` (ob.sh's
+  default for these drives) and `pcsx2-sw` draw "NET CONNECTION / Edit Network Configuration / Proxy Configuration";
+  **`pcsx2-vk` draws it blank** (`C:\ob\frames-iso-vk\n06-connecting.png` vs `frames-iso-sw`). My first comparison
+  used the cpu backend without noticing: corrected here.
+- **PCSX2's GameIndex** has no GS fixes for SLPM-65428. Twelve hardware fixes tried one at a time on Windows
+  (`pcsx2-vk`, a temporary `PS2X_GS_HACK` hook, removed after) changed nothing: preload frame data, texture inside
+  RT, CPU sprite render, partial invalidation off, autoflush, CPU and GPU CLUT, texture preloading off, safe
+  features off, mipmapping, full readbacks, maximum blending. Scored by bright pixels in the list: text 1,880 (SW),
+  blank 780.
+- **Stock PCSX2 2.9.134 (`ps2_emu`, Vulkan, developer's go-ahead) shows the same blank screen:** a PCSX2 bug, not the
+  port. Known upstream: [PCSX2 issue #13704](https://github.com/PCSX2/pcsx2/issues/13704) (open, "GS: Hardware",
+  "GameDB"); lightningterror there: a depth precision issue, limiting depth to 24 bits fixes it.
+- **Fix:** `GameGsFixesFor` (`gpu_driver.{h,cpp}`) gives SLPM-65428 `UserHacks_Limit24BitDepth` = prioritise upper;
+  the adapter sets it with `ManualUserHacks` (PCSX2 drops user hacks without it: `Pcsx2Config.cpp` MaskUserHacks).
+  Tests first (3, did not build without the function), gpu_driver 76/76, ring 11/11, adapter 5/5. Windows,
+  plain `pcsx2-vk`: NET CONNECTION has its text (1,909 bright, `C:\obrames-fix-vk`). Installed on the Odin and
+  the OnePlus. Not yet checked: gameplay with 24-bit depth (J's Bar), and the menu-ordering issue the PCSX2 report
+  also mentions.
+- The reference PCSX2's settings were put back (`inis/PCSX2.ini.bak-20261028-netgui`).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
