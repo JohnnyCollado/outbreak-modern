@@ -776,6 +776,18 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   scenarios. Whether the offline save limits what can be hosted is open.
 - **Next:** log SCENESELECT and the slot answers in ob_server; find the picker (callers that send 6509).
 
+### 46. Checks on the branch after 0003, the hook and ob_server's data file (net trees)
+
+- `net-src` cleaned first: `up-sync.sh` restored `RPC.cpp`, `Thread.cpp`, `TTY.cpp`; the TEMP print in the
+  generated `nethttp_func_00712A60_0x712a60.cpp` removed by hand (now identical to `C:\ob\net-ovl`'s output).
+- `ob.sh test` (net env, 148 s): ps2x 572/572, iop 5/5, gs_cache 45/45, ob_diag 24/24, pcsx2_ipu 22/22,
+  pcsx2_sio2 20/20, ob_server 84/84, pcsx2_dev9 23/23, ob_ui 118/118; pcsx2_gs's log says 70/70 (the summary line
+  printed "81/0"). **Not run (net-tree setup, not this code):** pcsx2_vu (build: `C:/ob/net-t/_deps/raylib-build/
+  raylib/raylib.lib` missing, nothing in that tree builds it) and pcsx2_spu2 (the test exe cannot load `z.dll`). Not
+  checked whether these failed in the net trees before today.
+- `net-gate.sh` (pcsx2-sw, 100 s): selftest 9/9, **3/3 gated green**, 3 advisory as usual; the J's Bar set skipped
+  (no references on this branch).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
