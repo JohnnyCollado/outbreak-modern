@@ -760,6 +760,22 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Route:** `to-lobby.pad` fell out of step at the handle keyboard (the cursor never reached 決定 with 10-frame
   waits after the extra download); finished by hand with 20-frame waits, now in the file.
 
+### 45. Why only one scenario (reading, not settled)
+
+- **The RULE screen does not choose the scenario:** its value `D_0062E236` is written in one place,
+  `func_005B3C90` (0x5B3D04), from the slot data the server sent (`D_006294B8` + slot × 0x15C, byte 0, filled by
+  `func_0055B100`); ob_server's SLOTSCENTYPE answer carries `s->scenario`, 0 for a new slot = record 0 = 発生. The
+  Triangle screen describes the current scenario only (`func_005B1620` draws its icon: record byte 1 + 0x5F).
+- **The choice itself** is sent by the game as SCENESELECT 6509 (ob_server stores type and scenario from it,
+  `lobby.cpp:640-645`). In this run no picker appeared between CREATESLOT and the RULE screen: either the game skips
+  a picker with one choice, or the picker is reached another way. Not seen yet; SCENESELECT is not logged.
+- **More record fields exist** than entry 43 listed: `func_00552C80` reads record +0x23 (a count) with entries from
+  +0x24, and +0x34 (a count) with entries from +0x35 (picked at random): the name field is shorter than 0x41 bytes.
+- **Progress data:** `func_00552C60`/`func_00552E20`/`func_00552C80` read the block `D_301D60` + 0x4154 (12-byte
+  entries); `func_001AE160`'s start list `D_002167D0` is bit numbers 0, 0x0C, 0x0F, … 0x21 (nine), not obviously
+  scenarios. Whether the offline save limits what can be hosted is open.
+- **Next:** log SCENESELECT and the slot answers in ob_server; find the picker (callers that send 6509).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
