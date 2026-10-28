@@ -6,6 +6,7 @@ changed it.
 - `build.md` — build, run, test commands; environment; paths; decisions still in force
 - `workspace.md` — C:\ob layout, game folder (RUN), generated vs hand-edited paths, patch pipeline, vendored copy status
 - `pins.md` — toolchain, emulator, game and upstream pins; runner configure flags
+- `online-play-handoff.md` — working on online play from another computer: what lives outside git and how to recreate it, the drive harness (`tools/net/`), where it stands
 - `gotchas.md` — harness and build gotchas (Windows/MSVC, ob.sh, frame dump, PCSX2 debugger quirks)
 - `tools.md` — project tools in `tools/` (live, unclear, legacy ARMSX2-mod / device tools)
 - `gate.md` — the gate: files, refs.py, display-mode probe result

@@ -1,0 +1,27 @@
+# Live-pad commands with the formatted net card (C:\ob\saves-net): logos -> title -> NETWORK PLAY -> NEXT ->
+# CONNECTION: NET CONNECTION -> notice: NEXT.
+wait 1720
+shot n01-title
+press start 8
+wait 180
+press down 8
+wait 30
+press circle 8
+wait 900
+shot n02-network
+press circle 8
+wait 600
+shot n03-after-next
+press up 8
+wait 30
+press circle 8
+wait 900
+shot n04-connection
+press circle 8
+wait 600
+shot n05-notice
+press up 8
+wait 30
+press circle 8
+wait 1200
+shot n06-connecting
