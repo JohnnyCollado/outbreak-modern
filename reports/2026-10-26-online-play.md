@@ -1104,6 +1104,28 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   session (`DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp:208`) set TCP_NODELAY. Next: measure the relay's
   forwarding time and the adapter's polling interval.
 
+### 62. Local play: the server built into the game (plan `docs/plans/2026-10-28-local-play.md`, steps 1-3)
+
+- **Asked (developer, 2026-10-28):** a built-in host for standalone Android and Windows local play, a Network page,
+  security first; Android hosts for Outbreak Modern players only and can only join fan servers.
+- **Security core (`native/ob_server/src/guard.*`, `beacon.*`, `host.*`):** private and loopback addresses only, 16
+  connections per service and 4 per address, the host's Remove keeps an address out for the session, a 10 s read
+  timeout on the login pages, the host listens on its Wi-Fi address only; the nearby-games beacon (UDP 18444, 256
+  bytes at most) is parsed strictly, fuzzed 20,000 rounds. ob_server 166/166.
+- **Linked into the runner (commit `3e7ef11`):** Windows runner and Android library build with it; the eight JNI
+  functions are exported (`llvm-nm`: `Java_com_outbreakmodern_app_NativeBridge_hostStart` ... `searchStop`).
+- **Issue: the server's tests and console program were built inside the game's build too.** Fix: built only in the
+  server's own tree (`native/ob_server/CMakeLists.txt`).
+- **Android (commit `6101d86`):** `HostService` (foreground, not exported, not restarted by the system), the Network
+  page (Off / Local play / Fan server, Nearby games with Join, Host a game with players and Remove, Connection DHCP or
+  Manual), `NetPlay.kt` turning the saved choices into the game's settings: every value checked strictly (a ';' or
+  '=' would add a server name or remap of its own), local play joins local addresses only, the login's 443 goes to
+  the host's 18443 (Android apps cannot listen below 1024), the Wi-Fi interface passed in (closes entry 53's
+  "Auto interface" workaround). Tests first: 13 failed to compile before `NetPlay.kt`, the 2 manifest checks failed
+  before the service; now Kotlin 55/55, 0 warnings.
+- **Not yet tried on a device.** Next: Windows host and Network page (step 4), then the three-device test with the
+  Odin hosting (step 5, needs the developer's go-ahead to install).
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
