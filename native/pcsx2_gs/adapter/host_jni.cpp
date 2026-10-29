@@ -3,6 +3,7 @@
 // LICENSE.md allows). Called from the launcher's process (HostService, the Network page); one host and one search at
 // a time per process.
 #include "host.h"
+#include "safe_text.h" // text to NewStringUTF (security queue C5)
 
 #include <android/log.h>
 #include <jni.h>
@@ -34,7 +35,7 @@ namespace
 		jobjectArray out = env->NewObjectArray(static_cast<jsize>(items.size()), env->FindClass("java/lang/String"), nullptr);
 		for (size_t i = 0; i < items.size(); i++)
 		{
-			jstring s = env->NewStringUTF(items[i].c_str());
+			jstring s = env->NewStringUTF(obui::javaSafeText(items[i]).c_str());
 			env->SetObjectArrayElement(out, static_cast<jsize>(i), s);
 			env->DeleteLocalRef(s);
 		}
@@ -74,7 +75,7 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_hostStart(JNI
 	if (!g_host->start(options, &error))
 	{
 		Log("[host] not started: " + error);
-		return env->NewStringUTF(error.empty() ? "could not start" : error.c_str());
+		return env->NewStringUTF(error.empty() ? "could not start" : obui::javaSafeText(error).c_str());
 	}
 	return env->NewStringUTF("");
 }
@@ -117,7 +118,7 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_searchStart(J
 		g_search = std::make_unique<ob::server::BeaconListener>();
 	std::string error;
 	if (!g_search->start(ob::server::kBeaconPort, &error))
-		return env->NewStringUTF(error.empty() ? "could not listen" : error.c_str());
+		return env->NewStringUTF(error.empty() ? "could not listen" : obui::javaSafeText(error).c_str());
 	return env->NewStringUTF("");
 }
 

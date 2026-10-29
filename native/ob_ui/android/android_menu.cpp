@@ -1,5 +1,6 @@
 // android_menu: see android_menu.h.
 #include "android_menu.h"
+#include "safe_text.h" // text from files to NewStringUTF (security queue C5)
 
 #include "disc_check.h"
 #include "game_screen.h"
@@ -134,7 +135,7 @@ namespace
 		jobjectArray arr = env->NewObjectArray(static_cast<jsize>(v.size()), str, nullptr);
 		for (size_t i = 0; i < v.size(); i++)
 		{
-			jstring s = env->NewStringUTF(v[i].c_str());
+			jstring s = env->NewStringUTF(obui::javaSafeText(v[i]).c_str());
 			env->SetObjectArrayElement(arr, static_cast<jsize>(i), s);
 			env->DeleteLocalRef(s);
 		}
@@ -152,7 +153,7 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_iniGet(JNIEnv
 	obui::IniFile ini(inlineComments);
 	ini.load(std::filesystem::path(Str(env, path)));
 	const auto v = ini.get(Str(env, section), Str(env, key));
-	return v ? env->NewStringUTF(v->c_str()) : nullptr;
+	return v ? env->NewStringUTF(obui::javaSafeText(*v).c_str()) : nullptr;
 }
 
 // iniSet / iniRemove: edit one key in place (comments and other lines kept) and save. False when the save failed.
@@ -201,7 +202,7 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_backupCard(JN
 {
 	std::string err;
 	const bool ok = obui::backupCard(std::filesystem::path(Str(env, path)), keep, &err);
-	return env->NewStringUTF(ok ? "" : (err.empty() ? "backup failed" : err.c_str()));
+	return env->NewStringUTF(ok ? "" : (err.empty() ? "backup failed" : obui::javaSafeText(err).c_str()));
 }
 
 // Widescreen (core/widescreen.h), one rule for both platforms: isWidescreenModFile(path), widescreenEnabled(dir),
@@ -220,7 +221,7 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_setWidescreen
 {
 	std::string err;
 	const bool ok = obui::setWidescreen(std::filesystem::path(Str(env, dir)), on == JNI_TRUE, &err);
-	return env->NewStringUTF(ok ? "" : (err.empty() ? "could not change the aspect ratio" : err.c_str()));
+	return env->NewStringUTF(ok ? "" : (err.empty() ? "could not change the aspect ratio" : obui::javaSafeText(err).c_str()));
 }
 
 // The touch controls (TouchOverlay, core/touch_pad.h). touchPad(pressed, rx, ry, lx, ly): PS2 button bits held (1 =

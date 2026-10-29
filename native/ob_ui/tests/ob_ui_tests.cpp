@@ -17,6 +17,7 @@
 #include "memory_card.h"
 #include "menu_trigger.h"
 #include "net_choice.h"
+#include "safe_text.h"
 #include "touch_pad.h"
 #include "widescreen.h"
 
@@ -829,6 +830,21 @@ static void NetTests()
 		"net: host names are short and printable");
 }
 
+// Security queue C5: text from files (card save names, ini values) handed to Android's NewStringUTF must be valid
+// Modified UTF-8, or a debuggable build aborts. Invalid bytes, NUL and 4-byte characters become '?'.
+static void SafeTextTests()
+{
+	Check(obui::javaSafeText("Mcd001 OK") == "Mcd001 OK", "safe text: ASCII unchanged");
+	Check(obui::javaSafeText("caf\xC3\xA9 \xE3\x81\x82") == "caf\xC3\xA9 \xE3\x81\x82", "safe text: valid 2- and 3-byte UTF-8 unchanged");
+	Check(obui::javaSafeText("a\x80" "b") == "a?b", "safe text: a lone continuation byte");
+	Check(obui::javaSafeText("a\xC3") == "a?", "safe text: a truncated sequence at the end");
+	Check(obui::javaSafeText("a\xC0\xAF" "b") == "a??b", "safe text: an overlong form");
+	Check(obui::javaSafeText("\xFF\xFE") == "??", "safe text: bytes never valid in UTF-8");
+	Check(obui::javaSafeText("x\xF0\x9F\x98\x80y") == "x?y", "safe text: a 4-byte character (emoji)");
+	Check(obui::javaSafeText(std::string("a\0b", 3)) == "a?b", "safe text: a NUL byte");
+	Check(obui::javaSafeText("\xED\xA0\x80") == "???", "safe text: an encoded surrogate");
+}
+
 int main()
 {
 	IniTests();
@@ -841,6 +857,7 @@ int main()
 	WidescreenTests();
 	TouchTests();
 	NetTests();
+	SafeTextTests();
 	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

@@ -10,7 +10,8 @@ add_library(ob_ui_core STATIC
     core/memory_card.cpp
     core/touch_pad.cpp
     core/widescreen.cpp
-    core/net_choice.cpp)
+    core/net_choice.cpp
+    core/safe_text.cpp)
 target_include_directories(ob_ui_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
 if(MSVC)
     target_compile_options(ob_ui_core PRIVATE /EHsc) # the including directory strips /EHsc for PCSX2

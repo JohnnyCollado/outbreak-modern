@@ -1,5 +1,6 @@
 // android_picker: see android_picker.h.
 #include "android_picker.h"
+#include "safe_text.h" // text to NewStringUTF (security queue C5)
 #include "android_menu.h"
 
 #include <android_native_app_glue.h>
@@ -219,7 +220,7 @@ namespace obui::android
 		JNIEnv* env = scope.env;
 		if (!env)
 			return -1;
-		jstring s = env->NewStringUTF(uri.c_str());
+		jstring s = env->NewStringUTF(obui::javaSafeText(uri).c_str());
 		const jint fd = env->CallIntMethod(s_activity, s_openDocument, s);
 		env->DeleteLocalRef(s);
 		if (ClearException(env))
