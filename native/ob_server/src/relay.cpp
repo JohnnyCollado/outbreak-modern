@@ -31,6 +31,7 @@ namespace ob::server
 
 		Accounts* accounts = nullptr;
 		RelayConfig config;
+		ConnectionGuard guard;
 		RelayServer* owner = nullptr;
 		net::Socket listener = net::kInvalid;
 		std::list<Client> clients;
@@ -93,6 +94,7 @@ namespace ob::server
 		m_impl = std::make_unique<Impl>();
 		m_impl->accounts = &accounts;
 		m_impl->config = config;
+		m_impl->guard.setLimits(config.limits);
 		m_impl->owner = this;
 		m_impl->listener = net::listenTcp(address, port, &m_port, error);
 		if (m_impl->listener == net::kInvalid)
@@ -116,6 +118,13 @@ namespace ob::server
 					std::string peer;
 					for (net::Socket a; (a = net::acceptTcp(s.listener, &peer)) != net::kInvalid;)
 					{
+						// Local network only, and capped (guard.h).
+						if (!s.guard.admit(peer))
+						{
+							net::closeSocket(a);
+							s.log(peer + ": refused (not local, removed, or over the limit)");
+							continue;
+						}
 						Impl::Client& c = s.clients.emplace_back();
 						c.socket = a;
 						c.address = peer;
@@ -181,13 +190,17 @@ namespace ob::server
 					if (it->closing)
 					{
 						net::closeSocket(it->socket);
+						s.guard.release(it->address);
 						it = s.clients.erase(it);
 					}
 					else
 						++it;
 			}
 			for (Impl::Client& c : s.clients)
+			{
 				net::closeSocket(c.socket);
+				s.guard.release(c.address);
+			}
 			net::closeSocket(s.listener);
 		});
 		return true;

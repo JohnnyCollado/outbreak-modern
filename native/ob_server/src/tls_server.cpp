@@ -37,6 +37,7 @@ namespace ob::server
 		mbedtls_ssl_config conf;
 		mbedtls_net_context listen;
 		std::mutex lastMutex;
+		ConnectionGuard guard;
 		std::string last;
 
 		State()
@@ -158,6 +159,9 @@ namespace ob::server
 		}
 		mbedtls_ssl_conf_rng(&s->conf, mbedtls_ctr_drbg_random, &s->drbg);
 		mbedtls_ssl_conf_min_version(&s->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_0);
+		// A client that stops sending is dropped after 10 s (a stalled handshake or request holds this one thread).
+		mbedtls_ssl_conf_read_timeout(&s->conf, 10000);
+		s->guard.setLimits(config.limits);
 		mbedtls_ssl_conf_max_version(&s->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
 		mbedtls_ssl_conf_ciphersuites(&s->conf, kSuites);
 		mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_NONE);
@@ -231,6 +235,14 @@ namespace ob::server
 						  std::to_string(static_cast<unsigned char>(ip[1])) + "." +
 						  std::to_string(static_cast<unsigned char>(ip[2])) + "." +
 						  std::to_string(static_cast<unsigned char>(ip[3]));
+			// Local network only, and capped (guard.h): refused before the handshake.
+			if (!s->guard.admit(address))
+			{
+				mbedtls_net_free(&client);
+				if (m_config.log)
+					m_config.log("[web] " + address + ": refused (not local, removed, or over the limit)");
+				continue;
+			}
 			if (m_config.log)
 				m_config.log("[web] " + address + ": accepted");
 
@@ -368,6 +380,7 @@ namespace ob::server
 			}
 			mbedtls_ssl_free(&ssl);
 			mbedtls_net_free(&client);
+			s->guard.release(address);
 		}
 	}
 }

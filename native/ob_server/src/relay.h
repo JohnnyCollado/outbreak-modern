@@ -6,6 +6,7 @@
 // server never reads game data. A broken stream (length 0) or a player silent too long is dropped; nobody is told.
 #pragma once
 
+#include "guard.h"
 #include "accounts.h"
 
 #include <atomic>
@@ -21,6 +22,7 @@ namespace ob::server
 	{
 		int idleSeconds = 60;                         // drop a player silent this long
 		std::function<void(const std::string&)> log; // one line per notable event; may be empty
+		GuardLimits limits;                           // local addresses only; per service and per address (guard.h)
 	};
 
 	class RelayServer

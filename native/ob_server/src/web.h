@@ -4,6 +4,7 @@
 // player, so no ID or password is typed. Pages only; TLS and sockets are in tls_server.
 #pragma once
 
+#include "guard.h"
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -22,6 +23,7 @@ namespace ob::server
 		std::function<void(const std::string& line)> log;
 		// Also the client's first bytes after a successful handshake (a failed one always shows them).
 		bool trace = false;
+		GuardLimits limits; // local addresses only; per service and per address (guard.h)
 	};
 
 	struct WebResponse

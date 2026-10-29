@@ -5,6 +5,7 @@
 // known here gets an empty answer and one log line, so the game never waits forever on us.
 #pragma once
 
+#include "guard.h"
 #include "accounts.h"
 
 #include <array>
@@ -25,6 +26,7 @@ namespace ob::server
 		int heartbeatSeconds = 30;                          // HEARTBEAT broadcast; CONNCHECK at twice this
 		std::function<void(const std::string&)> log;        // one line per notable event; may be empty
 		bool trace = false;                                 // also one line per packet in and out (ob_server --trace)
+		GuardLimits limits;                                 // local addresses only; per service and per address (guard.h)
 	};
 
 	class LobbyServer
