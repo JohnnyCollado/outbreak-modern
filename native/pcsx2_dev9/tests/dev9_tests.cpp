@@ -255,6 +255,7 @@ int main()
 	const ob_dev9_remap remaps[] = {{{192, 0, 2, 2}, 4433, {127, 0, 0, 1}, server.port, {}},
 		{{192, 0, 2, 2}, 4434, {127, 0, 0, 1}, server.port, {127, 0, 0, 2}}};
 	const ob_dev9_config config{nullptr, hosts, 1, kLog, remaps, 2};
+	ob_dev9_set_trace(true); // PS2X_NET_TRACE: time each interrupt's wait (reports/2026-10-26-online-play.md entry 64)
 	if (!ob_dev9_open(&config))
 	{
 		std::printf("SKIP: no usable network interface for the Sockets adapter; network checks not run\n");
@@ -282,6 +283,10 @@ int main()
 	Check(!(ob_dev9_read16(kBdTx) & kBdTxReady), "the SMAP took the frame (TX descriptor handed back)");
 	bool irq = false;
 	std::vector<uint8_t> offer = Receive(&irq);
+	uint32_t waits = 0;
+	double longestMs = -1.0;
+	ob_dev9_irq_wait_stats(&waits, &longestMs);
+	Check(irq && waits >= 1 && longestMs >= 0.0, "trace: the wait from an interrupt's request to the IOP taking it is timed");
 	Check(IsUdpFrom(offer, 67), "a DHCP reply comes back through the RX FIFO");
 	uint8_t yiaddr[4] = {}, dns[4] = {};
 	bool isOffer = false;

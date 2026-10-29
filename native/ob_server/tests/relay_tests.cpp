@@ -7,6 +7,7 @@
 #include "relay.h"
 
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -126,5 +127,43 @@ void TestRelay()
 	d.pump(300);
 	Check(d.closed, "an unknown session is disconnected");
 	Check(relay.framesRelayed() == 3, "three frames were relayed");
+	relay.stop();
+}
+
+// The latency trace (reports/2026-10-26-online-play.md entry 64): with statsMs set, each logged-in player gets a line
+// with the frames it sent in the window and its connection's round-trip time as the system measures it.
+void TestRelayStats()
+{
+	Accounts accounts;
+	const uint32_t sA = accounts.mintSession("A"), sB = accounts.mintSession("B");
+	accounts.setGameNumber("A", 2);
+	accounts.setGameNumber("B", 2);
+	std::mutex logMutex;
+	std::vector<std::string> lines;
+	RelayServer relay;
+	RelayConfig config;
+	config.statsMs = 300;
+	config.log = [&](const std::string& l) {
+		std::lock_guard<std::mutex> lock(logMutex);
+		lines.push_back(l);
+	};
+	std::string error;
+	Check(relay.start(accounts, config, "127.0.0.1", 0, &error), "stats: the relay starts");
+	RelayClient a, b;
+	Check(a.connect(relay.port()) && b.connect(relay.port()) && a.login(sA) && b.login(sB), "stats: two players log in");
+	for (int i = 0; i < 40 && relay.logins() < 2; i++)
+		std::this_thread::sleep_for(std::chrono::milliseconds(25));
+	a.sendBytes({3, 0x11, 0x22}); // the length byte counts itself
+	a.sendBytes({3, 0x33, 0x44});
+	b.pump(300);
+	bool found = false;
+	for (int i = 0; i < 100 && !found; i++) // the next stats window (300 ms) after the frames
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		std::lock_guard<std::mutex> lock(logMutex);
+		for (const std::string& l : lines)
+			found |= l.find("127.0.0.1: 2 frames") != std::string::npos && l.find("round trip") != std::string::npos;
+	}
+	Check(found, "stats: a line per player with its frames and the round trip");
 	relay.stop();
 }

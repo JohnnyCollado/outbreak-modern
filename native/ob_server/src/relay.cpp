@@ -4,6 +4,8 @@
 #include "net.h"
 #include "protocol.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <mutex>
 #include <chrono>
 #include <list>
@@ -28,6 +30,7 @@ namespace ob::server
 			uint32_t game = 0;
 			bool loggedIn = false, closing = false;
 			Clock::time_point heard = Clock::now();
+			uint32_t framesSent = 0; // since the last stats line
 		};
 
 		Accounts* accounts = nullptr;
@@ -35,6 +38,8 @@ namespace ob::server
 		ConnectionGuard guard;
 		std::mutex removeMutex;
 		std::vector<std::string> pendingRemove; // from the host's UI thread, handled in the loop
+		mutable std::mutex sharedMutex;
+		std::vector<std::string> sharedAddresses; // connectedAddresses(), refreshed every loop
 		RelayServer* owner = nullptr;
 		net::Socket listener = net::kInvalid;
 		std::list<Client> clients;
@@ -109,6 +114,7 @@ namespace ob::server
 		m_thread = std::thread([this] {
 			Impl& s = *m_impl;
 			std::vector<uint8_t> buffer(16384);
+			auto lastStats = Clock::now();
 			while (m_running)
 			{
 				std::vector<net::PollEntry> entries;
@@ -168,11 +174,28 @@ namespace ob::server
 						if (!frame)
 							break;
 						s.relay(c, *frame);
+						c.framesSent++;
 					}
 					if (c.in.broken())
 						s.drop(c, "broken stream (length 0), disconnected");
 				}
 				const auto now = Clock::now();
+				if (s.config.statsMs > 0 && now - lastStats >= std::chrono::milliseconds(s.config.statsMs))
+				{
+					const double seconds = std::chrono::duration<double>(now - lastStats).count();
+					lastStats = now;
+					for (Impl::Client& c : s.clients)
+					{
+						if (!c.loggedIn || c.closing)
+							continue;
+						const long rtt = net::tcpRoundTripUs(c.socket);
+						char text[160];
+						std::snprintf(text, sizeof(text), "%s: %u frames in %.1f s, round trip %s", c.address.c_str(),
+							c.framesSent, seconds, rtt < 0 ? "unknown" : (std::to_string(rtt / 1000.0).substr(0, 5) + " ms").c_str());
+						s.log(text);
+						c.framesSent = 0;
+					}
+				}
 				for (Impl::Client& c : s.clients)
 					if (!c.closing && now - c.heard > std::chrono::seconds(s.config.idleSeconds))
 						s.drop(c, "silent, disconnected");
@@ -206,6 +229,14 @@ namespace ob::server
 					}
 					else
 						++it;
+				{
+					std::vector<std::string> addresses;
+					for (const Impl::Client& c : s.clients)
+						if (std::find(addresses.begin(), addresses.end(), c.address) == addresses.end())
+							addresses.push_back(c.address);
+					std::lock_guard<std::mutex> lock(s.sharedMutex);
+					s.sharedAddresses = std::move(addresses);
+				}
 			}
 			for (Impl::Client& c : s.clients)
 			{
@@ -215,6 +246,14 @@ namespace ob::server
 			net::closeSocket(s.listener);
 		});
 		return true;
+	}
+
+	std::vector<std::string> RelayServer::connectedAddresses() const
+	{
+		if (!m_impl)
+			return {};
+		std::lock_guard<std::mutex> lock(m_impl->sharedMutex);
+		return m_impl->sharedAddresses;
 	}
 
 	void RelayServer::removeAddress(const std::string& address)

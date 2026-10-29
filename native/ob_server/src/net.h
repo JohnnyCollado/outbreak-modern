@@ -26,6 +26,8 @@ namespace ob::server::net
 	// Non-blocking send/receive: bytes moved; 0 = would block; -1 = closed or failed.
 	long sendSome(Socket s, const uint8_t* data, size_t size);
 	long receiveSome(Socket s, uint8_t* data, size_t size);
+	// The connection's round-trip time as the system's TCP measures it, in microseconds; -1 if unknown.
+	long tcpRoundTripUs(Socket s);
 
 	// UDP for nearby-game discovery (beacon.h): a non-blocking socket bound to address:port ("" = all, 0 = any free
 	// port), broadcast allowed when asked. sendUdp: true when the datagram went out. receiveUdp: its size, 0 when

@@ -12,7 +12,10 @@
 #include "common/Console.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -26,6 +29,45 @@ namespace
 	// per source, the later call replacing the earlier).
 	int64_t s_irqIn = -1;
 
+	// The latency trace (ob_dev9_set_trace): when the pending interrupt was asked for (0 = none), and the totals.
+	// dev9Irq comes from the receive thread too (net.cpp NetRxThread -> rx_process), hence the atomic.
+	bool s_trace = false;
+	std::atomic<int64_t> s_irqAskedUs{0};
+	uint32_t s_waits = 0, s_windowWaits = 0;
+	double s_longestMs = 0.0, s_windowSumMs = 0.0, s_windowLongestMs = 0.0;
+	int64_t s_windowStartUs = 0;
+
+	int64_t NowUs()
+	{
+		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+			.count();
+	}
+
+	void TimeTakenIrq()
+	{
+		const int64_t asked = s_irqAskedUs.exchange(0);
+		if (!asked)
+			return;
+		const int64_t now = NowUs();
+		const double ms = (now - asked) / 1000.0;
+		s_waits++;
+		s_longestMs = std::max(s_longestMs, ms);
+		s_windowWaits++;
+		s_windowSumMs += ms;
+		s_windowLongestMs = std::max(s_windowLongestMs, ms);
+		if (!s_windowStartUs)
+			s_windowStartUs = now;
+		if (now - s_windowStartUs >= 10'000'000)
+		{
+			std::printf("[dev9] interrupt wait: %u in 10 s, average %.2f ms, longest %.2f ms\n", s_windowWaits,
+				s_windowSumMs / s_windowWaits, s_windowLongestMs);
+			std::fflush(stdout);
+			s_windowWaits = 0;
+			s_windowSumMs = s_windowLongestMs = 0.0;
+			s_windowStartUs = now;
+		}
+	}
+
 	void FireIrqEvent()
 	{
 		s_irqIn = -1;
@@ -38,6 +80,11 @@ namespace
 void dev9Irq(int cycles)
 {
 	s_irqIn = cycles < 0 ? 0 : cycles;
+	if (s_trace)
+	{
+		int64_t none = 0;
+		s_irqAskedUs.compare_exchange_strong(none, NowUs()); // the first ask since the last take
+	}
 }
 
 // IopDma.cpp: the end of a channel-8 transfer (CHCR busy bit cleared, DMA interrupt 2 bit 1 on the IOP side).
@@ -50,6 +97,8 @@ bool ob_dev9_open(const ob_dev9_config* config)
 {
 	if (s_open)
 		ob_dev9_close();
+	if (const char* trace = std::getenv("PS2X_NET_TRACE"); trace && trace[0] == '1')
+		ob_dev9_set_trace(true);
 	auto& d = EmuConfig.DEV9;
 	d = Pcsx2Config::DEV9Options();
 	d.EthEnable = true;
@@ -177,7 +226,26 @@ bool ob_dev9_take_interrupt()
 {
 	const bool r = s_irq;
 	s_irq = false;
+	if (r && s_trace)
+		TimeTakenIrq();
 	return r;
+}
+
+void ob_dev9_set_trace(bool on)
+{
+	s_trace = on;
+	s_irqAskedUs = 0;
+	s_waits = s_windowWaits = 0;
+	s_longestMs = s_windowSumMs = s_windowLongestMs = 0.0;
+	s_windowStartUs = 0;
+}
+
+void ob_dev9_irq_wait_stats(uint32_t* count, double* longest_ms)
+{
+	if (count)
+		*count = s_waits;
+	if (longest_ms)
+		*longest_ms = s_longestMs;
 }
 
 bool ob_dev9_take_dma_done()

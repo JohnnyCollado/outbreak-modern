@@ -198,7 +198,15 @@ class NetPlayTest {
     fun thePageWinsOverNetEnv() {
         val page = listOf("PS2X_DEV9" to "pcsx2", "PS2X_NET_HOSTS" to "www01.kddi-mmbb.jp=10.98.58.174")
         val dev = listOf("PS2X_NET_HOSTS" to "www01.kddi-mmbb.jp=192.168.0.76", "PS2X_SAVES" to "/x")
-        assertEquals(page, gameEnv(page, dev))
+        assertEquals(page + ("PS2X_SAVES" to "/x"), gameEnv(page, dev))
         assertEquals(dev, gameEnv(emptyList(), dev))
+    }
+
+    @Test
+    fun netEnvMayStillTurnOnTheTraceButNotRedirect() {
+        val page = listOf("PS2X_DEV9" to "pcsx2", "PS2X_NET_HOSTS" to "www01.kddi-mmbb.jp=10.98.58.174")
+        val dev = listOf("PS2X_NET_TRACE" to "1", "PS2X_NET_REMAP" to "10.98.58.174:443=1.2.3.4:443",
+            "PS2X_NET_IF" to "rmnet0", "PS2X_NETCNF" to "dhcp", "PS2X_DEV9" to "off")
+        assertEquals(page + ("PS2X_NET_TRACE" to "1"), gameEnv(page, dev))
     }
 }

@@ -150,9 +150,13 @@ fun joinTarget(ui: (String) -> String): String = when (ui("net_mode")) {
     else -> ""
 }
 
+/** The settings that decide where the game connects: with online play on, only the Network page sets them. */
+private val NETWORK_KEYS = setOf("PS2X_DEV9", "PS2X_NET_IF", "PS2X_NET_HOSTS", "PS2X_NET_REMAP", "PS2X_NETCNF")
+
 /**
- * The game's network environment: the Network page's when online play is on, else the developer's net.env. A
- * leftover net.env from testing pointed both phones at the PC while the page said to join the Odin (entry 63).
+ * The game's environment: with online play on, the Network page's settings plus the developer's net.env lines that do
+ * not decide where the game connects (PS2X_NET_TRACE, entry 64); with it off, net.env as written. A leftover net.env
+ * from testing pointed both phones at the PC while the page said to join the Odin (entry 63).
  */
 fun gameEnv(page: List<Pair<String, String>>, dev: List<Pair<String, String>>): List<Pair<String, String>> =
-    if (page.isNotEmpty()) page else dev
+    if (page.isEmpty()) dev else page + dev.filter { it.first !in NETWORK_KEYS }

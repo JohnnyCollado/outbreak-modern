@@ -3,6 +3,7 @@
 
 #include "guard.h"
 
+#include <algorithm>
 #include <chrono>
 
 #if defined(_WIN32)
@@ -95,6 +96,7 @@ namespace ob::server
 		config.lobbyPort = options.lobbyPort;
 		config.relayPort = options.relayPort;
 		config.log = options.log;
+		config.relayStatsMs = options.relayStatsMs;
 		if (!m_server.start(config, error))
 			return false;
 		BeaconInfo info{options.name, m_server.webPort(), m_server.lobbyPort(), 0};
@@ -107,7 +109,7 @@ namespace ob::server
 		m_counter = std::thread([this] {
 			while (m_running)
 			{
-				const size_t n = m_server.lobby().connectedAddresses().size();
+				const size_t n = players().size();
 				m_beacon.setPlayers(static_cast<uint8_t>(n > 64 ? 64 : n));
 				for (int t = 0; m_running && t < 500; t += 20)
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -131,7 +133,12 @@ namespace ob::server
 
 	std::vector<std::string> LocalHost::players() const
 	{
-		return m_server.lobby().connectedAddresses();
+		// In the lobby or in a game (on the relay); one address is one player.
+		std::vector<std::string> all = m_server.lobby().connectedAddresses();
+		for (const std::string& a : m_server.relay().connectedAddresses())
+			if (std::find(all.begin(), all.end(), a) == all.end())
+				all.push_back(a);
+		return all;
 	}
 
 	void LocalHost::removePlayer(const std::string& address)

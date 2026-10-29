@@ -72,3 +72,9 @@ uint32_t ob_dev9_dma(uint8_t* iop_ram, uint32_t ram_size, uint32_t madr, uint32_
 void ob_dev9_advance(uint32_t iop_cycles);
 bool ob_dev9_take_interrupt();  // DEV9 raised INTC line 13 since the last call (dev9Interrupt: cause & mask)
 bool ob_dev9_take_dma_done();   // DEV9 ended a channel-8 transfer since the last call (psxDMA8Interrupt)
+
+// Latency trace (PS2X_NET_TRACE=1, read at open; off by default): the wall time from DEV9 asking for its interrupt
+// (a frame arrived, a send ended) to the IOP taking it, summed up in the log every 10 s ("[dev9] interrupt wait").
+void ob_dev9_set_trace(bool on);
+// Interrupts timed since open, and the longest wait in milliseconds.
+void ob_dev9_irq_wait_stats(uint32_t* count, double* longest_ms);

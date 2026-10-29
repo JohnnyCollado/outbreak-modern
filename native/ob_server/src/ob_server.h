@@ -29,6 +29,7 @@ namespace ob::server
 		std::string messageOfTheDay;
 		std::function<void(const std::string&)> log;
 		bool trace = false; // the lobby logs every packet in and out (--trace)
+		int relayStatsMs = 0; // the relay's latency line per player (RelayConfig::statsMs); 0 = off
 	};
 
 	class Server

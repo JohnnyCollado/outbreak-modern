@@ -1158,6 +1158,28 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   host log (the start had rolled out of logcat) ends with both players on its relay: `[relay] 10.98.58.71:
   connection closed` (OnePlus), `[relay] 10.98.58.174: silent, disconnected` (the Odin's own game).
 
+### 64. The host's player count stalled in game; a latency trace before any latency change
+
+- **Seen (developer, 2026-10-29):** "the number counter for the server did not update".
+- **Cause:** the host counted the lobby's connections only (`LocalHost::players`). In a game the players are on
+  the relay, so the count (the host's list and the beacon nearby phones show) dropped while they played. **Fix:**
+  lobby and relay addresses together, one address one player (`RelayServer::connectedAddresses`). Test first:
+  "a player on the relay is listed" and "the beacon counts the player on the relay" failed (169/171), then 171/171.
+- **Latency, what the path shows (no measurement yet):** the relay forwards a frame in the same loop pass it reads it
+  (`relay.cpp`); both ends set TCP_NODELAY (entry 61); PCSX2's receive thread checks every 1 ms (`DEV9/net.cpp:46`).
+  The suspect: the emulated IOP takes the network interrupt only when it next runs, and it runs each frame's cycles
+  in a burst; a frame arriving in the wait may sit until the next frame (unverified).
+- **The trace (both off unless asked):**
+  - `PS2X_NET_TRACE=1`: the adapter times each interrupt from DEV9 asking for it (a frame arrived, a send ended) to
+    the IOP taking it, and logs "[dev9] interrupt wait: N in 10 s, average, longest" (`dev9_side.cpp`). Test first:
+    pcsx2_dev9 29/29.
+  - The built-in host's relay logs every 10 s per player: frames it sent and its connection's round trip as the
+    system's TCP measures it (`net::tcpRoundTripUs`: TCP_INFO / SIO_TCP_INFO). Test: ob_server 174/174 (first run
+    failed on my test data: the relay's length byte counts itself).
+  - On Android, with online play on, net.env may still add settings that do not decide where the game connects
+    (`PS2X_NET_TRACE`), never the network ones (`gameEnv`). Kotlin 60/60.
+- Next: install, `PS2X_NET_TRACE=1` in both phones' net.env, one round with the Odin hosting, read both logs.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

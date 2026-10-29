@@ -10,6 +10,7 @@ namespace ob::server
 		// any free port, as a host may ask).
 		RelayConfig relay;
 		relay.log = config.log;
+		relay.statsMs = config.relayStatsMs;
 		if (!m_relay.start(m_accounts, relay, config.bindAddress, config.relayPort, error))
 			return false;
 		LobbyConfig lobby;

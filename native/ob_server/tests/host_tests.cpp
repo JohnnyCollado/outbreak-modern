@@ -102,3 +102,46 @@ void TestFindLocalNetwork()
 	else
 		Check(address.empty(), "host: no local network found, no address given");
 }
+
+// In a game the players leave the lobby for the relay: they still count, in the host's list and in its beacon
+// (reports/2026-10-26-online-play.md entry 64: the count did not update during play).
+void TestHostCountsPlayersInGame()
+{
+	BeaconListener listener;
+	std::string error;
+	if (!listener.start(0, &error))
+	{
+		Check(false, "host in game: the beacon listener starts");
+		return;
+	}
+	LocalHost host;
+	HostOptions options;
+	options.name = "Game host";
+	options.address = "127.0.0.1";
+	options.webPort = 0;
+	options.lobbyPort = 0;
+	options.relayPort = 0;
+	options.beaconTargets = {"127.0.0.1"};
+	options.beaconPort = listener.port();
+	options.beaconIntervalMs = 100;
+	if (!host.start(options, &error))
+	{
+		Check(false, ("host in game: starts (" + error + ")").c_str());
+		listener.stop();
+		return;
+	}
+	const net::Socket inGame = net::connectTcp("127.0.0.1", host.relayPort());
+	Check(within(2000, [&] { return host.players().size() == 1 && host.players()[0] == "127.0.0.1"; }),
+		"host in game: a player on the relay is listed");
+	Check(within(2000, [&] {
+		const auto found = listener.hosts();
+		return found.size() == 1 && found[0].info.players == 1;
+	}), "host in game: the beacon counts the player on the relay");
+	const net::Socket inLobby = net::connectTcp("127.0.0.1", host.lobbyPort());
+	Check(within(1000, [&] { return host.players().size() == 1; }), "host in game: one address in lobby and relay is one player");
+	net::closeSocket(inGame);
+	net::closeSocket(inLobby);
+	Check(within(2000, [&] { return host.players().empty(); }), "host in game: players gone when they disconnect");
+	host.stop();
+	listener.stop();
+}

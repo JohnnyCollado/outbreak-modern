@@ -4,6 +4,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #else
 #include <arpa/inet.h>
 #include <cerrno>
@@ -164,6 +165,24 @@ namespace ob::server::net
 		if (n == 0)
 			return -1; // closed by the peer
 		return wouldBlock() ? 0 : -1;
+	}
+
+	long tcpRoundTripUs(Socket s)
+	{
+#ifdef _WIN32
+		DWORD version = 0, bytes = 0; // SIO_TCP_INFO, TCP_INFO_v0 (Windows 10 1703 and later)
+		TCP_INFO_v0 info{};
+		if (WSAIoctl(static_cast<SOCKET>(s), SIO_TCP_INFO, &version, sizeof(version), &info, sizeof(info), &bytes, nullptr,
+				nullptr) != 0)
+			return -1;
+		return static_cast<long>(info.RttUs);
+#else
+		tcp_info info{};
+		socklen_t len = sizeof(info);
+		if (getsockopt(s, IPPROTO_TCP, TCP_INFO, &info, &len) != 0)
+			return -1;
+		return static_cast<long>(info.tcpi_rtt);
+#endif
 	}
 
 	Socket openUdp(const std::string& address, uint16_t port, bool broadcast, uint16_t* boundPort, std::string* error)

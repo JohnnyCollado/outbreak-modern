@@ -26,6 +26,7 @@ namespace ob::server
 		std::vector<std::string> beaconTargets{"255.255.255.255"}; // and the Wi-Fi subnet's broadcast address
 		uint16_t beaconPort = kBeaconPort;
 		int beaconIntervalMs = 1000;
+		int relayStatsMs = 10000; // the relay's per-player latency line (frames, round trip); 0 = off
 		std::function<void(const std::string&)> log;
 	};
 
