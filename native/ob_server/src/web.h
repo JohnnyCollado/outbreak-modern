@@ -20,6 +20,8 @@ namespace ob::server
 		std::function<uint32_t(const std::string& clientAddress)> mintSession;
 		// One line per connection event (accepted, handshake result); from the server's thread. Empty = none.
 		std::function<void(const std::string& line)> log;
+		// Also the client's first bytes after a successful handshake (a failed one always shows them).
+		bool trace = false;
 	};
 
 	struct WebResponse

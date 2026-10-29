@@ -314,6 +314,27 @@ static void TestTlsServer()
 	const auto at = std::search(cert.begin(), cert.end(), std::begin(utcValidity), std::end(utcValidity));
 	Check(!cert.empty() && at != cert.end() && at + 4 + 13 + 1 < cert.end() && at[4 + 13] == 0x17,
 		"the certificate's validity dates are both UTCTime (the PS2's OpenSSL reads them)");
+	// The game's own greeting, captured from the OnePlus (report entry 59): an SSLv2-format ClientHello for TLS 1.0
+	// with 25 three-byte cipher specs. mbedTLS 2.28's fallback check in its v2 parser takes every 00-xx-xx spec for
+	// the fallback signal and refused it as an "inappropriate fallback" (-0x7900); the server must answer with its
+	// ServerHello (a handshake record, 0x16), not an alert (0x15).
+	{
+		static const char kPs2Hello[] =
+			"8064010301004b0000001000006600001600001300000a0000050000040000150000120000090700c003008001008006004000006300"
+			"006500006200006400001400001100000800000600000304008002008008008045051ac2eb799ffe04e59083a5a91490";
+		std::vector<unsigned char> hello;
+		for (size_t i = 0; kPs2Hello[i] && kPs2Hello[i + 1]; i += 2)
+			hello.push_back(static_cast<unsigned char>(std::stoi(std::string(kPs2Hello + i, 2), nullptr, 16)));
+		mbedtls_net_context net;
+		mbedtls_net_init(&net);
+		unsigned char reply[5] = {};
+		int got = -1;
+		if (mbedtls_net_connect(&net, "127.0.0.1", std::to_string(server.port()).c_str(), MBEDTLS_NET_PROTO_TCP) == 0 &&
+			mbedtls_net_send(&net, hello.data(), hello.size()) == static_cast<int>(hello.size()))
+			got = mbedtls_net_recv_timeout(&net, reply, sizeof(reply), 5000);
+		mbedtls_net_free(&net);
+		Check(hello.size() == 102 && got > 0 && reply[0] == 0x16, "the PS2's SSLv2-format greeting gets a ServerHello");
+	}
 	server.stop();
 	// Each connection is logged when accepted (with its address) and when its handshake ends (protocol or error).
 	bool accepted = false, handshake = false;

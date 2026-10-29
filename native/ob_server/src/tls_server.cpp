@@ -278,6 +278,17 @@ namespace ob::server
 				if (m_config.log)
 					m_config.log("[web] " + address + ": " + mbedtls_ssl_get_version(&ssl) + " " +
 								 mbedtls_ssl_get_ciphersuite(&ssl));
+				if (m_config.log && m_config.trace)
+				{
+					std::string dump;
+					for (unsigned char c : recorded.bytes)
+					{
+						char h[4];
+						std::snprintf(h, sizeof(h), "%02x", c);
+						dump += h;
+					}
+					m_config.log("[web] " + address + ": handshake bytes " + dump);
+				}
 				{
 					std::lock_guard<std::mutex> lock(s->lastMutex);
 					s->last = std::string(mbedtls_ssl_get_version(&ssl)) + " " + mbedtls_ssl_get_ciphersuite(&ssl);

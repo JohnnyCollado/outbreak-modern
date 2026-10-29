@@ -25,6 +25,7 @@ namespace ob::server
 		WebConfig web;
 		web.lobbyPort = config.lobbyPort;
 		web.log = config.log;
+		web.trace = config.trace;
 		// Quick login (plan P12): one account per device. Until the app's hello (step E) names the device, its
 		// network address does.
 		web.mintSession = [this, log = config.log](const std::string& address) {

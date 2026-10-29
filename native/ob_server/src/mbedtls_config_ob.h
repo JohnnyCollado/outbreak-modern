@@ -6,3 +6,8 @@
 // sets its list explicitly (report entry: "mbedTLS 2.28 ... a suite set explicitly still negotiates").
 #define MBEDTLS_SSL_PROTO_SSL3
 #define MBEDTLS_SSL_SRV_SUPPORT_SSLV2_CLIENT_HELLO
+// No fallback check: in mbedTLS 2.28's SSLv2-greeting parser it tests `!= MBEDTLS_SSL_FALLBACK_SCSV_VALUE`
+// (library/ssl_srv.c:1254-1271), so every ordinary 00-xx-xx cipher spec counts as the fallback signal, and a TLS 1.0
+// client is refused as an "inappropriate fallback" (-0x7900). The PS2 game's own greeting is exactly that (report
+// entry 59); a 2003 client never sends the real signal anyway.
+#undef MBEDTLS_SSL_FALLBACK_SCSV
