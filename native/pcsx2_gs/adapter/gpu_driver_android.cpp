@@ -1,8 +1,8 @@
 // gpu_driver_android: the device part of the Android GPU driver choice (gpu_driver_android.h, gpu_driver.h).
 //
-// Custom driver = a driver package folder (meta.json + the driver .so, libadrenotools tools/ADPKG.md) the player puts
-// in <external files dir>/drivers/<name>/. dlopen() refuses libraries on shared storage (libadrenotools driver.h,
-// customDriverDir), so the folder is copied to <internal files dir>/drivers/<name>/ when it changed (".ob-stamps").
+// Custom driver = a driver package folder (meta.json + the driver .so, libadrenotools tools/ADPKG.md) the launcher
+// imports into <internal files dir>/drivers/<name>/ (internal only: security queue C2; dlopen() also refuses libraries
+// on shared storage, libadrenotools driver.h customDriverDir).
 // libadrenotools (BSD-2-Clause, github.com/bylaws/libadrenotools) then opens a private copy of the system
 // libvulkan.so whose driver load is redirected to the custom .so; its hooks libhook_impl.so + libmain_hook.so are in
 // the APK's lib/ (nativeLibraryDir, extractNativeLibs=true). We probe the handle (instance with the surface
@@ -198,20 +198,6 @@ namespace
 		return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 	}
 
-	bool MakeDirs(const std::string& path)
-	{
-		for (size_t i = 1; i <= path.size(); ++i)
-		{
-			if (i == path.size() || path[i] == '/')
-			{
-				const std::string part = path.substr(0, i);
-				if (mkdir(part.c_str(), 0755) != 0 && errno != EEXIST)
-					return false;
-			}
-		}
-		return true;
-	}
-
 	// Regular files directly in dir (not "." files: .ob-stamps is ours).
 	std::vector<obgpu::FileStamp> ListFiles(const std::string& dir)
 	{
@@ -246,83 +232,6 @@ namespace
 		return out.size() <= limit;
 	}
 
-	bool WriteText(const std::string& path, const std::string& text)
-	{
-		FILE* f = std::fopen(path.c_str(), "wb");
-		if (!f)
-			return false;
-		const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
-		return std::fclose(f) == 0 && ok;
-	}
-
-	bool CopyFile(const std::string& from, const std::string& to)
-	{
-		const int in = open(from.c_str(), O_RDONLY | O_CLOEXEC);
-		if (in < 0)
-			return false;
-		const int out = open(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-		bool ok = out >= 0;
-		char buf[1 << 16];
-		while (ok)
-		{
-			const ssize_t r = read(in, buf, sizeof(buf));
-			if (r == 0)
-				break;
-			if (r < 0)
-			{
-				ok = errno == EINTR;
-				continue;
-			}
-			for (ssize_t w = 0; ok && w < r;)
-			{
-				const ssize_t k = write(out, buf + w, static_cast<size_t>(r - w));
-				if (k < 0)
-					ok = errno == EINTR;
-				else
-					w += k;
-			}
-		}
-		close(in);
-		if (out >= 0 && close(out) != 0)
-			ok = false;
-		return ok;
-	}
-
-	// external -> internal when the stamps differ. False + reason on a failed copy.
-	bool SyncFolder(const std::string& name, const std::string& ext, const std::string& internal, std::string& reason)
-	{
-		const std::vector<obgpu::FileStamp> src = ListFiles(ext);
-		const std::string want = obgpu::FormatStamps(src);
-		std::string have;
-		const std::string stamps = internal + "/.ob-stamps";
-		if (IsDir(internal) && ReadText(stamps, have, 1 << 20) && have == want)
-			return true;
-		if (!MakeDirs(internal))
-		{
-			reason = "cannot create " + internal;
-			return false;
-		}
-		unlink(stamps.c_str());
-		for (const obgpu::FileStamp& f : ListFiles(internal))
-			unlink((internal + "/" + f.name).c_str());
-		uint64_t bytes = 0;
-		for (const obgpu::FileStamp& f : src)
-		{
-			if (!CopyFile(ext + "/" + f.name, internal + "/" + f.name))
-			{
-				reason = "cannot copy " + f.name + " to " + internal + " (" + std::strerror(errno) + ")";
-				return false;
-			}
-			bytes += f.size;
-		}
-		WriteText(stamps, want);
-		char b[160];
-		std::snprintf(b, sizeof(b), "[gpu] driver %s: copied %zu file(s), %.1f MB, to ", name.c_str(), src.size(),
-			static_cast<double>(bytes) / (1024.0 * 1024.0));
-		Log(b + internal);
-		return true;
-	}
-
 	// The directory our own .so was loaded from = nativeLibraryDir when the APK's libraries are extracted.
 	std::string NativeLibDir()
 	{
@@ -350,7 +259,6 @@ bool ObGpuSelectDriver(const std::string& setting)
 	}
 	const std::string& name = choice.name;
 	android_app* app = GetAndroidApp();
-	const char* ext_root = (app && app->activity) ? app->activity->externalDataPath : nullptr;
 	const char* int_root = (app && app->activity) ? app->activity->internalDataPath : nullptr;
 	if (!int_root)
 	{
@@ -358,20 +266,12 @@ bool ObGpuSelectDriver(const std::string& setting)
 		LogSystemDriver();
 		return false;
 	}
-	const std::string ext = ext_root ? std::string(ext_root) + "/drivers/" + name : std::string();
+	// Internal storage only (security queue C2): the launcher imports drivers there; nothing is taken from the external
+	// folder, which other apps may write on Android 10.
 	const std::string internal = std::string(int_root) + "/drivers/" + name;
 
 	obgpu::CustomDriverCheck c;
 	std::string reason;
-	if (!ext.empty() && IsDir(ext))
-	{
-		if (!SyncFolder(name, ext, internal, reason))
-		{
-			Log(obgpu::FallbackLine(name, reason));
-			LogSystemDriver();
-			return false;
-		}
-	}
 	c.folder_found = IsDir(internal);
 	if (c.folder_found)
 	{

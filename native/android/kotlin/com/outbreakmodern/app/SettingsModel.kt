@@ -719,7 +719,7 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
         val rows = mutableListOf<SRow>()
         // Folders imported before the importer's naming fix get valid names, and the choice follows (DriverNames.kt).
         val was = settings.get("gpu_driver", "system")
-        val repaired = repairDriverFolders(File(settings.filesDir, "drivers"), was)
+        val repaired = repairDriverFolders(settings.driversDir, was)
         if (repaired != was) settings.set("gpu_driver", repaired)
         val cur = settings.get("gpu_driver", "system")
         rows += SRow.Info("driver-hint", "The Vulkan driver the game draws with. Install several and choose between them; " +
@@ -737,7 +737,7 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
         rows += SRow.Buttons("drv-system", "System driver (recommended)", "The phone's own Vulkan driver",
             if (cur == "system") emptyList() else listOf("Select"), badge = if (cur == "system") "In use" else "") { choose("system") }
         val adreno = File("/dev/kgsl-3d0").exists()
-        File(settings.filesDir, "drivers").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name.lowercase() }?.forEach { d ->
+        settings.driversDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name.lowercase() }?.forEach { d ->
             val meta = File(d, "meta.json").takeIf { it.isFile }?.readText().orEmpty()
             fun field(k: String) = Regex("\"$k\"\\s*:\\s*\"?([^\",}]*)").find(meta)?.groupValues?.get(1)?.trim().orEmpty()
             val minApi = field("minApi").toIntOrNull() ?: 0
@@ -763,10 +763,7 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
                 badge = if (inUse) "In use" else "", danger = setOf(buttons.size - 1)) { i ->
                 if (buttons[i] == "Select") choose(d.name)
                 else {
-                    // The GS copies a driver into the internal files dir before loading it (gpu_driver_android.cpp):
-                    // both copies go.
-                    val internal = File(context.filesDir, "drivers/${d.name}")
-                    confirmDelete("Delete this driver?", "the driver ${d.name}", listOf(d, internal)) {
+                    confirmDelete("Delete this driver?", "the driver ${d.name}", listOf(d)) {
                         if (settings.get("gpu_driver", "system") == d.name) settings.set("gpu_driver", "system")
                     }
                 }

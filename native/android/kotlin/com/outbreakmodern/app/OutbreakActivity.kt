@@ -47,7 +47,8 @@ class OutbreakActivity : NativeActivity() {
         Os.setenv("PS2X_LAUNCHER", "0", true)
         // A driver folder imported before the importer's naming fix: renamed, and the choice follows (DriverNames.kt).
         settings.get("gpu_driver", "system").let { was ->
-            val now = repairDriverFolders(java.io.File(settings.filesDir, "drivers"), was)
+            migrateDrivers(settings.oldDriversDir, settings.driversDir, android.os.Build.VERSION.SDK_INT)
+            val now = repairDriverFolders(settings.driversDir, was)
             if (now != was) settings.set("gpu_driver", now)
         }
         // Online play: the Network page's choices (NetPlay.kt chosenNetEnv; empty = offline), on the interface that
@@ -56,7 +57,9 @@ class OutbreakActivity : NativeActivity() {
         val ui = { key: String -> settings.ui(key) }
         val iface = interfaceFor(joinTarget(ui), localLinks(), localLink(this)?.iface ?: "")
         val dev = getExternalFilesDir(null)?.resolve("net.env")?.takeIf { it.isFile }?.let { parseDevEnv(it.readText()) }
-        for ((key, value) in gameEnv(chosenNetEnv(ui, iface), dev ?: emptyList())) Os.setenv(key, value, true)
+        val debuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        for ((key, value) in gameEnv(chosenNetEnv(ui, iface), dev ?: emptyList(), devAllowed = debuggable))
+            Os.setenv(key, value, true)
         // After net.env: the save folder decides where the cards are. The launcher copied them in at Play.
         TreeCardFolder.chosen(this, settings)?.let { tree ->
             Os.setenv("PS2X_SAVES", settings.workCardsDir.path, true)

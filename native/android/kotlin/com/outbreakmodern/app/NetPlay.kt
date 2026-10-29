@@ -173,7 +173,13 @@ private val NETWORK_KEYS = setOf("PS2X_DEV9", "PS2X_NET_IF", "PS2X_NET_HOSTS", "
 /**
  * The game's environment: with online play on, the Network page's settings plus the developer's net.env lines that do
  * not decide where the game connects (PS2X_NET_TRACE, entry 64); with it off, net.env as written. A leftover net.env
- * from testing pointed both phones at the PC while the page said to join the Odin (entry 63).
+ * from testing pointed both phones at the PC while the page said to join the Odin (entry 63). net.env is read only by
+ * a debuggable build ([devAllowed]): on Android 10 other apps may write the external folder (security queue C2).
  */
-fun gameEnv(page: List<Pair<String, String>>, dev: List<Pair<String, String>>): List<Pair<String, String>> =
-    if (page.isEmpty()) dev else page + dev.filter { it.first !in NETWORK_KEYS }
+fun gameEnv(
+    page: List<Pair<String, String>>, dev: List<Pair<String, String>>, devAllowed: Boolean = true,
+): List<Pair<String, String>> = when {
+    !devAllowed -> page
+    page.isEmpty() -> dev
+    else -> page + dev.filter { it.first !in NETWORK_KEYS }
+}

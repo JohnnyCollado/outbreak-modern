@@ -25,3 +25,23 @@ fun repairDriverFolders(driversDir: File, current: String): String {
     }
     return kept
 }
+
+/**
+ * Graphics drivers are native code, so they live in internal storage only (security queue C2): on Android 10 other
+ * apps holding the storage permission may write the external folder. Folders imported there before move inside on
+ * Android 11+ ([sdk] >= 30), where that folder is private to the app; on Android 10 they stay (import again). An
+ * existing inside folder is kept. Returns the names moved.
+ */
+fun migrateDrivers(external: File, internal: File, sdk: Int): List<String> {
+    if (sdk < 30) return emptyList()
+    val moved = mutableListOf<String>()
+    external.listFiles()?.filter { it.isDirectory && isValidDriverName(it.name) }?.sortedBy { it.name }?.forEach { d ->
+        val dest = File(internal, d.name)
+        if (dest.exists()) return@forEach
+        internal.mkdirs()
+        // Different storage areas: a rename can fail, so copy then remove.
+        if (d.renameTo(dest) || (d.copyRecursively(dest, overwrite = false) && d.deleteRecursively()))
+            moved += d.name
+    }
+    return moved
+}

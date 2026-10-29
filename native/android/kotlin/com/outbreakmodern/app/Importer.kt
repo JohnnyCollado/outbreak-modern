@@ -213,10 +213,12 @@ class Importer(private val context: Context, private val settings: Settings, pri
                     val meta = base.walkTopDown().maxDepth(2).firstOrNull { it.name == "meta.json" }
                         ?: error("No meta.json in that driver package.")
                     val folder = meta.parentFile!!
-                    val dest = File(files, "drivers/${safe(name)}")
+                    // Internal storage only (security queue C2): the staging folder is external, so copy across.
+                    val dest = File(settings.driversDir, safe(name))
                     dest.deleteRecursively()
                     dest.parentFile?.mkdirs()
-                    if (!folder.renameTo(dest)) error("Could not move the driver into place")
+                    if (!folder.renameTo(dest) && !folder.copyRecursively(dest, overwrite = true))
+                        error("Could not move the driver into place")
                     return "Driver added: choose it in the list, then restart the app"
                 }
             }

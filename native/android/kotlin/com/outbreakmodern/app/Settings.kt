@@ -19,6 +19,10 @@ class Settings(context: Context) {
     val saveFolderFile = File(filesDir, "save-folder-uri.txt")
     /** The game's working copy of the cards, in internal storage (PS2X_SAVES; copied to and from the save folder). */
     val workCardsDir = File(context.filesDir, "memcards")
+    /** Graphics drivers (native code): internal storage only (security queue C2; gpu_driver_android.cpp loads here). */
+    val driversDir = File(context.filesDir, "drivers")
+    /** Where drivers were imported before (the external folder); moved inside on Android 11+ (migrateDrivers). */
+    val oldDriversDir = File(filesDir, "drivers")
     val serial = "SLPM-65428"
 
     fun get(key: String, def: String = ""): String =

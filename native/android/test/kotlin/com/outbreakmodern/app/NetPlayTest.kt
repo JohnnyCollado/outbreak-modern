@@ -221,4 +221,14 @@ class NetPlayTest {
             "PS2X_NET_IF" to "rmnet0", "PS2X_NETCNF" to "dhcp", "PS2X_DEV9" to "off")
         assertEquals(page + ("PS2X_NET_TRACE" to "1"), gameEnv(page, dev))
     }
+
+    // ---- security queue C2: on Android 10 other apps may write the external folder, so net.env is a debug-build tool
+    @Test
+    fun netEnvIsIgnoredOutsideDebugBuilds() {
+        val page = listOf("PS2X_DEV9" to "pcsx2")
+        val dev = listOf("PS2X_NET_TRACE" to "1", "PS2X_NET_HOSTS" to "www01.kddi-mmbb.jp=6.6.6.6")
+        assertEquals(page, gameEnv(page, dev, devAllowed = false))
+        assertEquals(emptyList<Pair<String, String>>(), gameEnv(emptyList(), dev, devAllowed = false))
+        assertEquals(page + ("PS2X_NET_TRACE" to "1"), gameEnv(page, dev, devAllowed = true))
+    }
 }

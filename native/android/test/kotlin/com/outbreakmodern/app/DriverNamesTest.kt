@@ -46,4 +46,43 @@ class DriverNamesTest {
             dir.deleteRecursively()
         }
     }
+
+    // Security queue C2: graphics drivers (native code) live in internal storage only. Folders imported before move
+    // there on Android 11+, where the external folder is private to the app; on Android 10 other apps could have
+    // written them, so they stay put (the player imports again).
+    @Test
+    fun movesDriverFoldersInsideOnAndroid11AndLater() {
+        val ext = Files.createTempDirectory("ext").toFile()
+        val int = Files.createTempDirectory("int").toFile()
+        try {
+            File(ext, "turnip_a").mkdirs()
+            File(ext, "turnip_a/meta.json").writeText("{}")
+            File(ext, "turnip_b").mkdirs()
+            File(int, "turnip_b").mkdirs() // already inside: kept, not overwritten
+            File(int, "turnip_b/meta.json").writeText("inside")
+            File(ext, "turnip_b/meta.json").writeText("outside")
+            assertEquals(listOf("turnip_a"), migrateDrivers(ext, int, sdk = 30))
+            assertEquals("{}", File(int, "turnip_a/meta.json").readText())
+            assertFalse(File(ext, "turnip_a").exists())
+            assertEquals("inside", File(int, "turnip_b/meta.json").readText())
+        } finally {
+            ext.deleteRecursively()
+            int.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun leavesDriverFoldersOutsideOnAndroid10() {
+        val ext = Files.createTempDirectory("ext").toFile()
+        val int = Files.createTempDirectory("int").toFile()
+        try {
+            File(ext, "turnip_a").mkdirs()
+            assertEquals(emptyList<String>(), migrateDrivers(ext, int, sdk = 29))
+            assertTrue(File(ext, "turnip_a").isDirectory)
+            assertFalse(File(int, "turnip_a").exists())
+        } finally {
+            ext.deleteRecursively()
+            int.deleteRecursively()
+        }
+    }
 }
