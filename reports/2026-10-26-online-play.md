@@ -1093,6 +1093,10 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   then `[lobby] 192.168.0.221: game version '0311172218'`; the OnePlus the same. **Both phones in the lobby at once**
   against the PC's ob_server over the LAN (developer: "We live baby"). Next: a room hosted on one phone, joined from
   the other, through the relay.
+- **Crossplay lobby (~21:2x):** a Windows client (`C:\ob\play-online.ps1`: pcsx2-vk, mvu, DEV9 to 192.168.0.76, its
+  own card `C:\ob\saves-crossplay`; runner rebuilt with 0102-0104) logged in through the same pages and reached the
+  lobby (`[lobby] 192.168.0.76: game version '0311172218'`) with the OnePlus and the Odin already there: **Windows +
+  two Android phones in one lobby.**
 
 ## Mistakes and corrections
 
