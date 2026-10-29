@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include "tls_server.h"
 
@@ -159,12 +160,11 @@ namespace ob::server
 		}
 		mbedtls_ssl_conf_rng(&s->conf, mbedtls_ctr_drbg_random, &s->drbg);
 		mbedtls_ssl_conf_min_version(&s->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_0);
-		// A client that stops sending is dropped after 10 s (a stalled handshake or request holds this one thread).
-		mbedtls_ssl_conf_read_timeout(&s->conf, 10000);
 		s->guard.setLimits(config.limits);
 		mbedtls_ssl_conf_max_version(&s->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
 		mbedtls_ssl_conf_ciphersuites(&s->conf, kSuites);
 		mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_NONE);
+		// A client silent for 5 s is dropped; one that keeps trickling bytes meets the connection deadline (run()).
 		mbedtls_ssl_conf_read_timeout(&s->conf, 5000);
 		static const unsigned char kDhP[] = MBEDTLS_DHM_RFC3526_MODP_2048_P_BIN;
 		static const unsigned char kDhG[] = MBEDTLS_DHM_RFC3526_MODP_2048_G_BIN;
@@ -256,16 +256,32 @@ namespace ob::server
 			mbedtls_ssl_init(&ssl);
 			bool ok = mbedtls_ssl_setup(&ssl, &s->conf) == 0;
 			// The first bytes the client sent, shown when its handshake fails (what the game's SSL actually said).
+			// The connection's deadline (WebConfig::connectionSeconds, security review S1) and the server's stop: every
+			// read waits at most until then.
 			struct Recorded
 			{
 				mbedtls_net_context* net;
 				std::string bytes;
-			} recorded{&client, {}};
+				std::chrono::steady_clock::time_point deadline;
+				const std::atomic<bool>* running;
+			} recorded{&client, {}, std::chrono::steady_clock::now() + std::chrono::seconds(m_config.connectionSeconds),
+				&m_running};
 			mbedtls_ssl_set_bio(&ssl, &recorded, [](void* c, const unsigned char* b, size_t n) {
 				return mbedtls_net_send(static_cast<Recorded*>(c)->net, b, n); }, nullptr,
 				[](void* c, unsigned char* b, size_t n, uint32_t timeout) {
 					Recorded* r = static_cast<Recorded*>(c);
-					const int got = mbedtls_net_recv_timeout(r->net, b, n, timeout);
+					// Waits in short steps until data, this read's own timeout, the connection deadline or a stop.
+					const auto readUntil = (std::min)(r->deadline, timeout ? std::chrono::steady_clock::now() +
+						std::chrono::milliseconds(timeout) : r->deadline);
+					int got = MBEDTLS_ERR_SSL_TIMEOUT;
+					while (got == MBEDTLS_ERR_SSL_TIMEOUT)
+					{
+						const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+							readUntil - std::chrono::steady_clock::now()).count();
+						if (left <= 0 || !r->running->load())
+							return MBEDTLS_ERR_SSL_TIMEOUT;
+						got = mbedtls_net_recv_timeout(r->net, b, n, static_cast<uint32_t>((std::min<long long>)(left, 250)));
+					}
 					if (got > 0 && r->bytes.size() < 512)
 						r->bytes.append(reinterpret_cast<const char*>(b), std::min<size_t>(size_t(got), 512 - r->bytes.size()));
 					return got;

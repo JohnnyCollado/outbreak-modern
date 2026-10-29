@@ -24,6 +24,9 @@ namespace ob::server
 		// Also the client's first bytes after a successful handshake (a failed one always shows them).
 		bool trace = false;
 		GuardLimits limits; // local addresses only; per service and per address (guard.h)
+		// Security review S1: the whole connection (handshake, request, answer) must finish within this, or it is cut:
+		// the site serves one connection at a time, so a slow peer would hold everyone's login.
+		int connectionSeconds = 15;
 	};
 
 	struct WebResponse

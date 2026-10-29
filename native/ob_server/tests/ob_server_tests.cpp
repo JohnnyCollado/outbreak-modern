@@ -416,6 +416,46 @@ static void TestTlsPost()
 	Check(wholeRequest, "the server reads the POST's body before answering");
 }
 
+// Security review S1: the login site serves one connection at a time, so a peer that trickles one byte every few
+// seconds held it (and every other player's login) indefinitely. Each connection now has an overall deadline.
+static void TestTlsSlowPeer()
+{
+	TlsWebServer server;
+	std::string error;
+	WebConfig config = TestWebConfig();
+	config.connectionSeconds = 2;
+	if (!server.start(config, "127.0.0.1", 0, &error))
+	{
+		Check(false, "the TLS web server starts (slow peer)");
+		return;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	mbedtls_net_context slow;
+	mbedtls_net_init(&slow);
+	bool cut = false;
+	if (mbedtls_net_connect(&slow, "127.0.0.1", std::to_string(server.port()).c_str(), MBEDTLS_NET_PROTO_TCP) == 0)
+	{
+		const unsigned char hello[] = {0x16, 0x03, 0x01, 0x00, 0x60}; // a record header, then one byte at a time
+		for (int i = 0; i < 12 && !cut; i++) // up to ~7 s
+		{
+			const unsigned char b = i < 5 ? hello[i] : 0x01;
+			if (mbedtls_net_send(&slow, &b, 1) < 0)
+				cut = true;
+			unsigned char in[64];
+			const int got = mbedtls_net_recv_timeout(&slow, in, sizeof(in), 600);
+			if (got == 0 || (got < 0 && got != MBEDTLS_ERR_SSL_TIMEOUT))
+				cut = true;
+		}
+	}
+	mbedtls_net_free(&slow);
+	const double cutAfter = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+	Check(cut && cutAfter < 5.0, "a peer that trickles bytes is cut off at the connection deadline");
+	const std::string page = FetchTlsCert(server.port(), MBEDTLS_SSL_MINOR_VERSION_1, MBEDTLS_TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+		"/CRS-top.jsp", nullptr, nullptr);
+	Check(!page.empty(), "the next player then gets the login page");
+	server.stop();
+}
+
 // The login data file (6881/6882), its first piece being the room rules' scenario list (report entries 42-43).
 static void TestDataFile()
 {
@@ -470,6 +510,7 @@ int main()
 	TestWebPages();
 	TestTlsServer();
 	TestTlsPost();
+	TestTlsSlowPeer();
 	TestLobby();
 	TestServerChain();
 	TestRelay();
