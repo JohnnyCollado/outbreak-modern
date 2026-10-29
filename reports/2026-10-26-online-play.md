@@ -1098,8 +1098,10 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   lobby (`[lobby] 192.168.0.76: game version '0311172218'`) with the OnePlus and the Odin already there: **Windows +
   two Android phones in one lobby.**
 - **Crossplay game:** `[relay] 192.168.0.76 / .221 / .63: ... in game 2`: Windows, the Odin and the OnePlus in **one
-  three-player game** through the relay (developer: "LFGOOOOOOO"). Not yet checked: how long they stay in step, and
-  the end of the scenario.
+  three-player game** through the relay (developer: "LFGOOOOOOO"). The developer closed Windows afterwards (not a
+  crash: `gs thread stopped (window destroyed)`). Verdict: "There is a bit of lag between each, but it works great."
+  Lag not measured yet; a candidate to check first: small relay packets held back by Nagle's algorithm (no
+  TCP_NODELAY in ob_server or PCSX2's TCP session code: not verified, see next line).
 
 ## Mistakes and corrections
 
