@@ -168,4 +168,37 @@ class NetPlayTest {
         assertEquals(emptyList<Pair<String, String>>(), chosenNetEnv(ui("net_mode" to "server", "net_server" to "203.0.113.9",
             "net_connection" to "manual", "net_address" to "192.168.0.80"), "wlan0"))
     }
+
+    // ---- which interface reaches the host (reports/2026-10-26-online-play.md entry 63: a phone hosting a hotspot has
+    // its own Wi-Fi on wlan0 and the hotspot on wlan2; the Odin joined the hotspot) ----
+    private val oneplus = listOf(LocalLink("wlan0", "192.168.11.164", 20), LocalLink("wlan2", "10.98.58.71", 24))
+
+    @Test
+    fun theInterfaceOnTheHostsSubnetIsUsed() {
+        assertEquals("wlan2", interfaceFor("10.98.58.174", oneplus, "wlan0"))
+        assertEquals("wlan0", interfaceFor("192.168.8.20", oneplus, "wlan0"))
+    }
+
+    @Test
+    fun noSubnetMatchKeepsTheDefault() {
+        assertEquals("wlan0", interfaceFor("203.0.113.9", oneplus, "wlan0"))
+        assertEquals("", interfaceFor("10.98.58.174", emptyList(), ""))
+        assertEquals("wlan0", interfaceFor("bad", oneplus, "wlan0"))
+    }
+
+    @Test
+    fun theJoinTargetIsTheHostAddress() {
+        assertEquals("10.98.58.174", joinTarget(ui("net_mode" to "local", "net_join" to "10.98.58.174:18443")))
+        assertEquals("203.0.113.9", joinTarget(ui("net_mode" to "server", "net_server" to "203.0.113.9")))
+        assertEquals("", joinTarget(ui("net_mode" to "off")))
+    }
+
+    // ---- net.env: the developer's file applies only while the Network page has online play off ----
+    @Test
+    fun thePageWinsOverNetEnv() {
+        val page = listOf("PS2X_DEV9" to "pcsx2", "PS2X_NET_HOSTS" to "www01.kddi-mmbb.jp=10.98.58.174")
+        val dev = listOf("PS2X_NET_HOSTS" to "www01.kddi-mmbb.jp=192.168.0.76", "PS2X_SAVES" to "/x")
+        assertEquals(page, gameEnv(page, dev))
+        assertEquals(dev, gameEnv(emptyList(), dev))
+    }
 }

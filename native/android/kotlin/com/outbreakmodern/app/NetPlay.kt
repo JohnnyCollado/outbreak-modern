@@ -122,3 +122,37 @@ fun chosenNetEnv(ui: (String) -> String, iface: String): List<Pair<String, Strin
     }
     return env ?: emptyList()
 }
+
+/** This device on the local network: the interface, its IPv4 address and prefix length. */
+data class LocalLink(val iface: String, val address: String, val prefix: Int)
+
+private fun ipv4Value(s: String): Long? = ipv4Bytes(s)?.fold(0L) { acc, x -> (acc shl 8) or x.toLong() }
+
+/**
+ * The interface whose subnet holds [target] (the host or server), else [default]. A phone sharing a hotspot has two
+ * Wi-Fi interfaces (its own Wi-Fi on wlan0, the hotspot on wlan2): a guest on the hotspot is reached on the hotspot's
+ * (reports/2026-10-26-online-play.md entry 63).
+ */
+fun interfaceFor(target: String, links: List<LocalLink>, default: String): String {
+    val t = ipv4Value(target) ?: return default
+    return links.firstOrNull { link ->
+        val a = ipv4Value(link.address) ?: return@firstOrNull false
+        if (link.prefix !in 1..32) return@firstOrNull false
+        val mask = (0xFFFFFFFFL shl (32 - link.prefix)) and 0xFFFFFFFFL
+        (a and mask) == (t and mask)
+    }?.iface ?: default
+}
+
+/** The address the game will connect to from the saved choices ("" when online play is off). */
+fun joinTarget(ui: (String) -> String): String = when (ui("net_mode")) {
+    "local" -> ui("net_join").substringBeforeLast(':', "")
+    "server" -> ui("net_server")
+    else -> ""
+}
+
+/**
+ * The game's network environment: the Network page's when online play is on, else the developer's net.env. A
+ * leftover net.env from testing pointed both phones at the PC while the page said to join the Odin (entry 63).
+ */
+fun gameEnv(page: List<Pair<String, String>>, dev: List<Pair<String, String>>): List<Pair<String, String>> =
+    if (page.isNotEmpty()) page else dev

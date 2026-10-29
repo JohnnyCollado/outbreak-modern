@@ -93,9 +93,6 @@ class HostService : Service() {
     }
 }
 
-/** This device on the local network: the interface, its IPv4 address and prefix length. */
-data class LocalLink(val iface: String, val address: String, val prefix: Int)
-
 /**
  * The Wi-Fi (or Ethernet) link with a local IPv4 address: the connected network first, then this device's own hotspot
  * (which ConnectivityManager does not list). Mobile data interfaces are never used, even with a private address.
@@ -121,3 +118,11 @@ fun localLink(context: Context): LocalLink? {
 }
 
 private val HOTSPOT_NAMES = listOf("wlan", "swlan", "ap", "softap", "eth")
+
+/** Every interface that is up with a local IPv4 address (the Wi-Fi, this device's own hotspot, Ethernet). */
+fun localLinks(): List<LocalLink> = runCatching {
+    NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }.flatMap { ni ->
+        ni.interfaceAddresses.filter { it.address is Inet4Address && isLocalIpv4(it.address.hostAddress ?: "") }
+            .map { LocalLink(ni.name, it.address.hostAddress!!, it.networkPrefixLength.toInt()) }
+    }
+}.getOrDefault(emptyList())

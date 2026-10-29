@@ -1137,6 +1137,23 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Not yet tried on a device or on screen.** Next: step 5, the three-device test with the Odin hosting (needs the
   developer's go-ahead to install and launch).
 
+### 63. First local play try: the Odin hosting, "communication error" (the old net.env won)
+
+- **Set-up (developer, 2026-10-29 ~00:26):** new APK on both phones over Tailscale ADB. The Odin hosts, the OnePlus
+  joins. The Odin is on the OnePlus's hotspot "GirlyPop": Odin `wlan0` 10.98.58.174/24; OnePlus `wlan0`
+  192.168.11.164/20 (its own Wi-Fi) and `wlan2` 10.98.58.71/24 (the hotspot).
+- **Seen:** the Odin's game, "通信エラーが発生しました もう一度接続しなおしてください" ("a communication error
+  occurred, please reconnect"; Odin screenshot `Screenshot_20261029-002629.png`).
+- **The host itself was fine:** `HostService` foreground; listening on 10.98.58.174 ports 18443, 8300 and 8690 only
+  (`ss -ltn`). The OnePlus heard its beacon (`net_join = 10.98.58.174:18443` saved there).
+- **Cause 1: the old net.env.** Both phones still had `<files>/net.env` from entry 53
+  (`PS2X_NET_HOSTS=...=192.168.0.76`), applied after the page's choices, so the games went to the PC. **Fix:** the
+  page wins; net.env applies only with online play off (`gameEnv`).
+- **Cause 2 (would have hit the OnePlus next): the wrong interface.** The game was given the connected Wi-Fi
+  (`wlan0`, 192.168.11.x), but the Odin is on the hotspot (`wlan2`). **Fix:** the interface whose subnet holds the
+  host's address (`interfaceFor`, `localLinks`).
+- Tests first (compile failed without the functions); Kotlin 59/59. Not yet retried on the phones.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
