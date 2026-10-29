@@ -1097,6 +1097,9 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   own card `C:\ob\saves-crossplay`; runner rebuilt with 0102-0104) logged in through the same pages and reached the
   lobby (`[lobby] 192.168.0.76: game version '0311172218'`) with the OnePlus and the Odin already there: **Windows +
   two Android phones in one lobby.**
+- **Crossplay game:** `[relay] 192.168.0.76 / .221 / .63: ... in game 2`: Windows, the Odin and the OnePlus in **one
+  three-player game** through the relay (developer: "LFGOOOOOOO"). Not yet checked: how long they stay in step, and
+  the end of the scenario.
 
 ## Mistakes and corrections
 
