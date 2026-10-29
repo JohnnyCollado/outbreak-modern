@@ -6,24 +6,26 @@ namespace ob::server
 	bool Server::start(const ServerConfig& config, std::string* error)
 	{
 		stop();
+		// The relay first, then the lobby and the login pages, each told the ports the others really got (port 0 =
+		// any free port, as a host may ask).
+		RelayConfig relay;
+		relay.log = config.log;
+		if (!m_relay.start(m_accounts, relay, config.bindAddress, config.relayPort, error))
+			return false;
 		LobbyConfig lobby;
 		lobby.relayAddress = config.hostAddress;
-		lobby.relayPort = config.relayPort;
+		lobby.relayPort = m_relay.port();
 		lobby.messageOfTheDay = config.messageOfTheDay;
 		lobby.log = config.log;
 		lobby.trace = config.trace;
 		if (!m_lobby.start(m_accounts, lobby, config.bindAddress, config.lobbyPort, error))
-			return false;
-		RelayConfig relay;
-		relay.log = config.log;
-		if (!m_relay.start(m_accounts, relay, config.bindAddress, config.relayPort, error))
 		{
-			m_lobby.stop();
+			m_relay.stop();
 			return false;
 		}
 
 		WebConfig web;
-		web.lobbyPort = config.lobbyPort;
+		web.lobbyPort = m_lobby.port();
 		web.log = config.log;
 		web.trace = config.trace;
 		// Quick login (plan P12): one account per device. Until the app's hello (step E) names the device, its
@@ -41,6 +43,13 @@ namespace ob::server
 			return false;
 		}
 		return true;
+	}
+
+	void Server::removePlayer(const std::string& address)
+	{
+		m_lobby.removeAddress(address);
+		m_relay.removeAddress(address);
+		m_web.removeAddress(address);
 	}
 
 	void Server::stop()

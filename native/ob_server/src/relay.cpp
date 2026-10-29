@@ -4,6 +4,7 @@
 #include "net.h"
 #include "protocol.h"
 
+#include <mutex>
 #include <chrono>
 #include <list>
 #include <vector>
@@ -32,6 +33,8 @@ namespace ob::server
 		Accounts* accounts = nullptr;
 		RelayConfig config;
 		ConnectionGuard guard;
+		std::mutex removeMutex;
+		std::vector<std::string> pendingRemove; // from the host's UI thread, handled in the loop
 		RelayServer* owner = nullptr;
 		net::Socket listener = net::kInvalid;
 		std::list<Client> clients;
@@ -186,6 +189,14 @@ namespace ob::server
 							break;
 						c.out.erase(c.out.begin(), c.out.begin() + n);
 					}
+				{
+					std::lock_guard<std::mutex> lock(s.removeMutex);
+					for (const std::string& gone : s.pendingRemove)
+						for (Impl::Client& c : s.clients)
+							if (c.address == gone)
+								s.drop(c, "removed by the host");
+					s.pendingRemove.clear();
+				}
 				for (auto it = s.clients.begin(); it != s.clients.end();)
 					if (it->closing)
 					{
@@ -204,6 +215,13 @@ namespace ob::server
 			net::closeSocket(s.listener);
 		});
 		return true;
+	}
+
+	void RelayServer::removeAddress(const std::string& address)
+	{
+		m_impl->guard.remove(address);
+		std::lock_guard<std::mutex> lock(m_impl->removeMutex);
+		m_impl->pendingRemove.push_back(address);
 	}
 
 	void RelayServer::stop()

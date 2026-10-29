@@ -194,6 +194,12 @@ namespace ob::server
 		return true;
 	}
 
+	void TlsWebServer::removeAddress(const std::string& address)
+	{
+		if (m_state)
+			m_state->guard.remove(address);
+	}
+
 	void TlsWebServer::stop()
 	{
 		if (!m_running.exchange(false))

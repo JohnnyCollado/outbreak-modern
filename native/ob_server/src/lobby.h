@@ -5,6 +5,7 @@
 // known here gets an empty answer and one log line, so the game never waits forever on us.
 #pragma once
 
+#include <vector>
 #include "guard.h"
 #include "accounts.h"
 
@@ -42,6 +43,10 @@ namespace ob::server
 		void stop();
 		uint16_t port() const { return m_port; }
 		uint32_t logins() const { return m_logins.load(); }
+		// The addresses with a lobby connection now (one entry each), as of the server's last loop (~100 ms).
+		std::vector<std::string> connectedAddresses() const;
+		// The host removed this player: its connections close and it is refused for the rest of the session.
+		void removeAddress(const std::string& address);
 		uint32_t gamesStarted() const { return m_games.load(); }
 
 		struct Impl;

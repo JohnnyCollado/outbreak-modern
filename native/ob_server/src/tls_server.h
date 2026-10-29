@@ -26,6 +26,8 @@ namespace ob::server
 		bool start(const WebConfig& config, const std::string& address, uint16_t port, std::string* error);
 		void stop();
 		uint16_t port() const { return m_port; }
+		// The host removed this player: refused from now on (its page connections are short).
+		void removeAddress(const std::string& address);
 		uint32_t handshakesFailed() const { return m_failed.load(); }
 		uint32_t requestsServed() const { return m_served.load(); }
 		// The last negotiated protocol and suite, e.g. "TLSv1.0 TLS-DHE-RSA-WITH-3DES-EDE-CBC-SHA" (for logs/tests).

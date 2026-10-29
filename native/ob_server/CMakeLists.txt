@@ -24,7 +24,7 @@ add_compile_definitions("MBEDTLS_USER_CONFIG_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/
 add_subdirectory("${OB_MBEDTLS}" "${CMAKE_CURRENT_BINARY_DIR}/mbedtls" EXCLUDE_FROM_ALL)
 
 add_library(ob_server STATIC src/datafile.cpp src/protocol.cpp src/web.cpp src/tls_server.cpp src/net.cpp src/accounts.cpp src/lobby.cpp src/relay.cpp
-    src/ob_server.cpp src/guard.cpp src/beacon.cpp)
+    src/ob_server.cpp src/guard.cpp src/beacon.cpp src/host.cpp)
 target_include_directories(ob_server PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(ob_server PUBLIC mbedtls mbedx509 mbedcrypto)
 if(WIN32)
@@ -37,7 +37,7 @@ else()
 endif()
 
 if(NOT ANDROID)
-    add_executable(ob_server_tests tests/ob_server_tests.cpp tests/lobby_tests.cpp tests/relay_tests.cpp tests/guard_tests.cpp tests/beacon_tests.cpp)
+    add_executable(ob_server_tests tests/ob_server_tests.cpp tests/lobby_tests.cpp tests/relay_tests.cpp tests/guard_tests.cpp tests/beacon_tests.cpp tests/host_tests.cpp)
     target_link_libraries(ob_server_tests PRIVATE ob_server)
     # ob_server.exe: the same server as a console program for a dedicated PC (plan N6).
     add_executable(ob_server_exe tools/ob_server_main.cpp)

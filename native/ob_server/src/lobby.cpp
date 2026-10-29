@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <list>
+#include <mutex>
 
 namespace ob::server
 {
@@ -110,6 +111,10 @@ namespace ob::server
 		Accounts* accounts = nullptr;
 		LobbyConfig config;
 		ConnectionGuard guard;
+		// Shared with the host's UI thread: who is connected, and who the host removed (handled in the loop).
+		mutable std::mutex sharedMutex;
+		std::vector<std::string> sharedAddresses;
+		std::vector<std::string> pendingRemove;
 		const std::vector<uint8_t> dataFile = loginDataFile(); // 6881/6882 (datafile.h)
 		net::Socket listener = net::kInvalid;
 		std::list<Client> clients;
@@ -986,6 +991,17 @@ namespace ob::server
 							break;
 						c.out.erase(c.out.begin(), c.out.begin() + n);
 					}
+				{
+					std::lock_guard<std::mutex> lock(s.sharedMutex);
+					for (const std::string& gone : s.pendingRemove)
+						for (Client& c : s.clients)
+							if (c.address == gone && !c.closing)
+							{
+								s.dropClient(c);
+								c.out.clear();
+							}
+					s.pendingRemove.clear();
+				}
 				for (auto it = s.clients.begin(); it != s.clients.end();)
 					if (it->closing && it->out.empty())
 					{
@@ -995,6 +1011,14 @@ namespace ob::server
 					}
 					else
 						++it;
+				{
+					std::vector<std::string> now;
+					for (const Client& c : s.clients)
+						if (!c.closing && std::find(now.begin(), now.end(), c.address) == now.end())
+							now.push_back(c.address);
+					std::lock_guard<std::mutex> lock(s.sharedMutex);
+					s.sharedAddresses = std::move(now);
+				}
 			}
 			for (Client& c : s.clients)
 			{
@@ -1002,8 +1026,23 @@ namespace ob::server
 				s.guard.release(c.address);
 			}
 			net::closeSocket(s.listener);
+			std::lock_guard<std::mutex> lock(s.sharedMutex);
+			s.sharedAddresses.clear();
 		});
 		return true;
+	}
+
+	std::vector<std::string> LobbyServer::connectedAddresses() const
+	{
+		std::lock_guard<std::mutex> lock(m_impl->sharedMutex);
+		return m_impl->sharedAddresses;
+	}
+
+	void LobbyServer::removeAddress(const std::string& address)
+	{
+		m_impl->guard.remove(address);
+		std::lock_guard<std::mutex> lock(m_impl->sharedMutex);
+		m_impl->pendingRemove.push_back(address);
 	}
 
 	void LobbyServer::stop()

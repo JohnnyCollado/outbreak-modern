@@ -36,6 +36,8 @@ namespace ob::server
 	public:
 		bool start(const ServerConfig& config, std::string* error);
 		void stop();
+		// The host's Remove: the player's connections close everywhere and it stays out for this session.
+		void removePlayer(const std::string& address);
 		Accounts& accounts() { return m_accounts; }
 		uint16_t webPort() const { return m_web.port(); }
 		uint16_t lobbyPort() const { return m_lobby.port(); }

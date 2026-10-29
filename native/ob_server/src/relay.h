@@ -37,6 +37,8 @@ namespace ob::server
 			std::string* error);
 		void stop();
 		uint16_t port() const { return m_port; }
+		// The host removed this player: its connections close and it is refused for the rest of the session.
+		void removeAddress(const std::string& address);
 		uint32_t logins() const { return m_logins.load(); }
 		uint64_t framesRelayed() const { return m_frames.load(); } // frames received and copied (once per frame)
 

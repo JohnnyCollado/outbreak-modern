@@ -4,7 +4,9 @@
 // addresses, a cap per service and per address, and players the host removed stay out for the session.
 #pragma once
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <set>
@@ -15,6 +17,8 @@ namespace ob::server
 	// Dotted IPv4 in 10/8, 172.16/12, 192.168/16, 169.254/16 or 127/8. Anything else (public, multicast, broadcast,
 	// malformed, IPv6) is not local.
 	bool isLocalAddress(const std::string& address);
+	// Strict dotted quad (four parts 0-255, digits and dots only): the bytes, or false.
+	bool parseIpv4(const std::string& text, std::array<uint8_t, 4>& out);
 
 	struct GuardLimits
 	{

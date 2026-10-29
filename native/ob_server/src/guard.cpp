@@ -5,44 +5,40 @@
 
 namespace ob::server
 {
-	namespace
+	bool parseIpv4(const std::string& text, std::array<uint8_t, 4>& out)
 	{
-		// Strict dotted quad: four decimal parts 0-255, no leading '+', no extra characters, at most 3 digits each.
-		bool parseIpv4(const std::string& text, std::array<unsigned, 4>& out)
+		size_t part = 0, digits = 0;
+		unsigned value = 0;
+		for (char c : text)
 		{
-			size_t part = 0, digits = 0;
-			unsigned value = 0;
-			for (char c : text)
+			if (c >= '0' && c <= '9')
 			{
-				if (c >= '0' && c <= '9')
-				{
-					if (++digits > 3)
-						return false;
-					value = value * 10 + static_cast<unsigned>(c - '0');
-					if (value > 255)
-						return false;
-				}
-				else if (c == '.')
-				{
-					if (digits == 0 || part == 3)
-						return false;
-					out[part++] = value;
-					value = 0;
-					digits = 0;
-				}
-				else
+				if (++digits > 3)
+					return false;
+				value = value * 10 + static_cast<unsigned>(c - '0');
+				if (value > 255)
 					return false;
 			}
-			if (digits == 0 || part != 3)
+			else if (c == '.')
+			{
+				if (digits == 0 || part == 3)
+					return false;
+				out[part++] = static_cast<uint8_t>(value);
+				value = 0;
+				digits = 0;
+			}
+			else
 				return false;
-			out[3] = value;
-			return true;
 		}
+		if (digits == 0 || part != 3)
+			return false;
+		out[3] = static_cast<uint8_t>(value);
+		return true;
 	}
 
 	bool isLocalAddress(const std::string& address)
 	{
-		std::array<unsigned, 4> a{};
+		std::array<uint8_t, 4> a{};
 		if (!parseIpv4(address, a))
 			return false;
 		return a[0] == 10 || (a[0] == 172 && a[1] >= 16 && a[1] <= 31) || (a[0] == 192 && a[1] == 168) ||
