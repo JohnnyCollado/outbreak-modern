@@ -131,15 +131,15 @@ tool runs arm64 microVU and the arm64 interpreter on each capture, compares micr
 ns per VU1 cycle for both. A plain executable in `/data/local/tmp`, no APK involved.
 
 ```
-adb -s <odin-ip>:33537 shell mkdir -p /data/local/tmp/obvu
-adb -s <odin-ip>:33537 push C:\ob\android-vu-build\stage\ob_vucompare_a64 C:\ob\android-vu-build\stage\libob_a64vu.so /data/local/tmp/obvu/
-adb -s <odin-ip>:33537 push C:\ob\vu1-captures /data/local/tmp/obvu/
-adb -s <odin-ip>:33537 shell chmod 755 /data/local/tmp/obvu/ob_vucompare_a64
-adb -s <odin-ip>:33537 shell "cd /data/local/tmp/obvu && LD_LIBRARY_PATH=. ./ob_vucompare_a64 --synthetic --repeat 20 --golden vu1-captures/golden-synthetic > synthetic.log 2>&1; echo exit $?"
-adb -s <odin-ip>:33537 shell "cd /data/local/tmp/obvu && LD_LIBRARY_PATH=. ./ob_vucompare_a64 vu1-captures --repeat 20 --golden vu1-captures/golden > vucompare-a64.log 2>&1; echo exit $?"
-adb -s <odin-ip>:33537 pull /data/local/tmp/obvu/synthetic.log C:\ob\logs\vucompare-a64-odin-synthetic.log
-adb -s <odin-ip>:33537 pull /data/local/tmp/obvu/vucompare-a64.log C:\ob\logs\vucompare-a64-odin.log
-adb -s <odin-ip>:33537 logcat -d -v time -s DEBUG:V libc:F > C:\ob\logs\vucompare-a64-odin-crash.log   (only after exit 134/139)
+adb -s <odin-ip>:<port> shell mkdir -p /data/local/tmp/obvu
+adb -s <odin-ip>:<port> push C:\ob\android-vu-build\stage\ob_vucompare_a64 C:\ob\android-vu-build\stage\libob_a64vu.so /data/local/tmp/obvu/
+adb -s <odin-ip>:<port> push C:\ob\vu1-captures /data/local/tmp/obvu/
+adb -s <odin-ip>:<port> shell chmod 755 /data/local/tmp/obvu/ob_vucompare_a64
+adb -s <odin-ip>:<port> shell "cd /data/local/tmp/obvu && LD_LIBRARY_PATH=. ./ob_vucompare_a64 --synthetic --repeat 20 --golden vu1-captures/golden-synthetic > synthetic.log 2>&1; echo exit $?"
+adb -s <odin-ip>:<port> shell "cd /data/local/tmp/obvu && LD_LIBRARY_PATH=. ./ob_vucompare_a64 vu1-captures --repeat 20 --golden vu1-captures/golden > vucompare-a64.log 2>&1; echo exit $?"
+adb -s <odin-ip>:<port> pull /data/local/tmp/obvu/synthetic.log C:\ob\logs\vucompare-a64-odin-synthetic.log
+adb -s <odin-ip>:<port> pull /data/local/tmp/obvu/vucompare-a64.log C:\ob\logs\vucompare-a64-odin.log
+adb -s <odin-ip>:<port> logcat -d -v time -s DEBUG:V libc:F > C:\ob\logs\vucompare-a64-odin-crash.log   (only after exit 134/139)
 ```
 
 Exit 1 is expected (the STATUS/MAC flag-elimination differences from the interpreter, as on x86); the lines to read

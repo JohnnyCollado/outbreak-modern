@@ -12,7 +12,7 @@ Order: R1 (high) -> C2 (medium) -> S10, S7, C4, C5, C6, S8, S9 (low) -> hygiene 
 
 - **Plan:** rewrite history on a **mirror copy** (`C:\ob\purge\outbreak-modern.git`), never the working repo:
   `git filter-repo --invert-paths` for `game_files/`, `Outbreak-ModernCam-v1.2.0 (1).exe`, with a mailmap turning the
-  five gmail-authored commits into the noreply address. Verify the copy, then hand over. **Replacing GitHub's history
+  five commits authored with the personal address into the noreply one. Verify the copy, then hand over. **Replacing GitHub's history
   is a force push: only on the developer's explicit go-ahead.** Afterwards every worktree and checkout re-clones.
   Candidates for the developer to decide (not removed by default): `PS2Recomp-main/` Vita modules, `docs/assets/`
   Capcom artwork, `legacy/results/` game screenshots.
@@ -20,7 +20,7 @@ Order: R1 (high) -> C2 (medium) -> S10, S7, C4, C5, C6, S8, S9 (low) -> hygiene 
   branches); worktrees under `.claude/worktrees/`; report references to commit hashes (they become stale).
 - **Tests (script `tools/repo/purge-check.sh`, run on the copy):**
   1. no object path under `game_files/` and no `.exe` in `git rev-list --objects --all`;
-  2. no `54557697+JohnnyC96@users.noreply.github.com` in `git log --all --format=%ae%n%ce`;
+  2. no personal address (passed to the script, never stored in the repo) in `git log --all --format=%ae%n%ce`;
   3. each branch's tree at its tip equals the original tip's tree minus the removed paths (`git diff --stat` empty
      apart from them);
   4. the same number of commits on each branch (none dropped by mistake).
@@ -105,7 +105,7 @@ Order: R1 (high) -> C2 (medium) -> S10, S7, C4, C5, C6, S8, S9 (low) -> hygiene 
 | H1 | mbedTLS 2.28.10 is end of life; only `version.h` is checked | Stay on 2.28 (3.x removed TLS 1.0, which the PS2 needs: the review's note). CMake checks the source is the pinned commit `2fc8413...` (`docs/ops/pins.md`) when it is a git checkout, else the version string | configure with the right tree passes; a script check (`tools/net/check-pins.sh`) reports the commit |
 | H2 | PCSX2 cloned by tag only | `ob.sh` checks `rev-parse HEAD` against the pinned commit after cloning | `check-pins.sh` |
 | H3 | Gradle wrapper without `distributionSha256Sum` | Add the checksum of gradle-9.7.1-bin.zip (from the zip already downloaded, cross-checked against gradle.org's published sum) | the package step still builds (Gradle verifies the sum) |
-| H4 | Personal data in tracked files | Replace the Odin's Tailscale address in `docs/ops/android.md` with `<odin-ip>:<port>`; the gmail address in `upstream/*/*.patch` headers becomes the noreply address | `git grep` finds no 100.x Tailscale address and no gmail address |
+| H4 | Personal data in tracked files | Replace the Odin's Tailscale address in `docs/ops/android.md` with `<odin-ip>:<port>`; the personal address in `upstream/*/*.patch` headers becomes the noreply address | `tools/repo/personal-data-check.sh` |
 | H5 | `.gitignore` gaps | Add `*.iso`, `*.elf`, `*.ps2`, `*.keystore`, `*.jks`, `net.env`, `*.log` outside `gate/evidence`, `build/` | `git check-ignore` on sample paths; `git status` unchanged |
 | H6 | AGPL text missing for `native/ob_server` | Add `native/ob_server/COPYING.AGPL` (the official text) and a source note in the app's About/Network page | file present; needs the official text from a trusted local copy (no download: research safety rule) |
 | H7 | `tools/net/up-without.sh` deletes and resets outside the repo | Left as is (by design, guarded); documented | none |
