@@ -1054,6 +1054,24 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   `MBEDTLS_SSL_SRV_SUPPORT_SSLV2_CLIENT_HELLO` (`mbedtls_config_ob.h:8`), so the format alone is not the cause; not yet
   compared with a Windows client's hello.
 
+### 60. Three more walls: mbedTLS refused the PS2's greeting; 0102 broke SMAP; the settings list emptied after retries
+
+- **The handshake (-0x7900):** a Windows client against the LAN server succeeded, but its first bytes were a *modern*
+  TLS 1.0 hello (`16 03 01`, extensions ff01/0023/0005/0017): not the game. Likely Avast's HTTPS scanning on this PC
+  re-originating the connection (my inference; the developer then turned Avast off for an hour). The phone sends the
+  game's own SSLv2-format hello. Cause in mbedTLS 2.28's v2 parser (`C:\ob\mbedtls2.28.10\library\ssl_srv.c:1254-1271`):
+  the fallback-SCSV check is `!= MBEDTLS_SSL_FALLBACK_SCSV_VALUE`, so every 00-xx-xx cipher spec counts as the signal
+  and a TLS 1.0 client is refused as an "inappropriate fallback". **Fix:** `#undef MBEDTLS_SSL_FALLBACK_SCSV`
+  (`mbedtls_config_ob.h`). Test first with the OnePlus's captured 102 bytes: 98/99 without, 99/99 with. So the Windows
+  logins so far only worked through Avast.
+- **"Connection device not connected" (developer's screenshot 20:43):** after 0102, `smap: dev9 module version must be
+  2.4 or later`: SMAP reads DEV9's version through ReferModuleStatus, which 0102 left 0. **PS2Recomp 0103:** the
+  `.iopmod` version (u16 at offset 24) is kept and reported; the test module checks a 2.4 version (fails without).
+- **The settings list emptied after a few tries:** the runtime's settings server has eight handles and a failed
+  connection restarts the network modules without closing NETCNF's. **PS2Recomp 0104:** the longest-open handle is
+  reused (read-only files). Test first (24 unclosed opens), ps2x 576/576. (Not proven to be the cause on the phone.)
+- Installed on the OnePlus; server restarted with the mbedTLS fix.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

@@ -1,0 +1,97 @@
+From 2dff1dfac2489bc9f30c077d9063dcaf43320dfc Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 20:48:03 -0400
+Subject: [PATCH 104/104] Runtime: the network settings server reuses its
+ oldest handle when all eight are open
+
+A failed connection restarts the network modules without closing what NETCNF had open; after a few tries every open
+failed and NET CONNECTION listed no settings. The files are read-only copies, so the longest-open handle is reused.
+Test (written first): 24 unclosed opens, then an open that reads its own file. ps2x 576/576.
+---
+ ps2xRuntime/include/runtime/ps2_netcnf.h |  4 ++++
+ ps2xRuntime/src/lib/ps2_netcnf.cpp       | 14 +++++++++++---
+ ps2xTest/src/ps2_netcnf_tests.cpp        | 17 +++++++++++++++++
+ 3 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_netcnf.h b/ps2xRuntime/include/runtime/ps2_netcnf.h
+index 816a8c3..38330d8 100644
+--- a/ps2xRuntime/include/runtime/ps2_netcnf.h
++++ b/ps2xRuntime/include/runtime/ps2_netcnf.h
+@@ -70,6 +70,10 @@ namespace ps2x::netcnf
+     private:
+         std::vector<SettingsFile> m_files;
+         std::array<int, kMaxOpen> m_open{}; // fd -> index into m_files, -1 = free
++        // When each fd was opened: with all in use the oldest is reused. A failed connection restarts the network
++        // modules without closing what NETCNF had open, and the next visit's opens all failed (empty settings list).
++        std::array<uint64_t, kMaxOpen> m_openedAt{};
++        uint64_t m_opens = 0;
+     };
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_netcnf.cpp b/ps2xRuntime/src/lib/ps2_netcnf.cpp
+index cb90ad6..54bc6d0 100644
+--- a/ps2xRuntime/src/lib/ps2_netcnf.cpp
++++ b/ps2xRuntime/src/lib/ps2_netcnf.cpp
+@@ -8,7 +8,7 @@ namespace ps2x::netcnf
+     namespace
+     {
+         constexpr const char *kMagic = "# <Sony Computer Entertainment Inc.>\n\n";
+-        constexpr int32_t kNoEntry = -4, kBadHandle = -9, kTooManyOpen = -24; // as ioman's errno values
++        constexpr int32_t kNoEntry = -4, kBadHandle = -9; // as ioman's errno values
+ 
+         std::vector<uint8_t> text(const std::string &s)
+         {
+@@ -151,13 +151,21 @@ namespace ps2x::netcnf
+             for (int i = 0; i < kMaxOpen && fd < 0; ++i)
+                 if (m_open[static_cast<size_t>(i)] < 0)
+                     fd = i;
+-            if (file < 0 || fd < 0)
++            if (fd < 0) // all in use: the files are read-only copies, so the longest-open handle is reused
+             {
+-                putU32(reply, static_cast<uint32_t>(file < 0 ? kNoEntry : kTooManyOpen));
++                fd = 0;
++                for (int i = 1; i < kMaxOpen; ++i)
++                    if (m_openedAt[static_cast<size_t>(i)] < m_openedAt[static_cast<size_t>(fd)])
++                        fd = i;
++            }
++            if (file < 0)
++            {
++                putU32(reply, static_cast<uint32_t>(kNoEntry));
+                 putU32(reply, 0u);
+                 return true;
+             }
+             m_open[static_cast<size_t>(fd)] = file;
++            m_openedAt[static_cast<size_t>(fd)] = ++m_opens;
+             putU32(reply, static_cast<uint32_t>(fd));
+             putU32(reply, static_cast<uint32_t>(m_files[static_cast<size_t>(file)].data.size()));
+             return true;
+diff --git a/ps2xTest/src/ps2_netcnf_tests.cpp b/ps2xTest/src/ps2_netcnf_tests.cpp
+index 7b50813..e1c58c5 100644
+--- a/ps2xTest/src/ps2_netcnf_tests.cpp
++++ b/ps2xTest/src/ps2_netcnf_tests.cpp
+@@ -192,5 +192,22 @@ void register_ps2_netcnf_tests()
+             t.IsTrue(static_cast<int32_t>(getU32(reply, 0)) < 0, "with an error");
+             t.IsFalse(server.call(2u, closeRequest(0u), reply), "other functions are not this server's");
+         });
++
++        // A failed connection restarts the network modules without closing what NETCNF had open; on the next visit
++        // every open failed and NET CONNECTION listed no settings (reports/2026-10-26-online-play.md entry 59).
++        tc.Run("handles never closed do not use up the server: the oldest is reused", [](TestCase &t)
++        {
++            SettingsServer server{NetworkConfig{}};
++            std::vector<uint8_t> reply;
++            for (int i = 0; i < 3 * SettingsServer::kMaxOpen; ++i)
++                server.call(12u, openRequest("mc0:", "/BWNETCNF/ifc000.dat"), reply); // never closed
++            t.IsTrue(server.call(12u, openRequest("mc0:", "/BWNETCNF/BWNETCNF"), reply), "open served");
++            const uint32_t fd = getU32(reply, 0);
++            t.IsTrue(static_cast<int32_t>(fd) >= 0, "a handle after many unclosed opens");
++            t.IsTrue(server.call(13u, readRequest(fd, 0u, 99u), reply), "read served");
++            t.IsTrue(getU32(reply, 0) == 99u && reply.size() >= 4 + 99 &&
++                         std::vector<uint8_t>(reply.begin() + 4, reply.begin() + 4 + 99) == fromHex(kIndexHex),
++                     "and it reads its own file");
++        });
+     });
+ }
+-- 
+2.46.2.windows.1
+

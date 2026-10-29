@@ -1,0 +1,197 @@
+From d459502782d8a6f8c9f6d19000e0ee38e820f8c5 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 20:48:03 -0400
+Subject: [PATCH 103/104] IOP: ReferModuleStatus reports the module's .iopmod
+ version
+
+0102's ReferModuleStatus left the version 0, and SMAP refuses a DEV9 older than 2.4 ("smap: dev9 module version must be
+2.4 or later"): the game then said no network adapter was connected. IopModuleLoader::moduleVersion reads the u16 at
+.iopmod offset 24 (before the name); the test module now checks a 2.4 version. Fails without: 4/5 IOP suites.
+---
+ ps2xIOP/src/emulator/iop_emulator.cpp         |  3 ++
+ .../emulator/services/iop_module_loader.cpp   | 32 +++++++++++++++++++
+ .../src/emulator/services/iop_module_loader.h |  3 ++
+ ps2xIOP/tests/iop_emulator_tests.cpp          | 26 ++++++++-------
+ 4 files changed, 52 insertions(+), 12 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index bc26683..0c9a3ca 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -82,6 +82,7 @@ namespace ps2x::iop::detail
+             std::string path;
+             std::string name;
+             std::string iopmodName; // the name in the IRX's .iopmod header, as SearchModuleByName sees it
++            uint16_t version = 0;   // the .iopmod header's version, as ReferModuleStatus reports it
+             uint32_t base = 0;
+             uint32_t size = 0;
+             uint32_t entry = 0;
+@@ -509,6 +510,7 @@ namespace ps2x::iop::detail
+                     write32(a1 + i, 0u);
+                 for (uint32_t i = 0; i < name.size() && i < 55u; ++i)
+                     memory.write8(a1 + i, static_cast<uint8_t>(name[i]));
++                write16(a1 + 56u, module.version);
+                 write32(a1 + 60u, static_cast<uint32_t>(module.id));
+                 write32(a1 + 64u, module.entry);
+                 write32(a1 + 68u, module.gp);
+@@ -1142,6 +1144,7 @@ namespace ps2x::iop::detail
+             const size_t slash = module.path.find_last_of("/\\:");
+             module.name = slash == std::string::npos ? module.path : module.path.substr(slash + 1u);
+             module.iopmodName = IopModuleLoader::moduleName(image);
++            module.version = IopModuleLoader::moduleVersion(image);
+             module.base = loaded.base;
+             module.size = loaded.size;
+             module.entry = loaded.entry;
+diff --git a/ps2xIOP/src/emulator/services/iop_module_loader.cpp b/ps2xIOP/src/emulator/services/iop_module_loader.cpp
+index 1913b85..29e9116 100644
+--- a/ps2xIOP/src/emulator/services/iop_module_loader.cpp
++++ b/ps2xIOP/src/emulator/services/iop_module_loader.cpp
+@@ -416,6 +416,38 @@ namespace ps2x::iop::detail
+         return {};
+     }
+ 
++    uint16_t IopModuleLoader::moduleVersion(std::span<const uint8_t> image)
++    {
++        // .iopmod as moduleName: the version is the u16 just before the name (offset 24).
++        constexpr uint32_t kVersionOffset = 24u;
++        if (image.size() < 0x34u || std::memcmp(image.data(), "\x7f" "ELF", 4) != 0)
++            return 0u;
++        uint32_t phoff = 0u;
++        uint16_t phentsize = 0u;
++        uint16_t phnum = 0u;
++        std::memcpy(&phoff, image.data() + 0x1Cu, sizeof(phoff));
++        std::memcpy(&phentsize, image.data() + 0x2Au, sizeof(phentsize));
++        std::memcpy(&phnum, image.data() + 0x2Cu, sizeof(phnum));
++        for (uint32_t i = 0; i < phnum; ++i)
++        {
++            const uint64_t header = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(i) * phentsize;
++            if (phentsize < 20u || header + 20u > image.size())
++                return 0u;
++            uint32_t type = 0u;
++            uint32_t offset = 0u;
++            uint32_t filesz = 0u;
++            std::memcpy(&type, image.data() + header, sizeof(type));
++            std::memcpy(&offset, image.data() + header + 4u, sizeof(offset));
++            std::memcpy(&filesz, image.data() + header + 16u, sizeof(filesz));
++            if (type != PT_SCE_IOPMOD || filesz < kVersionOffset + 2u || !checkedRange(image.size(), offset, filesz))
++                continue;
++            uint16_t version = 0u;
++            std::memcpy(&version, image.data() + offset + kVersionOffset, sizeof(version));
++            return version;
++        }
++        return 0u;
++    }
++
+     IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)
+     {
+         IopImageLoadResult result;
+diff --git a/ps2xIOP/src/emulator/services/iop_module_loader.h b/ps2xIOP/src/emulator/services/iop_module_loader.h
+index e28bd72..3434a63 100644
+--- a/ps2xIOP/src/emulator/services/iop_module_loader.h
++++ b/ps2xIOP/src/emulator/services/iop_module_loader.h
+@@ -50,6 +50,9 @@ namespace ps2x::iop::detail
+         [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor);
+         // The module name stored in the IRX's .iopmod header, or "" when there is none.
+         [[nodiscard]] static std::string moduleName(std::span<const uint8_t> image);
++        // The .iopmod header's version (u16 at offset 24, e.g. 0x0204 for 2.4), 0 when there is none: SMAP refuses
++        // a DEV9 older than 2.4 through ReferModuleStatus.
++        [[nodiscard]] static uint16_t moduleVersion(std::span<const uint8_t> image);
+ 
+     private:
+         [[nodiscard]] static bool readElf(const std::function<bool(uint32_t, void *, size_t)> &read, uint32_t guestAddress, std::vector<uint8_t> &bytes);
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index aeb0022..a0d4569 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -558,17 +558,17 @@ namespace
+     // A module asking modload about the others, as Capcom's network setup does before loading its stack again
+     // (reports/2026-10-26-online-play.md entry 59): SearchModuleByName("probemod") (22), SearchModuleByName("nothere"),
+     // GetModuleIdList(buf, 16, &count) (16), ReferModuleStatus(found, &status) (17). Returns found & 0xFF |
+-    // (missing & 0xFF) << 8 | (count & 0xFF) << 16 | (status.name[0] + refer - found) << 24.
++    // (missing & 0xFF) << 8 | (count & 0xFF) << 16 | (status.name[0] + refer - found + status.version - 0x0204) << 24.
+     void writeModuleQueryIrx(TestHost &host, uint32_t address)
+     {
+         constexpr uint32_t codeOffset = 0x100u;
+         constexpr uint32_t loadAddress = 0x0001A000u;
+-        constexpr uint32_t tableAddress = loadAddress + 0xB0u;
++        constexpr uint32_t tableAddress = loadAddress + 0xC0u;
+         constexpr uint32_t stub16 = tableAddress + 20u;
+         constexpr uint32_t stub17 = stub16 + 8u;
+         constexpr uint32_t stub22 = stub17 + 8u;
+-        constexpr uint32_t name1 = loadAddress + 0xF0u;
+-        constexpr uint32_t name2 = loadAddress + 0x100u;
++        constexpr uint32_t name1 = loadAddress + 0x100u;
++        constexpr uint32_t name2 = loadAddress + 0x110u;
+         ElfHeader header{};
+         header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+         header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+@@ -577,7 +577,7 @@ namespace
+         header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+         ProgramHeader program{};
+         program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+-        program.filesz = 0x110u; program.memsz = 0x110u; program.flags = 7u; program.align = 4u;
++        program.filesz = 0x120u; program.memsz = 0x120u; program.flags = 7u; program.align = 4u;
+         const uint32_t jal16 = 0x0C000000u | ((stub16 >> 2) & 0x03FFFFFFu);
+         const uint32_t jal17 = 0x0C000000u | ((stub17 >> 2) & 0x03FFFFFFu);
+         const uint32_t jal22 = 0x0C000000u | ((stub22 >> 2) & 0x03FFFFFFu);
+@@ -592,6 +592,7 @@ namespace
+             0x304200FFu, 0x00021400u, 0x02228825u,                       // s1 |= (count & 0xFF) << 16
+             0x02002025u, 0x27A50060u,                                    // a0 = found; a1 = sp+96 (status)
+             jal17, 0u, 0x00501023u, 0x93A30060u, 0u,                     // v0 = refer - found; v1 = name[0]
++            0x97A80098u, 0u, 0x2508FDFCu, 0x00481021u,                   // v0 += status.version - 0x0204
+             0x00431021u, 0x00021600u, 0x02221025u,                       // v0 = s1 | (name[0] + v0) << 24
+             0x8FB100F0u, 0x8FB000F4u, 0x8FBF00F8u, 0u,                   // lw s1; lw s0; lw ra (+ load delay)
+             0x03E00008u, 0x27BD0100u,                                    // jr ra; addiu sp,256
+@@ -604,18 +605,18 @@ namespace
+             0x03E00008u, 0x24000016u, // 22 SearchModuleByName
+             0u, 0u,
+         };
+-        static_assert(sizeof(code) <= 0xB0u, "code runs into the import table");
++        static_assert(sizeof(code) <= 0xC0u, "code runs into the import table");
+         std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+         std::memcpy(host.guest.data() + address, &header, sizeof(header));
+         std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
+-        std::memcpy(host.guest.data() + address + codeOffset + 0xB0u, imports, sizeof(imports));
+-        std::memcpy(host.guest.data() + address + codeOffset + 0xF0u, "probemod", 9);
+-        std::memcpy(host.guest.data() + address + codeOffset + 0x100u, "nothere", 8);
++        std::memcpy(host.guest.data() + address + codeOffset + 0xC0u, imports, sizeof(imports));
++        std::memcpy(host.guest.data() + address + codeOffset + 0x100u, "probemod", 9);
++        std::memcpy(host.guest.data() + address + codeOffset + 0x110u, "nothere", 8);
+     }
+ 
+     // writeMinimalIrx's module with a .iopmod header naming it.
+-    void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name)
++    void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name, uint16_t version = 0u)
+     {
+         writeMinimalIrx(host, address);
+         constexpr uint32_t iopmodOffset = 0x200u;
+@@ -625,6 +626,7 @@ namespace
+         std::memcpy(host.guest.data() + address, &header, sizeof(header));
+ 
+         uint8_t iopmod[26u + 16u] = {};
++        std::memcpy(iopmod + 24u, &version, sizeof(version));
+         std::memcpy(iopmod + 26u, name, std::strlen(name));
+         ProgramHeader iopModule{};
+         iopModule.type = 0x70000080u; // PT_SCE_IOPMOD
+@@ -2110,7 +2112,7 @@ int main()
+         // loads it again on every try until the module arena runs out.
+         TestHost queryHost(0x2000u);
+         IopSubsystem queryIop(queryHost);
+-        writeNamedMinimalIrx(queryHost, 0x100u, "probemod");
++        writeNamedMinimalIrx(queryHost, 0x100u, "probemod", 0x0204u); // as DEV9 2.4, which SMAP requires
+         const ModuleLoadResult probe = queryIop.loadModuleBuffer(0x100u);
+         const int32_t probeId = queryIop.findModuleByName("probemod");
+         if (!expect(probe.handled && probeId > 0, "the named module loads")) return 1;
+@@ -2122,7 +2124,7 @@ int main()
+         if (!expect(((r >> 8) & 0xFFu) == 0x36u, "SearchModuleByName must answer -202 (unknown module) for a missing one"))
+             return 1;
+         if (!expect(((r >> 16) & 0xFFu) >= 2u, "GetModuleIdList must count the loaded modules")) return 1;
+-        if (!expect((r >> 24) == static_cast<uint32_t>('p'), "ReferModuleStatus must return the id and the module's name"))
++        if (!expect((r >> 24) == static_cast<uint32_t>('p'), "ReferModuleStatus must return the id, the name and the .iopmod version"))
+             return 1;
+     }
+ 
+-- 
+2.46.2.windows.1
+
