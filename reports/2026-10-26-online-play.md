@@ -1200,6 +1200,19 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   (https://steamcommunity.com/sharedfiles/filedetails/?id=2358718919, DNS1 208.72.237.31); Dread Central 2021
   (an older DNS, 173.233.94.154). Not yet tried on the phone.
 
+### 66. Fan server: past the login, then "EE invocation stack space exhausted" (PS2Recomp 0105)
+
+- **Seen (developer, 2026-10-29 ~04:23, OnePlus, obsrv via its DNS):** "Crashed after enter lobbies". The DNS fix
+  worked: the login pages loaded from obsrv (several 443 connections with real pages, `files/pcsx2-gs.log`). Then
+  `Error during program execution: EE invocation stack space exhausted` (logcat), before any lobby connection.
+- **Cause (reading the runtime):** callback ("invocation") stacks are keyed by guest thread and depth
+  (`EeScheduler::invocationStackTop`) and come from a pool from 0xB1000 to 0x100000, about 19 stacks of 16 KB, never
+  given back. A deleted thread's entries were never freed, so each short-lived thread that ran a callback leaked one.
+  Unverified that thread churn is what the game did here (the test reproduces the mechanism).
+- **Fix: PS2Recomp 0105:** DeleteThread and ExitDeleteThread move the thread's stacks to a free list used first.
+  Test first: 64 threads that run a callback and delete themselves exhaust the pool without (576/577), 577/577 with.
+- Installed on the OnePlus. Not yet retried.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

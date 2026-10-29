@@ -1,0 +1,213 @@
+From 313e9215868b3d0613c7be02ac6c9dd9f4e49f18 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 04:28:53 -0400
+Subject: [PATCH] Runtime: a deleted EE thread's invocation stacks are reused
+
+Callback ("invocation") stacks are keyed by thread id and nesting depth and taken from a pool below 1 MiB that holds
+about 19 of them and is never given back. A deleted thread's entries stayed in m_invocationStackTops, so every
+short-lived thread that ran a callback leaked one. A network library that starts and deletes threads per connection
+ran the pool dry ("EE invocation stack space exhausted", outbreak-modern online play against a fan server, after the
+login pages). DeleteThread and ExitDeleteThread now move the thread's stacks to a free list that invocationStackTop
+uses first; reset clears both.
+
+Test: "a deleted thread's invocation stacks are reused" (64 threads that run a callback and delete themselves):
+fails without (pool exhausted), passes with; ps2x_tests 577/577.
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h   |  3 +
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp   | 30 +++++++
+ ps2xTest/src/ps2_runtime_interrupt_tests.cpp | 82 ++++++++++++++++++++
+ 3 files changed, 115 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index e060814..f4336e7 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -466,6 +466,9 @@ private:
+     uint32_t m_gsVSyncCallbackGp = 0;
+     uint32_t m_gsVSyncCallbackSp = 0;
+     std::unordered_map<uint64_t, uint32_t> m_invocationStackTops;
++    // Stacks of deleted threads, handed out again before the pool is touched (the pool is never given back).
++    std::vector<uint32_t> m_freeInvocationStacks;
++    void releaseInvocationStacks(int threadId);
+     std::atomic<uint64_t> m_nextDeadlineCycle{0};
+ 
+     mutable std::mutex m_snapshotMutex;
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index a75832f..597ce6c 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -102,6 +102,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     m_rdram = rdram;
+     m_readyQueues = {};
+     m_threads.clear();
++    m_invocationStackTops.clear();
++    m_freeInvocationStacks.clear();
+     m_semaphores.clear();
+     m_eventFlags.clear();
+     m_alarms.clear();
+@@ -542,6 +544,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
+     {
+         ownedStack = it->second.stack;
+     }
++    releaseInvocationStacks(id);
+     m_threads.erase(it);
+     publishSnapshot();
+     return KE_OK;
+@@ -590,6 +593,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
+     m_currentThreadId = 0;
+     if (deleteThreadRecord && id != kMainThreadId)
+     {
++        releaseInvocationStacks(id);
+         m_threads.erase(id);
+     }
+     if (ownedStack != 0u)
+@@ -1227,6 +1231,25 @@ bool EeScheduler::hasInvocation(GuestInvocationKind kind, uint64_t tag) const
+                        });
+ }
+ 
++// A deleted thread's invocation stacks (one per nesting depth it reached) go back for reuse. The pool below 1 MiB
++// holds about 19 of them; network libraries start and delete threads all the time (outbreak-modern online play: the
++// game stopped with "EE invocation stack space exhausted" after the login pages).
++void EeScheduler::releaseInvocationStacks(int threadId)
++{
++    for (auto it = m_invocationStackTops.begin(); it != m_invocationStackTops.end();)
++    {
++        if (static_cast<int>(static_cast<uint32_t>(it->first >> 32u)) == threadId)
++        {
++            m_freeInvocationStacks.push_back(it->second);
++            it = m_invocationStackTops.erase(it);
++        }
++        else
++        {
++            ++it;
++        }
++    }
++}
++
+ uint32_t EeScheduler::invocationStackTop()
+ {
+     assertExecutor();
+@@ -1243,6 +1266,13 @@ uint32_t EeScheduler::invocationStackTop()
+     {
+         return existing->second;
+     }
++    if (!m_freeInvocationStacks.empty())
++    {
++        const uint32_t reused = m_freeInvocationStacks.back();
++        m_freeInvocationStacks.pop_back();
++        m_invocationStackTops.emplace(key, reused);
++        return reused;
++    }
+     constexpr uint32_t kInvocationStackSize = 0x4000u;
+     const uint32_t top = m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
+     if (top == 0u)
+diff --git a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+index 4261bfa..a7a34d2 100644
+--- a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+@@ -72,6 +72,10 @@ namespace
+     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
+     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
+     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
++    constexpr uint32_t kChurnMainPc = 0x00160560u;
++    constexpr uint32_t kChurnChildPc = 0x00160570u;
++    constexpr uint32_t kChurnChildDonePc = 0x00160580u;
++    constexpr uint32_t kChurnHandlerPc = 0x00160590u;
+ 
+     constexpr uint32_t kTimer2Count = 0x10001000u;
+     constexpr uint32_t kTimer2Mode = 0x10001010u;
+@@ -373,6 +377,59 @@ namespace
+         ctx->pc = 0u;
+         runtime->requestStop();
+     }
++
++    // Thread churn (outbreak-modern online play: the network library's short-lived threads each run a callback, then
++    // exit and delete themselves): a deleted thread's invocation stacks must go back to the pool.
++    constexpr uint32_t kChurnThreads = 64u;
++    uint32_t g_churnStarted = 0u;
++    uint32_t g_churnHandled = 0u;
++    uint32_t g_churnSpins = 0u;
++
++    void schedulerChurnHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
++    {
++        ++g_churnHandled;
++        ctx->pc = 0u;
++    }
++
++    void schedulerChurnChild(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        GuestInvocation invocation{};
++        invocation.kind = GuestInvocationKind::RpcCallback;
++        invocation.tag = g_churnStarted;
++        invocation.context.pc = kChurnHandlerPc;
++        setRegU32(invocation.context, 31, 0u);
++        ctx->pc = kChurnChildDonePc;
++        runtime->eeScheduler().invokeCurrent(std::move(invocation));
++    }
++
++    void schedulerChurnChildDone(uint8_t *, R5900Context *, PS2Runtime *runtime)
++    {
++        runtime->eeScheduler().exitCurrent(true);
++    }
++
++    void schedulerChurnMain(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        EeScheduler &scheduler = runtime->eeScheduler();
++        if (g_churnSpins++ == 0u)
++        {
++            int old = 0;
++            scheduler.changePriority(0, 64, false, old); // below the children: each runs to its end when started
++        }
++        if (g_churnSpins > 100000u || g_churnStarted >= kChurnThreads)
++        {
++            ctx->pc = 0u;
++            runtime->requestStop();
++            return;
++        }
++        EeThreadCreateParams params{};
++        params.entry = kChurnChildPc;
++        params.priority = 1;
++        const int id = scheduler.createThread(params);
++        ++g_churnStarted;
++        ctx->pc = kChurnMainPc;
++        scheduler.startThread(id, 0u, *ctx, false);
++        scheduler.transferIfRequested(false);
++    }
+ }
+ 
+ void register_ps2_runtime_interrupt_tests()
+@@ -602,6 +659,31 @@ void register_ps2_runtime_interrupt_tests()
+             t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
+         });
+ 
++        tc.Run("a deleted thread's invocation stacks are reused", [](TestCase &t)
++        {
++            TestEnv env;
++            env.runtime.registerFunction(kChurnMainPc, schedulerChurnMain);
++            env.runtime.registerFunction(kChurnChildPc, schedulerChurnChild);
++            env.runtime.registerFunction(kChurnChildDonePc, schedulerChurnChildDone);
++            env.runtime.registerFunction(kChurnHandlerPc, schedulerChurnHandler);
++            g_churnStarted = g_churnHandled = g_churnSpins = 0u;
++
++            R5900Context mainContext{};
++            mainContext.pc = kChurnMainPc;
++            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
++            bool exhausted = false;
++            try
++            {
++                env.runtime.eeScheduler().run();
++            }
++            catch (const std::runtime_error &error)
++            {
++                exhausted = std::string_view(error.what()) == "EE invocation stack space exhausted";
++            }
++            t.IsFalse(exhausted, "64 threads that run a callback and delete themselves must not exhaust the stack pool");
++            t.Equals(g_churnHandled, kChurnThreads, "every thread's callback should run");
++        });
++
+         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)
+         {
+             TestEnv env;
+-- 
+2.46.2.windows.1
+
