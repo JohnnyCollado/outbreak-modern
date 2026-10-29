@@ -997,6 +997,28 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   shipped upper with J's Bar unchecked (noted as not checked): a depth setting must be checked in 3D before shipping.
 - The reference PCSX2's settings were put back (`inis/PCSX2.ini.bak-20261028-netgui`).
 
+### 57. The network settings on the card: BWNETCNF written at game start (Android Network page: in progress)
+
+- **Seen (developer, Odin):** NET CONNECTION asks "Input your network settings?"; YES on a PS2 leaves the game for
+  Sony's setup program (`NTGUI2`), which the port cannot run: the developer saw a crash after it, and "the preset
+  server settings is not being used" (net.env's `PS2X_NETCNF=dhcp` is served, but the game wants `BWNETCNF` on the
+  card first, [to-lobby.pad](../tools/net/to-lobby.pad) lines 1-3). The crash itself was gone from the log
+  (buffer from 20:00:44 only): not confirmed which step crashed.
+- **Approved plan (developer, "Yes, Android first"):** a Network page in the launcher, and the card's `BWNETCNF`
+  written automatically.
+- **Done so far:** `ob_ui` core writes cards (`formatCardIfBlank`, `addCardFolder`, `readCardFile`, ported from
+  `tools/ob/mcd.py`; the written card reads back with `mcd.py info`) and `ensureNetworkFolder` (format a blank card,
+  add `BWNETCNF` once, never touch an existing one). Tests first, ob_ui 140/140. The hook gives slot 1 `BWNETCNF` when
+  `PS2X_NETCNF` is set: the runtime's four settings files (patch 0097) + the disc's `NTGUI2/CONF/ENGLISH` icons.
+- **Issue: the disc paths are not set when the card opens** (`ps2_runtime.cpp:1084` opens the card before
+  `main.cpp:292` sets the I/O paths; the first try logged `image '', folder 'C:\ob
+et-logs'`). Fix in the adapter:
+  the card is prepared at the game's first card access (closed, prepared, reopened), one flag check per access.
+- **Windows (`pcsx2-vk`, card with the game save):** `[netcnf] card: BWNETCNF added (dhcp)`, six files (icon 33,688
+  bytes as netcnf checks); NET CONNECTION lists "1. Setting 1" (`C:\obrames-netcard-vk
+06-connecting.png`).
+- **Next:** the developer tries Setting 1 on the Odin against the PC server; then the Network page.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

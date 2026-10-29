@@ -8,6 +8,9 @@
 #include "runtime/ps2_ipu_external.h"
 #include "runtime/ps2_sio2_external.h"
 #include "runtime/ps2_dev9_external.h"
+#include "runtime/ps2_netcnf.h"
+#include "ps2_runtime.h"
+#include "ps2x/iop/iso9660.h"
 
 #include "ob_gs_bridge.h"
 #include "ob_dev9_bridge.h"
@@ -15,8 +18,15 @@
 #include "ob_ipu_bridge.h"
 #include "ob_sio2_bridge.h"
 #include "ob_ui.h"
+#include "memory_card.h"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <optional>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -168,24 +178,121 @@ ps2x::IpuDevice* ps2CreateExternalIpu(uint8_t* rdram, uint32_t ramSize, uint8_t*
 	return new Pcsx2Ipu();
 }
 
+namespace
+{
+	// A file of the disc: from the ISO image, else the extracted folder (each path part matched without case).
+	bool ReadDiscFile(const std::vector<std::string>& parts, std::vector<uint8_t>& out)
+	{
+		const PS2Runtime::IoPaths& io = PS2Runtime::getIoPaths();
+		if (!io.cdImage.empty())
+		{
+			std::string path;
+			for (const std::string& p : parts)
+				path += (path.empty() ? "" : "/") + p;
+			const std::shared_ptr<ps2x::iop::IsoImage> iso = ps2x::iop::IsoImage::shared(io.cdImage);
+			ps2x::iop::IsoEntry e;
+			return iso && iso->find(path, e) && !e.directory && iso->readFile(e, out);
+		}
+		std::filesystem::path at = io.cdRoot;
+		for (const std::string& part : parts)
+		{
+			std::error_code ec;
+			bool found = false;
+			for (const auto& entry : std::filesystem::directory_iterator(at, ec))
+			{
+				std::string a = entry.path().filename().string(), b = part;
+				std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+				std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+				if (a == b)
+				{
+					at = entry.path();
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				return false;
+		}
+		std::ifstream f(at, std::ios::binary);
+		out.assign(std::istreambuf_iterator<char>(f), {});
+		return static_cast<bool>(f) || f.eof();
+	}
+
+	// Online play (PS2X_NETCNF set): slot 1's card gets the BWNETCNF network settings folder before the game opens it,
+	// so NET CONNECTION finds "your network configuration" and the game never asks for Sony's setup program, which the
+	// port cannot run (reports/2026-10-26-online-play.md entry 57). The settings files are the ones the runtime serves
+	// (patch 0097); the icons are the disc's own (NTGUI2/CONF/ENGLISH, as tools/ob/mcd.py netcnf).
+	void PrepareNetworkCard(const std::string& cardFolder)
+	{
+		const std::optional<ps2x::netcnf::NetworkConfig> config = ps2x::netcnf::configFromEnvironment(std::getenv("PS2X_NETCNF"));
+		if (!config || cardFolder.empty())
+			return;
+		std::vector<obui::CardFile> files(2);
+		files[0].name = "SYS_NET.ICO";
+		files[1].name = "icon.sys";
+		if (!ReadDiscFile({"NTGUI2", "CONF", "ENGLISH", "SYS_NET.ICO"}, files[0].data) ||
+			!ReadDiscFile({"NTGUI2", "CONF", "ENGLISH", "ICON.SYS"}, files[1].data))
+		{
+			std::fprintf(stderr, "[netcnf] card: the disc's network icons (NTGUI2/CONF/ENGLISH) not found (image '%s', folder '%s'): BWNETCNF not written\n",
+				PS2Runtime::getIoPaths().cdImage.string().c_str(), PS2Runtime::getIoPaths().cdRoot.string().c_str());
+			return;
+		}
+		for (const ps2x::netcnf::SettingsFile& f : ps2x::netcnf::settingsFiles(*config))
+			files.push_back({f.name, f.data});
+		const std::filesystem::path card = std::filesystem::path(cardFolder) / obui::kSlotCardNames[0];
+		std::string err;
+		switch (obui::ensureNetworkFolder(card, files, &err))
+		{
+			case obui::NetworkFolder::AlreadyThere: break;
+			case obui::NetworkFolder::Added: std::fprintf(stderr, "[netcnf] card: BWNETCNF added (%s)\n", config->dhcp ? "dhcp" : "static"); break;
+			case obui::NetworkFolder::FormattedAndAdded:
+				std::fprintf(stderr, "[netcnf] card: formatted, BWNETCNF added (%s)\n", config->dhcp ? "dhcp" : "static");
+				break;
+			case obui::NetworkFolder::Failed: std::fprintf(stderr, "[netcnf] card: BWNETCNF not written: %s\n", err.c_str()); break;
+		}
+		std::fflush(stderr);
+	}
+} // namespace
+
 // ---- SIO2 + memory cards (PS2Recomp patch 0071): PCSX2's SIO2 behind native/pcsx2_sio2/adapter/ob_sio2_bridge.h ----
 namespace
 {
+	// The card opens during the runtime's start, before it knows the disc (PS2Runtime::setIoPaths comes later), and
+	// BWNETCNF needs the disc's icons: so the card is prepared at the game's first card access, closed and reopened.
 	class Pcsx2Sio2 final : public ps2x::iop::Sio2Device
 	{
 	public:
+		Pcsx2Sio2(std::string folder, bool createSlot1) : m_folder(std::move(folder)), m_createSlot1(createSlot1) {}
 		~Pcsx2Sio2() override { ob_sio2_close(); }
-		uint32_t read32(uint32_t phys) override { return ob_sio2_read32(phys); }
-		void write32(uint32_t phys, uint32_t value) override { ob_sio2_write32(phys, value); }
-		uint8_t read8(uint32_t phys) override { return ob_sio2_read8(phys); }
-		void write8(uint32_t phys, uint8_t value) override { ob_sio2_write8(phys, value); }
+		uint32_t read32(uint32_t phys) override { Ready(); return ob_sio2_read32(phys); }
+		void write32(uint32_t phys, uint32_t value) override { Ready(); ob_sio2_write32(phys, value); }
+		uint8_t read8(uint32_t phys) override { Ready(); return ob_sio2_read8(phys); }
+		void write8(uint32_t phys, uint8_t value) override { Ready(); ob_sio2_write8(phys, value); }
 		uint32_t dma(uint32_t channel, uint8_t* iopRam, uint32_t ramSize, uint32_t madr, uint32_t bcr, uint32_t chcr) override
 		{
+			Ready();
 			return ob_sio2_dma(channel, iopRam, ramSize, madr, bcr, chcr);
 		}
 		bool takeInterrupt() override { return ob_sio2_take_interrupt(); }
 		// The card driver numbers the card slots after the two pad ports (sio2man ports 2/3); bit 0 is the slot.
-		bool authCard(uint32_t port, uint32_t) override { return ob_sio2_card_present(port & 1u); }
+		bool authCard(uint32_t port, uint32_t) override { Ready(); return ob_sio2_card_present(port & 1u); }
+
+	private:
+		void Ready()
+		{
+			if (m_ready)
+				return;
+			m_ready = true;
+			if (!std::getenv("PS2X_NETCNF"))
+				return;
+			ob_sio2_close();
+			PrepareNetworkCard(m_folder);
+			if (!ob_sio2_open(m_folder.c_str(), m_createSlot1))
+				std::fprintf(stderr, "[netcnf] card: reopening %s failed\n", m_folder.c_str());
+		}
+		std::string m_folder;
+		bool m_createSlot1;
+		bool m_ready = false;
 	};
 	static_assert(OB_SIO2_DMA_IGNORED == ps2x::iop::kSio2DmaIgnored);
 } // namespace
@@ -194,7 +301,7 @@ ps2x::iop::Sio2Device* ps2CreateExternalSio2(const std::string& cardFolder, bool
 {
 	if (!ob_sio2_open(cardFolder.c_str(), createSlot1))
 		return nullptr;
-	return new Pcsx2Sio2();
+	return new Pcsx2Sio2(cardFolder, createSlot1);
 }
 
 // ---- DEV9 network adapter (PS2X_DEV9): PCSX2's DEV9 + Sockets adapter behind native/pcsx2_dev9/adapter/ob_dev9_bridge.h ----

@@ -55,5 +55,17 @@ namespace obui
 	bool readCardFile(const std::filesystem::path& ps2File, const std::string& folder, const std::string& file,
 		std::vector<uint8_t>& out);
 
+	// At game start with online play on: the card in slot 1 holds BWNETCNF (`files`, the network settings folder), so
+	// the game goes past NET CONNECTION without Sony's setup program. A missing or all-0xFF card is formatted first; an
+	// existing BWNETCNF and every other save are left as they are.
+	enum class NetworkFolder
+	{
+		AlreadyThere,
+		Added,
+		FormattedAndAdded,
+		Failed, // err says why; the card is unchanged
+	};
+	NetworkFolder ensureNetworkFolder(const std::filesystem::path& ps2File, const std::vector<CardFile>& files, std::string* err);
+
 	constexpr const char* kSlotCardNames[2] = {"Mcd001.ps2", "Mcd002.ps2"};
 } // namespace obui

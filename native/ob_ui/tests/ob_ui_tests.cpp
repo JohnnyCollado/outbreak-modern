@@ -520,6 +520,36 @@ static void CardWriteTests()
 	Check(!obui::addCardFolder(junk, "X", files, &err) && !err.empty(), "card write: no folder on an unformatted card");
 }
 
+// The network settings folder at game start (ensureNetworkFolder): a blank card is formatted, BWNETCNF added once; an
+// existing BWNETCNF and the other saves are left as they are.
+static void EnsureNetworkFolderTests()
+{
+	const fs::path dir = TempDir("netfolder");
+	const fs::path card = dir / "Mcd001.ps2";
+	const std::vector<obui::CardFile> files = {{"SYS_NET.ICO", std::vector<uint8_t>(0x8398, 1)}, {"icon.sys", std::vector<uint8_t>(0x3C4, 2)},
+		{"BWNETCNF", {'0'}}, {"net000.cnf", {'n'}}, {"ifc000.dat", {'i'}}, {"dev000.dat", {'d'}}};
+	std::string err;
+	Check(obui::ensureNetworkFolder(card, files, &err) == obui::NetworkFolder::FormattedAndAdded, "net folder: a missing card is formatted and gets BWNETCNF");
+	std::vector<uint8_t> back;
+	Check(obui::readCardFile(card, "BWNETCNF", "ifc000.dat", back) && back == std::vector<uint8_t>{'i'}, "net folder: its files are on the card");
+	const std::vector<uint8_t> once = ReadAllBytes(card);
+	Check(obui::ensureNetworkFolder(card, files, &err) == obui::NetworkFolder::AlreadyThere && ReadAllBytes(card) == once,
+		"net folder: a card with BWNETCNF is left alone");
+
+	const fs::path game = dir / "game.ps2";
+	Check(obui::formatCardIfBlank(game, &err) && obui::addCardFolder(game, "BISLPM-65428NETBIO", {{"save", std::vector<uint8_t>(5000, 9)}}, &err),
+		"net folder: a card with the game's save");
+	Check(obui::ensureNetworkFolder(game, files, &err) == obui::NetworkFolder::Added, "net folder: BWNETCNF added beside the save");
+	const obui::CardInfo info = obui::readCard(game);
+	Check(info.saves.size() == 2 && obui::readCardFile(game, "BISLPM-65428NETBIO", "save", back) && back == std::vector<uint8_t>(5000, 9),
+		"net folder: the game's save is intact");
+
+	const fs::path junk = dir / "junk.ps2";
+	WriteBytes(junk, std::vector<uint8_t>(8650752u, 0x5A));
+	err.clear();
+	Check(obui::ensureNetworkFolder(junk, files, &err) == obui::NetworkFolder::Failed && !err.empty(), "net folder: an unknown card fails, untouched");
+}
+
 static void CardTests()
 {
 	const fs::path dir = TempDir("cards");
@@ -688,6 +718,7 @@ int main()
 	TriggerTests();
 	CardTests();
 	CardWriteTests();
+	EnsureNetworkFolderTests();
 	WidescreenTests();
 	TouchTests();
 	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
