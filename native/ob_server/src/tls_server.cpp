@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#include <algorithm>
 #include "tls_server.h"
 
 #include "mbedtls/ctr_drbg.h"
@@ -235,7 +236,21 @@ namespace ob::server
 			mbedtls_ssl_context ssl;
 			mbedtls_ssl_init(&ssl);
 			bool ok = mbedtls_ssl_setup(&ssl, &s->conf) == 0;
-			mbedtls_ssl_set_bio(&ssl, &client, mbedtls_net_send, nullptr, mbedtls_net_recv_timeout);
+			// The first bytes the client sent, shown when its handshake fails (what the game's SSL actually said).
+			struct Recorded
+			{
+				mbedtls_net_context* net;
+				std::string bytes;
+			} recorded{&client, {}};
+			mbedtls_ssl_set_bio(&ssl, &recorded, [](void* c, const unsigned char* b, size_t n) {
+				return mbedtls_net_send(static_cast<Recorded*>(c)->net, b, n); }, nullptr,
+				[](void* c, unsigned char* b, size_t n, uint32_t timeout) {
+					Recorded* r = static_cast<Recorded*>(c);
+					const int got = mbedtls_net_recv_timeout(r->net, b, n, timeout);
+					if (got > 0 && r->bytes.size() < 512)
+						r->bytes.append(reinterpret_cast<const char*>(b), std::min<size_t>(size_t(got), 512 - r->bytes.size()));
+					return got;
+				});
 			int rc = 0;
 			while (ok && (rc = mbedtls_ssl_handshake(&ssl)) != 0)
 				if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
@@ -247,7 +262,15 @@ namespace ob::server
 				{
 					char hex[16];
 					std::snprintf(hex, sizeof(hex), "-0x%04X", static_cast<unsigned>(-rc));
-					m_config.log("[web] " + address + ": handshake failed " + hex);
+					std::string dump;
+					for (unsigned char c : recorded.bytes)
+					{
+						char h[4];
+						std::snprintf(h, sizeof(h), "%02x", c);
+						dump += h;
+					}
+					m_config.log("[web] " + address + ": handshake failed " + hex + " after " + std::to_string(recorded.bytes.size()) +
+								 " bytes: " + dump);
 				}
 			}
 			else

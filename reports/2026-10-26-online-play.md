@@ -1028,6 +1028,21 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Fix:** the permission in `native/android/AndroidManifest.xml`. Test first (`ManifestTest`, failed without it),
   Kotlin 34/34. OnePlus: `android.permission.INTERNET: granted=true`. Installed on the OnePlus and the Odin.
 
+### 59. OnePlus reaches the PC server; the TLS handshake fails; a retry exhausts the IOP's module memory (open)
+
+- **With the INTERNET permission (entry 58):** the OnePlus connects to `ob_server` on the LAN, then
+  `[web] 192.168.0.63: handshake failed -0x7900` every time (mbedTLS: the ClientHello could not be processed; from
+  memory, not looked up). The phone sends 102 bytes and gets a 7-byte alert (`DEV9: TCP: [PS2] Sending: 102 bytes`,
+  `[SRV] Sending 7 bytes`). The Windows clients pass the same step. The game then shows 接続できませんでした
+  (could not connect; check the network settings).
+- **Diagnostics added:** `tls_server.cpp` keeps a connection's first 512 received bytes and prints them as hex with a
+  failed handshake (ob_server 98/98, 0 warnings). Server restarted on 192.168.0.76; waiting for a fresh attempt.
+- **Retry stall ("crazy dip", developer):** after OK and a second try, 0.4 fps on a black screen: GameThread running
+  flat out, 27,302 `[ps2xIOP:error] [IOP] module arena exhausted` in 90 s. Before them: `unhandled import modload:22`,
+  `:17`, `:16` (version 0x106) and the network modules loaded again (`USBSRCH.IRX` -> 20, then -> 33): the stop /
+  unload / search calls from the IOP side are not handled, so nothing is freed and the reload fills the arena.
+  PS2Recomp fix needed (handle them; also rate-limit that error). Would also happen on Windows after a failed connect.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
