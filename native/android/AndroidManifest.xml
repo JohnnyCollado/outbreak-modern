@@ -12,6 +12,14 @@
     <!-- Online play: PCSX2's network adapter opens real sockets to the server (without this every socket() is
          refused with EPERM; reports/2026-10-26-online-play.md entry 58). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Local play (docs/plans/2026-10-28-local-play.md): this device's Wi-Fi address and subnet (network state), the
+         nearby hosts' broadcasts (multicast lock: some Wi-Fi drivers drop broadcasts without it), and the host's
+         foreground service with its Stop notification. No location permission: the address comes from the link. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- raylib's window is OpenGL ES (released when PCSX2's Vulkan GS attaches); the GS needs Vulkan 1.1. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
@@ -59,5 +67,14 @@
             android:exported="false"
             android:process=":restart"
             android:theme="@android:style/Theme.NoDisplay" />
+        <!-- The built-in host (HostService.kt): in the launcher's process, which stays alive while the game (":game")
+             runs. Not exported: only this app starts or stops it. Started only by the player's Host button. -->
+        <service
+            android:name="com.outbreakmodern.app.HostService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Hosts a local-network game lobby for nearby players of this game" />
+        </service>
     </application>
 </manifest>

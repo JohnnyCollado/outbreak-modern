@@ -40,4 +40,19 @@ object NativeBridge {
     @JvmStatic external fun gameScreen(): Int
     /** Opens the in-game menu, as the Back button does. */
     @JvmStatic external fun requestMenu()
+
+    // Local play (native/pcsx2_gs/adapter/host_jni.cpp; docs/plans/2026-10-28-local-play.md), in the launcher's process.
+    /** Hosts on [address] (this device's Wi-Fi IPv4, the only address it listens on); "" = hosting, else why not. */
+    @JvmStatic external fun hostStart(name: String, address: String, webPort: Int, broadcast: String): String
+    @JvmStatic external fun hostStop()
+    @JvmStatic external fun hostRunning(): Boolean
+    /** The addresses in this host's lobby now. */
+    @JvmStatic external fun hostPlayers(): Array<String>
+    /** Disconnects [address] and keeps it out until hosting stops. */
+    @JvmStatic external fun hostRemove(address: String)
+    /** Listens for nearby hosts; "" = listening, else why not. */
+    @JvmStatic external fun searchStart(): String
+    /** Hosts heard in the last 3 s: "address	name	webPort	lobbyPort	players" (parseFoundHost). */
+    @JvmStatic external fun searchHosts(): Array<String>
+    @JvmStatic external fun searchStop()
 }

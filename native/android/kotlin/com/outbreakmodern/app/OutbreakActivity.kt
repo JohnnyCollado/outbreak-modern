@@ -50,7 +50,10 @@ class OutbreakActivity : NativeActivity() {
             val now = repairDriverFolders(java.io.File(settings.filesDir, "drivers"), was)
             if (now != was) settings.set("gpu_driver", now)
         }
-        // Online play until the Network page exists: <external files>/net.env, PS2X_ lines only (DevEnv.kt).
+        // Online play: the Network page's choices (NetPlay.kt chosenNetEnv; empty = offline), on this device's Wi-Fi
+        // interface (PCSX2's automatic choice can't read Android's routes: reports/2026-10-26-online-play.md entry 53).
+        for ((key, value) in chosenNetEnv({ settings.ui(it) }, localLink(this)?.iface ?: "")) Os.setenv(key, value, true)
+        // The developer's overrides after it: <external files>/net.env, PS2X_ lines only (DevEnv.kt).
         getExternalFilesDir(null)?.resolve("net.env")?.takeIf { it.isFile }?.let { file ->
             for ((key, value) in parseDevEnv(file.readText())) Os.setenv(key, value, true)
         }

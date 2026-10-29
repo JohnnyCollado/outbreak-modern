@@ -40,6 +40,17 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
     var settingsChanged = false
     /** In game: opens the touch controls' Edit layout over the held game (OutbreakActivity). */
     var editTouchLayout: (() -> Unit)? = null
+    /** Launcher: asks for a line of text (title, current value, done). */
+    var askText: ((String, String, (String) -> Unit) -> Unit)? = null
+    /** Launcher: starts the game now (Join). */
+    var playNow: (() -> Unit)? = null
+    /** Called when the online-play choice changes (the launcher starts or stops listening for nearby games). */
+    var onNetModeChanged: (() -> Unit)? = null
+
+    // Local play (launcher; tickNetwork refreshes): games heard nearby, and this device's own host.
+    private var nearby = emptyList<FoundHost>()
+    private var hosting = false
+    private var hostPlayers = emptyList<String>()
 
     // The game disc (launcher).
     var disc by mutableStateOf(DiscCheck.NONE)
@@ -134,6 +145,7 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
         list += cameraPage()
         list += displayPage()
         if (!inGame) list += cardsPage()
+        list += networkPage()
         list += audioPage()
         if (!inGame) {
             list += driverPage()
@@ -555,6 +567,139 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
             note("Saved: card backup")
         }
         return SPage("Memory cards", rows)
+    }
+
+    // ---- online play (docs/plans/2026-10-28-local-play.md): the choices are read at game start (chosenNetEnv) ----
+    /** Launcher, about once a second: the nearby games and this host's players; redraws only when they changed. */
+    fun tickNetwork() {
+        val heard = NativeBridge.searchHosts().mapNotNull(::parseFoundHost)
+        val running = NativeBridge.hostRunning()
+        val players = if (running) NativeBridge.hostPlayers().toList() else emptyList()
+        if (heard != nearby || running != hosting || players != hostPlayers) {
+            nearby = heard
+            hosting = running
+            hostPlayers = players
+            bump()
+        }
+        HostService.lastError.takeIf { it.isNotEmpty() }?.let {
+            HostService.lastError = ""
+            note("Hosting didn't start: $it")
+        }
+    }
+
+    private fun networkPage(): SPage {
+        val rows = mutableListOf<SRow>()
+        val mode = settings.ui("net_mode", "off")
+        rows += SRow.Header("h-net", "Online play")
+        rows += SRow.Choice("net_mode", "Online play", listOf("Off", "Local play", "Fan server"),
+            when (mode) { "local" -> 1; "server" -> 2; else -> 0 }, enabled = !inGame) {
+            settings.setUi("net_mode", listOf("off", "local", "server")[it])
+            onNetModeChanged?.invoke()
+            note("Saved: online play")
+        }
+        launchOnlyNote(rows, "net-launch")
+        when (mode) {
+            "local" -> if (!inGame) localRows(rows)
+            "server" -> {
+                val server = settings.ui("net_server")
+                rows += SRow.Action("net_server", "Server address", server.ifEmpty { "Enter…" }, enabled = !inGame) {
+                    askText?.invoke("Fan server address (IPv4)", server) { typed ->
+                        val v = typed.trim()
+                        if (isIpv4(v)) { settings.setUi("net_server", v); note("Saved: server address") }
+                        else note("Not an address: use four numbers like 203.0.113.9")
+                    }
+                }
+                rows += SRow.Info("net-server-hint", "A fan server is run by the community on a PC. Android can only join a " +
+                    "fan server, not host one. Everyone on it plays together: Outbreak Modern, PCSX2 and PS2.", Tone.MUTED)
+            }
+            else -> rows += SRow.Info("net-off-hint", "The game plays offline.", Tone.MUTED)
+        }
+        if (mode != "off") connectionRows(rows)
+        return SPage("Network", rows)
+    }
+
+    private fun localRows(rows: MutableList<SRow>) {
+        rows += SRow.Header("h-nearby", "Nearby games")
+        if (nearby.isEmpty()) rows += SRow.Info("nearby-none", "Looking for games on this Wi-Fi…", Tone.MUTED)
+        for (h in nearby) {
+            val who = if (h.players == 1) "1 player" else "${h.players} players"
+            rows += SRow.Buttons("join-${h.address}", h.name, "$who  ·  ${h.address}", listOf("Join")) { join(h) }
+        }
+        rows += SRow.Header("h-host", "Host a game")
+        val name = cleanHostName(settings.ui("host_name").ifEmpty { Build.MODEL ?: "" })
+        if (hosting) {
+            rows += SRow.Info("host-on", "Hosting \"$name\". Players in the lobby: ${hostPlayers.size}", Tone.GOOD)
+            for (p in hostPlayers)
+                rows += SRow.Buttons("player-$p", p, "", listOf("Remove"), danger = setOf(0)) {
+                    nav.ask(Confirm("Remove $p?", "They are disconnected and can't rejoin until you stop hosting.", "Remove", "Cancel", {
+                        NativeBridge.hostRemove(p)
+                        note("Removed $p")
+                    }))
+                }
+            rows += SRow.Action("host-play", "Play on this host") { joinOwnHost() }
+            rows += SRow.Action("host-stop", "Stop hosting") {
+                HostService.stop(context)
+                note("Stopped hosting")
+            }
+        } else {
+            rows += SRow.Action("host-start", "Host a game", name) { startHosting(name) }
+            rows += SRow.Action("host_name", "Host name", name) {
+                askText?.invoke("Host name (shown to nearby players)", name) { typed ->
+                    settings.setUi("host_name", cleanHostName(typed))
+                    note("Saved: host name")
+                }
+            }
+        }
+        rows += SRow.Info("host-hint", "Hosting on this device works for players using Outbreak Modern on the same Wi-Fi. " +
+            "To play with PCSX2 or PS2 players, join a fan server instead: Android can join one but not host one.", Tone.MUTED)
+    }
+
+    private fun connectionRows(rows: MutableList<SRow>) {
+        rows += SRow.Header("h-conn", "Connection")
+        val manual = settings.ui("net_connection") == "manual"
+        rows += SRow.Choice("net_connection", "Network settings", listOf("Automatic (DHCP)", "Manual"), if (manual) 1 else 0,
+            enabled = !inGame) {
+            settings.setUi("net_connection", if (it == 1) "manual" else "dhcp")
+            note("Saved: network settings")
+        }
+        if (!manual) return
+        for ((key, label) in listOf("net_address" to "IP address", "net_netmask" to "Subnet mask", "net_gateway" to "Gateway",
+            "net_dns1" to "DNS 1", "net_dns2" to "DNS 2 (optional)")) {
+            val v = settings.ui(key)
+            rows += SRow.Action(key, label, v.ifEmpty { "Enter…" }, enabled = !inGame) {
+                askText?.invoke(label, v) { typed ->
+                    val t = typed.trim()
+                    if (isIpv4(t) || (key == "net_dns2" && t.isEmpty())) { settings.setUi(key, t); note("Saved: $label") }
+                    else note("Not an address: use four numbers like 192.168.0.80")
+                }
+            }
+        }
+        if (netcnfValue(NetConnection(false, settings.ui("net_address"), settings.ui("net_netmask"), settings.ui("net_gateway"),
+                settings.ui("net_dns1"), settings.ui("net_dns2"))) == null)
+            rows += SRow.Info("conn-bad", "Fill in every address above, or the game plays offline.", Tone.BAD)
+    }
+
+    private fun join(h: FoundHost) {
+        settings.setUi("net_join", "${h.address}:${h.webPort}")
+        note("Joining ${h.name}…")
+        playNow?.invoke()
+    }
+
+    private fun startHosting(name: String) {
+        val link = localLink(context)
+        if (link == null) {
+            note("Connect to Wi-Fi (or turn on this device's hotspot) to host")
+            return
+        }
+        HostService.start(context, name, link)
+        settings.setUi("net_join", "${link.address}:${HostService.WEB_PORT}")
+        note("Hosting on ${link.address}")
+    }
+
+    private fun joinOwnHost() {
+        val link = localLink(context) ?: return note("No Wi-Fi address")
+        settings.setUi("net_join", "${link.address}:${HostService.WEB_PORT}")
+        playNow?.invoke()
     }
 
     private fun audioPage(): SPage {

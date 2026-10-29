@@ -1,7 +1,13 @@
 package com.outbreakmodern.app
 
+import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.text.InputFilter
+import android.widget.EditText
 import android.os.Bundle
 import android.os.Process
 import android.view.KeyEvent
@@ -44,6 +50,9 @@ class LauncherActivity : ComponentActivity(), PickHost {
         model.importer = Importer(this, settings, lifecycleScope)
         model.installed = Installed(lifecycleScope) { model.bump() }
         model.restartApp = { RestartActivity.restart(this) }
+        model.askText = ::askText
+        model.playNow = ::play
+        model.onNetModeChanged = ::updateSearch
         input = GamepadInput(lifecycleScope) { onNav(it) }
 
         lifecycleScope.launch {
@@ -56,6 +65,7 @@ class LauncherActivity : ComponentActivity(), PickHost {
         setContent {
             AppTheme {
                 LaunchedEffect(Unit) { while (true) { delay(500); model.tickCapture() } }
+                LaunchedEffect(Unit) { while (true) { delay(1000); model.tickNetwork() } }
                 val pages = model.pages()
                 SettingsShell(
                     title = "Outbreak Modern",
@@ -73,6 +83,55 @@ class LauncherActivity : ComponentActivity(), PickHost {
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateSearch()
+    }
+
+    override fun onPause() {
+        stopSearch()
+        super.onPause()
+    }
+
+    // ---- local play: listening for nearby hosts while this screen shows Local play ----
+    private var multicast: WifiManager.MulticastLock? = null
+    private var askedNotifications = false
+
+    private fun updateSearch() {
+        if (settings.ui("net_mode") != "local") return stopSearch()
+        if (multicast == null) multicast = runCatching {
+            (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager).createMulticastLock("ob-search")
+                .apply { setReferenceCounted(false); acquire() }
+        }.getOrNull()
+        val err = NativeBridge.searchStart()
+        if (err.isNotEmpty()) model.note("Can't look for nearby games: $err")
+        // The host's Stop button lives in its notification (Android 13+ asks before showing notifications).
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotifications) {
+            askedNotifications = true // once per run: the request's own dialog pauses and resumes this screen
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+    }
+
+    private fun stopSearch() {
+        NativeBridge.searchStop()
+        multicast?.let { runCatching { it.release() } }
+        multicast = null
+    }
+
+    /** A one-line text prompt (addresses, the host name): 40 characters at most. */
+    private fun askText(title: String, current: String, onDone: (String) -> Unit) {
+        val field = EditText(this).apply {
+            setText(current)
+            setSingleLine()
+            filters = arrayOf(InputFilter.LengthFilter(40))
+            setSelection(text.length)
+        }
+        AlertDialog.Builder(this).setTitle(title).setView(field)
+            .setPositiveButton("Save") { _, _ -> onDone(field.text.toString()) }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun onNav(a: Nav) {
