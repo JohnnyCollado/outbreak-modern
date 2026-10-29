@@ -31,3 +31,16 @@ play-profile.bat
 
 # Johnny's VU1 capture playtest launcher (play.bat + ob_diag PS2X_VU1_CAPTURE into C:/ob/vu1-captures-play)
 play-capture.bat
+
+# Security queue H5 (docs/plans/2026-10-29-security-queue.md): disc images, game executables, memory cards, signing
+# keys, the developer's network overrides and local logs never enter git. Tracked gate evidence logs stay tracked.
+*.iso
+*.ISO
+*.elf
+*.ps2
+*.keystore
+*.jks
+net.env
+*.log
+!gate/evidence/**/*.log
+build/
