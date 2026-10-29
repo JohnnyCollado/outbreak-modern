@@ -1017,6 +1017,17 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   bytes as netcnf checks); NET CONNECTION lists "1. Setting 1" (`C:\ob\frames-netcard-vk\n06-connecting.png`).
 - **Next:** the developer tries Setting 1 on the Odin against the PC server; then the Network page.
 
+### 58. Android had no INTERNET permission: every connection refused
+
+- **Seen (developer, OnePlus):** after Setting 1, "NOW LOADING..." forever (~46 fps); `ob_server` logged nothing.
+- **PCSX2's log on the phone** (`files/pcsx2-gs.log`, entry 17's fix): DHCP answered, `DNS: www01.kddi-mmbb.jp found
+  in hosts`, then four times `Socket: Creating New TCP Connection to 443` / `TCP: Failed to open socket. Error: 1`.
+  errno 1 = EPERM at `socket()` (`C:\ob\pcsx2\pcsx2\DEV9\Sessions\TCP_Session\TCP_Session_Out.cpp:149`): Android refuses
+  sockets to an app without `android.permission.INTERNET`. The manifest had no `uses-permission` at all; DHCP and DNS
+  only worked because the adapter answers them itself.
+- **Fix:** the permission in `native/android/AndroidManifest.xml`. Test first (`ManifestTest`, failed without it),
+  Kotlin 34/34. OnePlus: `android.permission.INTERNET: granted=true`. Installed on the OnePlus and the Odin.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

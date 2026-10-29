@@ -9,6 +9,10 @@
     android:versionCode="1"
     android:versionName="0.1-a1">
 
+    <!-- Online play: PCSX2's network adapter opens real sockets to the server (without this every socket() is
+         refused with EPERM; reports/2026-10-26-online-play.md entry 58). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- raylib's window is OpenGL ES (released when PCSX2's Vulkan GS attaches); the GS needs Vulkan 1.1. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
