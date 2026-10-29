@@ -1,0 +1,207 @@
+From 78055ea188b0273f743aa2c2b1f523b3bee59842 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 20:34:20 -0400
+Subject: [PATCH] IOP: modload GetModuleIdList (16), ReferModuleStatus (17) and
+ SearchModuleByName (22)
+
+Capcom's network setup asks modload whether a module is already loaded before loading it. Unhandled, it loaded the
+whole network stack again on every connection try until the module arena ran out; the arena error then logged
+~300 times a second and the game crawled at 0.4 fps. SearchModuleByName answers by the .iopmod name (else -202),
+GetModuleIdList lists the loaded ids, ReferModuleStatus fills the 96-byte ModuleStatus. The arena error logs on
+the 1st, 2nd, 4th, 8th... time. Test (written first): a module queries a named one; fails without (4/5 suites).
+---
+ ps2xIOP/src/emulator/iop_emulator.cpp | 72 +++++++++++++++++++++++-
+ ps2xIOP/tests/iop_emulator_tests.cpp  | 80 +++++++++++++++++++++++++++
+ 2 files changed, 151 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 7427cfb..bc26683 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -453,6 +453,70 @@ namespace ps2x::iop::detail
+                 setV0(static_cast<uint32_t>(id));
+                 return ImportDisposition::Handled;
+             }
++            if (iequals(call.library, "modload") && (call.ordinal == 16u || call.ordinal == 17u || call.ordinal == 22u))
++            {
++                // Asking about loaded modules (modload 1.6; PCSX2 IopModuleNames.cpp): Capcom's network setup checks
++                // whether a module is already there before loading it, and without an answer it loaded the whole
++                // stack again on every connection try until the module arena ran out.
++                //   22 SearchModuleByName(name): the id of the module whose .iopmod name it is, else -202.
++                //   16 GetModuleIdList(int *ids, int max, int *count): up to max ids, *count = all; returns the number
++                //      written.
++                //   17 ReferModuleStatus(id, ModuleStatus *): name[56], u16 version, u16 flags, id, entry, gp, text
++                //      address, text size, data size, bss size, two reserved words (96 bytes); returns id or -202.
++                constexpr int32_t kUnknownModule = -202;
++                if (call.ordinal == 22u)
++                {
++                    std::string name;
++                    for (uint32_t i = 0; a0 && i < 56u; ++i)
++                    {
++                        const char c = static_cast<char>(memory.read8(a0 + i));
++                        if (c == '\0')
++                            break;
++                        name.push_back(c);
++                    }
++                    int32_t found = kUnknownModule;
++                    for (const auto &[id, module] : modules)
++                        if (!module.iopmodName.empty() && module.iopmodName == name)
++                            found = id;
++                    setV0(static_cast<uint32_t>(found));
++                    return ImportDisposition::Handled;
++                }
++                if (call.ordinal == 16u)
++                {
++                    uint32_t written = 0;
++                    for (const auto &[id, module] : modules)
++                    {
++                        (void)module;
++                        if (a0 && written < a1)
++                            write32(a0 + 4u * written, static_cast<uint32_t>(id));
++                        if (written < a1)
++                            ++written;
++                    }
++                    if (a2)
++                        write32(a2, static_cast<uint32_t>(modules.size()));
++                    setV0(written);
++                    return ImportDisposition::Handled;
++                }
++                const auto found = modules.find(static_cast<int>(a0));
++                if (found == modules.end() || !a1)
++                {
++                    setV0(static_cast<uint32_t>(kUnknownModule));
++                    return ImportDisposition::Handled;
++                }
++                const Module &module = found->second;
++                const std::string &name = module.iopmodName.empty() ? module.name : module.iopmodName;
++                for (uint32_t i = 0; i < 96u; i += 4u)
++                    write32(a1 + i, 0u);
++                for (uint32_t i = 0; i < name.size() && i < 55u; ++i)
++                    memory.write8(a1 + i, static_cast<uint8_t>(name[i]));
++                write32(a1 + 60u, static_cast<uint32_t>(module.id));
++                write32(a1 + 64u, module.entry);
++                write32(a1 + 68u, module.gp);
++                write32(a1 + 72u, module.base);
++                write32(a1 + 76u, module.size);
++                setV0(static_cast<uint32_t>(module.id));
++                return ImportDisposition::Handled;
++            }
+             if (iequals(call.library, "modload") && call.ordinal == 13u)
+             {
+                 checkKelfPathCallback = {a0, cpu.gpr[28]};
+@@ -1060,7 +1124,13 @@ namespace ps2x::iop::detail
+                 if (loaded.error == IopImageLoadError::InvalidElf)
+                     log(LogLevel::Error, "[IOP] rejected invalid/non-MIPS IRX ELF");
+                 else if (loaded.error == IopImageLoadError::ArenaExhausted)
+-                    log(LogLevel::Error, "[IOP] module arena exhausted");
++                {
++                    // A caller retrying in a loop hit this ~300 times a second (entry 59): the 1st, 2nd, 4th, 8th, ...
++                    static uint64_t exhausted = 0;
++                    ++exhausted;
++                    if ((exhausted & (exhausted - 1u)) == 0u)
++                        log(LogLevel::Error, "[IOP] module arena exhausted (" + std::to_string(exhausted) + " times)");
++                }
+                 return -1;
+             }
+             if (!loaded.relocationsComplete)
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index d417334..aeb0022 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -555,6 +555,65 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset + 0x80u, imports, sizeof(imports));
+     }
+ 
++    // A module asking modload about the others, as Capcom's network setup does before loading its stack again
++    // (reports/2026-10-26-online-play.md entry 59): SearchModuleByName("probemod") (22), SearchModuleByName("nothere"),
++    // GetModuleIdList(buf, 16, &count) (16), ReferModuleStatus(found, &status) (17). Returns found & 0xFF |
++    // (missing & 0xFF) << 8 | (count & 0xFF) << 16 | (status.name[0] + refer - found) << 24.
++    void writeModuleQueryIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x0001A000u;
++        constexpr uint32_t tableAddress = loadAddress + 0xB0u;
++        constexpr uint32_t stub16 = tableAddress + 20u;
++        constexpr uint32_t stub17 = stub16 + 8u;
++        constexpr uint32_t stub22 = stub17 + 8u;
++        constexpr uint32_t name1 = loadAddress + 0xF0u;
++        constexpr uint32_t name2 = loadAddress + 0x100u;
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x110u; program.memsz = 0x110u; program.flags = 7u; program.align = 4u;
++        const uint32_t jal16 = 0x0C000000u | ((stub16 >> 2) & 0x03FFFFFFu);
++        const uint32_t jal17 = 0x0C000000u | ((stub17 >> 2) & 0x03FFFFFFu);
++        const uint32_t jal22 = 0x0C000000u | ((stub22 >> 2) & 0x03FFFFFFu);
++        const uint32_t code[] = {
++            0x27BDFF00u, 0xAFBF00F8u, 0xAFB000F4u, 0xAFB100F0u,           // addiu sp,-256; sw ra; sw s0; sw s1
++            0x3C040000u | (name1 >> 16), 0x34840000u | (name1 & 0xFFFFu), // a0 = "probemod" (ori: no sign extension)
++            jal22, 0u, 0x00408025u, 0x305100FFu,                         // s0 = found; s1 = found & 0xFF
++            0x3C040000u | (name2 >> 16), 0x34840000u | (name2 & 0xFFFFu), // a0 = "nothere"
++            jal22, 0u, 0x304200FFu, 0x00021200u, 0x02228825u,            // s1 |= (missing & 0xFF) << 8
++            0x27A40010u, 0x24050010u, 0x27A60050u,                       // a0 = sp+16; a1 = 16; a2 = sp+80
++            jal16, 0u, 0x8FA20050u, 0u,                                  // v0 = count (+ load delay)
++            0x304200FFu, 0x00021400u, 0x02228825u,                       // s1 |= (count & 0xFF) << 16
++            0x02002025u, 0x27A50060u,                                    // a0 = found; a1 = sp+96 (status)
++            jal17, 0u, 0x00501023u, 0x93A30060u, 0u,                     // v0 = refer - found; v1 = name[0]
++            0x00431021u, 0x00021600u, 0x02221025u,                       // v0 = s1 | (name[0] + v0) << 24
++            0x8FB100F0u, 0x8FB000F4u, 0x8FBF00F8u, 0u,                   // lw s1; lw s0; lw ra (+ load delay)
++            0x03E00008u, 0x27BD0100u,                                    // jr ra; addiu sp,256
++        };
++        const uint32_t imports[] = {
++            0x41E00000u, 0u, 0x00000106u,
++            0x6C646F6Du, 0x0064616Fu, // "modload"
++            0x03E00008u, 0x24000010u, // 16 GetModuleIdList
++            0x03E00008u, 0x24000011u, // 17 ReferModuleStatus
++            0x03E00008u, 0x24000016u, // 22 SearchModuleByName
++            0u, 0u,
++        };
++        static_assert(sizeof(code) <= 0xB0u, "code runs into the import table");
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
++        std::memcpy(host.guest.data() + address + codeOffset + 0xB0u, imports, sizeof(imports));
++        std::memcpy(host.guest.data() + address + codeOffset + 0xF0u, "probemod", 9);
++        std::memcpy(host.guest.data() + address + codeOffset + 0x100u, "nothere", 8);
++    }
++
+     // writeMinimalIrx's module with a .iopmod header naming it.
+     void writeNamedMinimalIrx(TestHost &host, uint32_t address, const char *name)
+     {
+@@ -2046,6 +2105,27 @@ int main()
+             return 1;
+     }
+ 
++    {
++        // modload 16/17/22 (entry 59): a module that asks whether another is loaded must find it, or the caller
++        // loads it again on every try until the module arena runs out.
++        TestHost queryHost(0x2000u);
++        IopSubsystem queryIop(queryHost);
++        writeNamedMinimalIrx(queryHost, 0x100u, "probemod");
++        const ModuleLoadResult probe = queryIop.loadModuleBuffer(0x100u);
++        const int32_t probeId = queryIop.findModuleByName("probemod");
++        if (!expect(probe.handled && probeId > 0, "the named module loads")) return 1;
++        writeModuleQueryIrx(queryHost, 0x800u);
++        const ModuleLoadResult query = queryIop.loadModuleBuffer(0x800u);
++        const uint32_t r = static_cast<uint32_t>(query.startResult);
++        if (!expect(query.handled && (r & 0xFFu) == (static_cast<uint32_t>(probeId) & 0xFFu),
++                    "SearchModuleByName must find a loaded module by its .iopmod name")) return 1;
++        if (!expect(((r >> 8) & 0xFFu) == 0x36u, "SearchModuleByName must answer -202 (unknown module) for a missing one"))
++            return 1;
++        if (!expect(((r >> 16) & 0xFFu) >= 2u, "GetModuleIdList must count the loaded modules")) return 1;
++        if (!expect((r >> 24) == static_cast<uint32_t>('p'), "ReferModuleStatus must return the id and the module's name"))
++            return 1;
++    }
++
+     {
+         // External DEV9 device (network adapter): the 0x1000xxxx page at every width and the revision register
+         // (8/16-bit) go to it unsplit, DMA 8 hands it the transfer and waits for its DMA event, and the emulator runs
+-- 
+2.46.2.windows.1
+

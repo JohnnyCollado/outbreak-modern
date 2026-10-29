@@ -1042,6 +1042,17 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   `:17`, `:16` (version 0x106) and the network modules loaded again (`USBSRCH.IRX` -> 20, then -> 33): the stop /
   unload / search calls from the IOP side are not handled, so nothing is freed and the reload fills the arena.
   PS2Recomp fix needed (handle them; also rate-limit that error). Would also happen on Windows after a failed connect.
+- **The three are** GetModuleIdList (16), ReferModuleStatus (17), SearchModuleByName (22) (PCSX2
+  `pcsx2/IopModuleNames.cpp:365-371`): the network setup asks whether a module is loaded before loading it.
+  **PS2Recomp 0102** answers them (by the `.iopmod` name; -202 when missing; ModuleStatus 96 bytes) and logs the arena
+  error on the 1st, 2nd, 4th... time. Test first: a module queries a named one; my test first sign-extended its
+  string address (`lui`/`addiu` with 0xA0F0; fixed with `ori`). Fails without: 4/5 IOP suites; with: 5/5, ps2x
+  575/575. Installed on the OnePlus.
+- **TLS bytes captured (server rebuilt; my first restart ran the old `ob_server.exe`: the program target is
+  `ob_server_exe`, not `ob_server`):** the phone sends an **SSLv2-format ClientHello** (`80 64 01 03 01`, 75 bytes of
+  three-byte cipher specs incl. SSLv2 ones, no session id, 16-byte challenge). The server is built with
+  `MBEDTLS_SSL_SRV_SUPPORT_SSLV2_CLIENT_HELLO` (`mbedtls_config_ob.h:8`), so the format alone is not the cause; not yet
+  compared with a Windows client's hello.
 
 ## Mistakes and corrections
 
