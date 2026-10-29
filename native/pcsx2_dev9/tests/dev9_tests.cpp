@@ -383,6 +383,19 @@ int main()
 	}
 	Check(accepted && server.AcceptPeer() == 0x7F000002u, "with @source 127.0.0.2 the server sees 127.0.0.2");
 
+	// Security queue C4: a loopback destination the game names itself (no remap entry) must not reach this PC's
+	// loopback-only services; only a remap entry may lead there.
+	const uint8_t kLoopback[4] = {127, 0, 0, 1};
+	Send(TcpSynFrame(yiaddr, kLoopback, 40003, server.port));
+	accepted = false;
+	const auto deadline3 = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (!accepted && std::chrono::steady_clock::now() < deadline3)
+	{
+		Receive(&irq, 50);
+		accepted |= server.Pending();
+	}
+	Check(!accepted, "a connection to 127.0.0.1 without a remap entry does not reach a loopback listener");
+
 	std::vector<uint8_t> ram(0x10000, 0);
 	Check(ob_dev9_dma(ram.data(), static_cast<uint32_t>(ram.size()), 0x100, (1u << 16) | 1u, 0x00000201u) ==
 			  OB_DEV9_DMA_IGNORED,

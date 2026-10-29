@@ -1,0 +1,42 @@
+From dff187f3f0840dfacb4cf278f8e6d4c4606772d0 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 08:20:52 -0400
+Subject: [PATCH] DEV9 Sockets: a loopback destination is refused unless a
+ HostRemap entry names it
+
+0003 skipped binding the adapter address for any 127.x destination, so the PS2 could reach this host's
+loopback-only services by naming 127.0.0.1 itself; Windows lets an adapter-bound socket reach loopback anyway, so
+such a connection is now refused (outbreak-modern security queue C4). Remapped loopback (the local test server)
+is unchanged. Test: native/pcsx2_dev9 "a connection to 127.0.0.1 without a remap entry does not reach a loopback
+listener" (30/31 without, 31/31 with).
+---
+ pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+index ad1d8d2..02b3a81 100644
+--- a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
++++ b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+@@ -165,8 +165,18 @@ namespace Sessions
+ 		IP_Address hostIP = destIP;
+ 		IP_Address source{};
+ 		u16 hostPort = destPort;
+-		HostRemap::Apply(&hostIP, &hostPort, &source);
++		// Only a remap entry may lead to loopback: a 127.x destination the PS2 names itself is refused, keeping this
++		// host's loopback-only services out of the game's reach (Windows lets a socket bound to the adapter connect to
++		// loopback, so binding alone does not stop it).
++		const bool remapped = HostRemap::Apply(&hostIP, &hostPort, &source);
+ 		const bool loopback = hostIP.bytes[0] == 127;
++		if (loopback && !remapped)
++		{
++			Console.Warning("DEV9: TCP: refused a connection to loopback that no remap entry names");
++			CloseSocket();
++			RaiseEventConnectionClosed();
++			return false;
++		}
+ 		const IP_Address bindIP = source.integer != 0 ? source : (loopback ? IP_Address{} : adapterIP);
+ 
+ 		int ret;
+-- 
+2.46.2.windows.1
+
