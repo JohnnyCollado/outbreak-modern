@@ -1152,7 +1152,11 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Cause 2 (would have hit the OnePlus next): the wrong interface.** The game was given the connected Wi-Fi
   (`wlan0`, 192.168.11.x), but the Odin is on the hotspot (`wlan2`). **Fix:** the interface whose subnet holds the
   host's address (`interfaceFor`, `localLinks`).
-- Tests first (compile failed without the functions); Kotlin 59/59. Not yet retried on the phones.
+- Tests first (compile failed without the functions); Kotlin 59/59.
+- **Result (2026-10-29 ~00:4x, fixed APK installed on both):** the developer: "That worked perfectly". **The first
+  standalone local play game: the Odin hosting on its own, the OnePlus joining over its hotspot, no PC.** The Odin's
+  host log (the start had rolled out of logcat) ends with both players on its relay: `[relay] 10.98.58.71:
+  connection closed` (OnePlus), `[relay] 10.98.58.174: silent, disconnected` (the Odin's own game).
 
 ## Mistakes and corrections
 
