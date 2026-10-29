@@ -1011,12 +1011,10 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   add `BWNETCNF` once, never touch an existing one). Tests first, ob_ui 140/140. The hook gives slot 1 `BWNETCNF` when
   `PS2X_NETCNF` is set: the runtime's four settings files (patch 0097) + the disc's `NTGUI2/CONF/ENGLISH` icons.
 - **Issue: the disc paths are not set when the card opens** (`ps2_runtime.cpp:1084` opens the card before
-  `main.cpp:292` sets the I/O paths; the first try logged `image '', folder 'C:\ob
-et-logs'`). Fix in the adapter:
+  `main.cpp:292` sets the I/O paths; the first try logged `image '', folder 'C:\ob\net-logs'`). Fix in the adapter:
   the card is prepared at the game's first card access (closed, prepared, reopened), one flag check per access.
 - **Windows (`pcsx2-vk`, card with the game save):** `[netcnf] card: BWNETCNF added (dhcp)`, six files (icon 33,688
-  bytes as netcnf checks); NET CONNECTION lists "1. Setting 1" (`C:\obrames-netcard-vk
-06-connecting.png`).
+  bytes as netcnf checks); NET CONNECTION lists "1. Setting 1" (`C:\ob\frames-netcard-vk\n06-connecting.png`).
 - **Next:** the developer tries Setting 1 on the Odin against the PC server; then the Network page.
 
 ## Mistakes and corrections
