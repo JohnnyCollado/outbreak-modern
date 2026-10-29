@@ -327,10 +327,22 @@ namespace obui
 		{
 			std::vector<uint8_t> d;
 			uint32_t ppc = kPpc, alloc = kAllocOffset, allocEnd = kAllocEnd, root = 0, ifc[32] = {};
-
+			// Security review C1: a page, FAT word or cluster the card's own fields put outside the card marks it bad
+			// (and reads/writes a scratch page instead); nothing is saved from a bad card.
+			bool bad = false;
+			std::vector<uint8_t> scratch = std::vector<uint8_t>(kRaw, 0);
 			uint32_t ClusterBytes() const { return kPage * ppc; }
 			uint32_t Epc() const { return ClusterBytes() / 4; }
-			uint8_t* PageData(uint64_t page) { return d.data() + page * kRaw; }
+			uint8_t* PageData(uint64_t page)
+			{
+				if (page >= kPages || (page + 1) * kRaw > d.size())
+				{
+					bad = true;
+					std::fill(scratch.begin(), scratch.end(), uint8_t(0));
+					return scratch.data();
+				}
+				return d.data() + page * kRaw;
+			}
 
 			// mcd.py raw_page: data padded to 512, ECC of each 128 bytes, four 0xFF.
 			void PutPage(uint64_t page, const uint8_t* data, size_t size)
@@ -354,6 +366,12 @@ namespace obui
 			uint8_t* FatWord(uint32_t c)
 			{
 				const uint32_t epc = Epc(), perPage = kPage / 4;
+				if (c >= allocEnd || c / epc / epc >= 32)
+				{
+					bad = true;
+					std::fill(scratch.begin(), scratch.end(), uint8_t(0));
+					return scratch.data();
+				}
 				const uint32_t indirect = ifc[c / epc / epc];
 				const uint32_t fatCluster = Le32(PageData(uint64_t(indirect) * ppc + (c / epc % epc) / perPage) + ((c / epc % epc) % perPage) * 4);
 				return PageData(uint64_t(fatCluster) * ppc + (c % epc) / perPage) + (c % perPage) * 4;
@@ -375,7 +393,7 @@ namespace obui
 					const uint32_t next = Fat(out.back());
 					if (next == kFatEnd)
 						return true;
-					if (!(next & kFatChain))
+					if (!(next & kFatChain) || (next & ~kFatChain) >= allocEnd)
 						return false;
 					out.push_back(next & ~kFatChain);
 				}
@@ -417,7 +435,8 @@ namespace obui
 			// Entry `name` in the folder at `first` with `count` entries: its index (or -1).
 			int64_t Find(uint32_t first, uint32_t count, const std::string& name)
 			{
-				for (uint32_t i = 0; i < count; i++)
+				count = std::min(count, allocEnd * ppc); // a directory can't hold more entries than the card has pages
+				for (uint32_t i = 0; i < count && !bad; i++)
 				{
 					uint64_t page = 0;
 					if (!EntryPage(first, i, page))
@@ -446,7 +465,7 @@ namespace obui
 			w.root = Le32(sb + 0x3C);
 			for (int i = 0; i < 32; i++)
 				w.ifc[i] = Le32(sb + 0x50 + 4 * i);
-			if (w.ppc != kPpc || w.allocEnd > kClusters)
+			if (w.ppc != kPpc || w.allocEnd > kClusters || w.alloc > kClusters - w.allocEnd || w.root >= w.allocEnd)
 			{
 				if (err)
 					*err = "This card's format isn't recognised.";
@@ -611,6 +630,8 @@ namespace obui
 		std::vector<uint8_t> dot(w.PageData(rootDotPage), w.PageData(rootDotPage) + kPage);
 		PutLe32(dot.data() + 4, rootLen + 1);
 		w.PutPage(rootDotPage, dot.data(), dot.size());
+		if (w.bad)
+			return fail("This card's layout is damaged; it was not changed.");
 		return SaveWhole(ps2File, w.d, err);
 	}
 
@@ -655,6 +676,6 @@ namespace obui
 				const uint8_t* src = w.PageData(uint64_t(w.alloc + c) * w.ppc + p);
 				out.insert(out.end(), src, src + std::min<size_t>(kPage, length - out.size()));
 			}
-		return out.size() == length;
+		return out.size() == length && !w.bad;
 	}
 } // namespace obui

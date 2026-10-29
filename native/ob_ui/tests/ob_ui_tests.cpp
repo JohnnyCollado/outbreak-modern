@@ -550,6 +550,47 @@ static void EnsureNetworkFolderTests()
 	WriteBytes(junk, std::vector<uint8_t>(8650752u, 0x5A));
 	err.clear();
 	Check(obui::ensureNetworkFolder(junk, files, &err) == obui::NetworkFolder::Failed && !err.empty(), "net folder: an unknown card fails, untouched");
+
+	// Security review C1: a formatted card whose layout fields or FAT point outside the card is refused untouched
+	// (they indexed memory unchecked: a downloaded or corrupt card could write outside the buffer).
+	const std::vector<uint8_t> good = ReadAllBytes(card);
+	auto put32 = [](std::vector<uint8_t>& b, size_t at, uint32_t v) { std::memcpy(&b[at], &v, 4); };
+	struct Corruption { const char* what; size_t at; uint32_t value; };
+	const Corruption bad[] = {
+		{"alloc offset past the card", 0x34, 0x00FFFFFFu},
+		{"root cluster past the allocatable area", 0x3C, 0x00FFFFFFu},
+		{"indirect FAT cluster past the card", 0x50, 0x00FFFFFFu},
+	};
+	for (const Corruption& c : bad)
+	{
+		std::vector<uint8_t> b = good;
+		put32(b, c.at, c.value);
+		const fs::path f = dir / "corrupt.ps2";
+		WriteBytes(f, b);
+		err.clear();
+		const obui::NetworkFolder r = obui::ensureNetworkFolder(f, files, &err);
+		Check((r == obui::NetworkFolder::Failed || r == obui::NetworkFolder::AlreadyThere) && ReadAllBytes(f) == b,
+			(std::string("net folder: a card with its ") + c.what + " is refused, untouched").c_str());
+		std::vector<uint8_t> out;
+		(void)obui::readCardFile(f, "BWNETCNF", "ifc000.dat", out); // must not crash
+	}
+	{
+		// A FAT whose first data cluster chains far past the card (0x80FFFFFF): the walk must stop, not index off.
+		std::vector<uint8_t> b = ReadAllBytes(game);
+		const uint32_t ifc0 = 0, ppc = 2;
+		uint32_t indirect = 0, fatCluster = 0;
+		std::memcpy(&indirect, &b[0x50], 4);
+		std::memcpy(&fatCluster, &b[size_t(indirect) * ppc * 528], 4);
+		(void)ifc0;
+		put32(b, size_t(fatCluster) * ppc * 528, 0x80FFFFFFu); // FAT entry of cluster 0
+		const fs::path f = dir / "badfat.ps2";
+		WriteBytes(f, b);
+		err.clear();
+		(void)obui::ensureNetworkFolder(f, files, &err); // any result, no crash
+		std::vector<uint8_t> out;
+		(void)obui::readCardFile(f, "BISLPM-65428NETBIO", "save", out);
+		Check(true, "net folder: a FAT chaining past the card does not crash");
+	}
 }
 
 static void CardTests()
