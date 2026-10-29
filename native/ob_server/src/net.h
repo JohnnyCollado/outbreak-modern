@@ -27,6 +27,13 @@ namespace ob::server::net
 	long sendSome(Socket s, const uint8_t* data, size_t size);
 	long receiveSome(Socket s, uint8_t* data, size_t size);
 
+	// UDP for nearby-game discovery (beacon.h): a non-blocking socket bound to address:port ("" = all, 0 = any free
+	// port), broadcast allowed when asked. sendUdp: true when the datagram went out. receiveUdp: its size, 0 when
+	// nothing is waiting, -1 on an error; *fromAddress = the sender as the network delivered it.
+	Socket openUdp(const std::string& address, uint16_t port, bool broadcast, uint16_t* boundPort, std::string* error);
+	bool sendUdp(Socket s, const std::string& address, uint16_t port, const uint8_t* data, size_t size);
+	long receiveUdp(Socket s, uint8_t* data, size_t size, std::string* fromAddress);
+
 	struct PollEntry
 	{
 		Socket socket;

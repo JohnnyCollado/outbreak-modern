@@ -166,6 +166,71 @@ namespace ob::server::net
 		return wouldBlock() ? 0 : -1;
 	}
 
+	Socket openUdp(const std::string& address, uint16_t port, bool broadcast, uint16_t* boundPort, std::string* error)
+	{
+		startup();
+		const auto s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+		if (static_cast<Socket>(s) == kInvalid)
+		{
+			*error = "udp socket";
+			return kInvalid;
+		}
+		int one = 1;
+		setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
+		if (broadcast)
+			setsockopt(s, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&one), sizeof(one));
+		sockaddr_in a{};
+		a.sin_family = AF_INET;
+		a.sin_port = htons(port);
+		a.sin_addr.s_addr = htonl(INADDR_ANY);
+		if ((!address.empty() && inet_pton(AF_INET, address.c_str(), &a.sin_addr) != 1) ||
+			bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0)
+		{
+			*error = "udp bind " + (address.empty() ? std::string("*") : address) + ":" + std::to_string(port);
+			closeSocket(static_cast<Socket>(s));
+			return kInvalid;
+		}
+		socklen_t length = sizeof(a);
+		getsockname(s, reinterpret_cast<sockaddr*>(&a), &length);
+		if (boundPort)
+			*boundPort = ntohs(a.sin_port);
+#ifdef _WIN32
+		u_long on = 1;
+		ioctlsocket(s, FIONBIO, &on);
+#else
+		fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+#endif
+		return static_cast<Socket>(s);
+	}
+
+	bool sendUdp(Socket s, const std::string& address, uint16_t port, const uint8_t* data, size_t size)
+	{
+		sockaddr_in a{};
+		a.sin_family = AF_INET;
+		a.sin_port = htons(port);
+		if (inet_pton(AF_INET, address.c_str(), &a.sin_addr) != 1)
+			return false;
+		return sendto(static_cast<decltype(socket(0, 0, 0))>(s), reinterpret_cast<const char*>(data),
+				   static_cast<int>(size), 0, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == static_cast<int>(size);
+	}
+
+	long receiveUdp(Socket s, uint8_t* data, size_t size, std::string* fromAddress)
+	{
+		sockaddr_in a{};
+		socklen_t length = sizeof(a);
+		const auto n = recvfrom(static_cast<decltype(socket(0, 0, 0))>(s), reinterpret_cast<char*>(data),
+			static_cast<int>(size), 0, reinterpret_cast<sockaddr*>(&a), &length);
+		if (n < 0)
+			return wouldBlock() ? 0 : -1;
+		if (fromAddress)
+		{
+			char text[INET_ADDRSTRLEN] = {};
+			inet_ntop(AF_INET, &a.sin_addr, text, sizeof(text));
+			*fromAddress = text;
+		}
+		return static_cast<long>(n);
+	}
+
 	bool poll(std::vector<PollEntry>& entries, int timeoutMs)
 	{
 #ifdef _WIN32
