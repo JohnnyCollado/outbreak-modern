@@ -39,6 +39,7 @@ void TestRelayLimits(); // relay_tests.cpp
 void TestLobbyLoginDeadline(); // lobby_tests.cpp
 void TestSessionsByAddress(); // relay_tests.cpp
 void TestLobbySessionsByAddress(); // lobby_tests.cpp
+void TestStoppedServicesAnswerSafely(); // lobby_tests.cpp
 void TestGuard();       // guard_tests.cpp
 void TestBeacon();      // beacon_tests.cpp
 void TestLocalHost();   // host_tests.cpp
@@ -519,6 +520,7 @@ int main()
 	TestLobbyLoginDeadline();
 	TestSessionsByAddress();
 	TestLobbySessionsByAddress();
+	TestStoppedServicesAnswerSafely();
 	TestGuard();
 	TestBeacon();
 	TestLocalHost();

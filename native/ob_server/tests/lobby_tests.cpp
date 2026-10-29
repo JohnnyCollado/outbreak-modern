@@ -7,6 +7,7 @@
 #include "net.h"
 #include "ob_server.h"
 #include "protocol.h"
+#include "relay.h"
 
 #include <chrono>
 #include <cstdio>
@@ -330,4 +331,23 @@ void TestLobbySessionsByAddress()
 	Check(thief.connect(lobby.port()) && thief.login(other, "THIEF").empty(), "lobby by address: another device's session is refused");
 	Check(owner.connect(lobby.port()) && owner.login(mine, "OWNER").size() == 6, "lobby by address: its own session logs in");
 	lobby.stop();
+}
+
+// Security queue S9: the host's UI may ask a lobby or relay that is not running (never started, or stopped).
+void TestStoppedServicesAnswerSafely()
+{
+	LobbyServer lobby;
+	RelayServer relay;
+	lobby.removeAddress("192.168.0.9");
+	relay.removeAddress("192.168.0.9");
+	Check(lobby.connectedAddresses().empty() && relay.connectedAddresses().empty(), "stopped: never started, no crash");
+	Accounts accounts;
+	std::string error;
+	lobby.start(accounts, LobbyConfig{}, "127.0.0.1", 0, &error);
+	relay.start(accounts, RelayConfig{}, "127.0.0.1", 0, &error);
+	lobby.stop();
+	relay.stop();
+	lobby.removeAddress("192.168.0.9");
+	relay.removeAddress("192.168.0.9");
+	Check(lobby.connectedAddresses().empty() && relay.connectedAddresses().empty(), "stopped: after stop, no crash");
 }

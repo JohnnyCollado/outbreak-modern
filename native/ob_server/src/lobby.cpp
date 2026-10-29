@@ -1061,12 +1061,16 @@ namespace ob::server
 
 	std::vector<std::string> LobbyServer::connectedAddresses() const
 	{
+		if (!m_impl) // not running (security queue S9)
+			return {};
 		std::lock_guard<std::mutex> lock(m_impl->sharedMutex);
 		return m_impl->sharedAddresses;
 	}
 
 	void LobbyServer::removeAddress(const std::string& address)
 	{
+		if (!m_impl)
+			return;
 		m_impl->guard.remove(address);
 		std::lock_guard<std::mutex> lock(m_impl->sharedMutex);
 		m_impl->pendingRemove.push_back(address);

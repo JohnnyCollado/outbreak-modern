@@ -274,6 +274,8 @@ namespace ob::server
 
 	void RelayServer::removeAddress(const std::string& address)
 	{
+		if (!m_impl) // not running (security queue S9)
+			return;
 		m_impl->guard.remove(address);
 		std::lock_guard<std::mutex> lock(m_impl->removeMutex);
 		m_impl->pendingRemove.push_back(address);
