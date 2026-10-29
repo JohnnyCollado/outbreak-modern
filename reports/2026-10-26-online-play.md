@@ -1100,8 +1100,9 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Crossplay game:** `[relay] 192.168.0.76 / .221 / .63: ... in game 2`: Windows, the Odin and the OnePlus in **one
   three-player game** through the relay (developer: "LFGOOOOOOO"). The developer closed Windows afterwards (not a
   crash: `gs thread stopped (window destroyed)`). Verdict: "There is a bit of lag between each, but it works great."
-  Lag not measured yet; a candidate to check first: small relay packets held back by Nagle's algorithm (no
-  TCP_NODELAY in ob_server or PCSX2's TCP session code: not verified, see next line).
+  Lag not measured yet. Not Nagle's algorithm: both ob_server (`native/ob_server/src/net.cpp:40`) and PCSX2's TCP
+  session (`DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp:208`) set TCP_NODELAY. Next: measure the relay's
+  forwarding time and the adapter's polling interval.
 
 ## Mistakes and corrections
 
