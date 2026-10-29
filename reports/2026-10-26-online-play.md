@@ -1089,6 +1089,10 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Fix (`tls_server.cpp`):** the body is read by its `Content-Length` before the reply; after close_notify the
   server reads what the client still sends (up to ~2 s) before closing. Test first (a POST whose body comes 100 ms
   later): both checks failed, the page itself was lost on loopback too (99/101); with the fix 101/101.
+- **Result (2026-10-28, ~21:1x):** the Odin's POST read whole (`request (382 bytes, read 47)`: 335 headers + 47 body),
+  then `[lobby] 192.168.0.221: game version '0311172218'`; the OnePlus the same. **Both phones in the lobby at once**
+  against the PC's ob_server over the LAN (developer: "We live baby"). Next: a room hosted on one phone, joined from
+  the other, through the relay.
 
 ## Mistakes and corrections
 
