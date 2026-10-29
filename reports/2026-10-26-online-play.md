@@ -1211,7 +1211,9 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   Unverified that thread churn is what the game did here (the test reproduces the mechanism).
 - **Fix: PS2Recomp 0105:** DeleteThread and ExitDeleteThread move the thread's stacks to a free list used first.
   Test first: 64 threads that run a callback and delete themselves exhaust the pool without (576/577), 577/577 with.
-- Installed on the OnePlus. Not yet retried.
+- **Result (2026-10-29, OnePlus):** the developer: "I fully get in" — **Android reaches the obsrv fan server's lobby**
+  (DNS fix, entry 65, plus 0105). No games were listed at the time (early morning US time; whether anyone was
+  online is unknown).
 
 ## Mistakes and corrections
 
