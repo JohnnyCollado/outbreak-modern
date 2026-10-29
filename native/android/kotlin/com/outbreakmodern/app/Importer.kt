@@ -12,7 +12,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
-import java.util.zip.ZipInputStream
 import kotlinx.coroutines.currentCoroutineContext
 
 /** What an import is for (plan decision A13). */
@@ -99,21 +98,12 @@ class Importer(private val context: Context, private val settings: Settings, pri
             needSpace(size * 2)
             val staging = freshStaging(kind)
             val base = File(staging, safe(name))
-            var done = 0L
-            var count = 0
-            context.contentResolver.openInputStream(zip)?.use { raw ->
-                ZipInputStream(raw.buffered()).use { z ->
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val e = z.nextEntry ?: break
-                        val rel = e.name
-                        if (e.isDirectory || rel.contains("..") || rel.startsWith("/") || rel.contains(':')) continue
-                        if (kind == ImportKind.MODS && !rel.lowercase().endsWith(".pnach")) continue
-                        val out = File(base, rel)
-                        out.parentFile?.mkdirs()
-                        out.outputStream().use { o -> done = copy(z, o, done) { onTick(Tick(it, size, count, 0)) } }
-                        count++
-                    }
+            // A byte budget (security queue C6): a zip that unpacks past it stops; run() removes the staging folder.
+            val budget = zipBudget(size, Installed.freeBytes(settings.filesDir))
+            val job = currentCoroutineContext()
+            val count = context.contentResolver.openInputStream(zip)?.use { raw ->
+                extractZip(raw, base, budget, onBytes = { job.ensureActive(); onTick(Tick(it, size, 0, 0)) }) { rel ->
+                    kind != ImportKind.MODS || rel.lowercase().endsWith(".pnach")
                 }
             } ?: error("Could not read the zip")
             if (count == 0) error(if (kind == ImportKind.MODS) "No .pnach files in that zip." else "That zip is empty.")
