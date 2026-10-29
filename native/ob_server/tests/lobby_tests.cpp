@@ -289,3 +289,29 @@ void TestServerChain()
 		"the lobby accepts the session the login page handed out");
 	server.stop();
 }
+
+// Security review S4 (reports/2026-10-29-security-review.md): a connection that never logs in is closed after the
+// login deadline, so silent connections cannot hold the 16 slots.
+void TestLobbyLoginDeadline()
+{
+	Accounts accounts;
+	LobbyServer lobby;
+	LobbyConfig config;
+	config.loginSeconds = 1;
+	std::string error;
+	Check(lobby.start(accounts, config, "127.0.0.1", 0, &error), "login deadline: the lobby starts");
+	const net::Socket silent = net::connectTcp("127.0.0.1", lobby.port());
+	bool closed = false;
+	uint8_t buffer[256];
+	for (int i = 0; i < 150 && !closed; i++) // up to 3 s
+	{
+		const long n = net::receiveSome(silent, buffer, sizeof(buffer));
+		if (n < 0)
+			closed = true;
+		else if (n == 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	Check(closed, "login deadline: a connection that never logs in is closed");
+	net::closeSocket(silent);
+	lobby.stop();
+}

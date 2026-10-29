@@ -91,6 +91,7 @@ namespace ob::server
 			int area = 0, room = 0, slot = 0, playerNumber = 0;
 			bool host = false;
 			uint32_t game = 0;
+			Clock::time_point connectedAt = Clock::now(), closingSince{};
 		};
 
 		void putHandle(std::vector<uint8_t>& out, const Handle& h)
@@ -149,6 +150,13 @@ namespace ob::server
 			if (config.trace)
 				trace(c, "->", p);
 			const std::vector<uint8_t> bytes = encode(p);
+			if (c.out.size() + bytes.size() > config.maxOutBytes)
+			{
+				c.out.clear();
+				log(c.address + ": not reading (pending output over the cap), disconnected");
+				dropClient(c);
+				return;
+			}
 			c.out.insert(c.out.end(), bytes.begin(), bytes.end());
 		}
 		// --trace: one line per packet in or out (kind, command, packet id, size, first bytes).
@@ -365,6 +373,8 @@ namespace ob::server
 
 	void LobbyServer::Impl::dropClient(Client& c)
 	{
+		if (!c.closing)
+			c.closingSince = Clock::now();
 		if (c.loggedIn)
 		{
 			leaveSlot(c);
@@ -962,6 +972,8 @@ namespace ob::server
 					const net::PollEntry& e = entries[i++];
 					if (e.failed)
 						s.dropClient(c);
+					if (c.closing && e.readable)
+						net::receiveSome(c.socket, buffer.data(), buffer.size()); // discarded: no busy poll on unread input
 					if (!c.closing && e.readable)
 					{
 						const long n = net::receiveSome(c.socket, buffer.data(), buffer.size());
@@ -978,6 +990,14 @@ namespace ob::server
 					}
 				}
 				s.tick();
+				const auto loginDeadline = Clock::now() - std::chrono::seconds(s.config.loginSeconds);
+				for (Client& c : s.clients)
+					if (!c.loggedIn && !c.closing && c.connectedAt < loginDeadline)
+					{
+						s.log(c.address + ": no login in time, disconnected");
+						s.dropClient(c);
+						c.out.clear();
+					}
 				for (Client& c : s.clients)
 					while (!c.out.empty())
 					{
@@ -1002,8 +1022,9 @@ namespace ob::server
 							}
 					s.pendingRemove.clear();
 				}
+				const auto graceOver = Clock::now() - std::chrono::milliseconds(s.config.closeGraceMs);
 				for (auto it = s.clients.begin(); it != s.clients.end();)
-					if (it->closing && it->out.empty())
+					if (it->closing && (it->out.empty() || it->closingSince < graceOver))
 					{
 						net::closeSocket(it->socket);
 						s.guard.release(it->address);

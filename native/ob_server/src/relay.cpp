@@ -31,6 +31,7 @@ namespace ob::server
 			bool loggedIn = false, closing = false;
 			Clock::time_point heard = Clock::now();
 			uint32_t framesSent = 0; // since the last stats line
+			Clock::time_point connectedAt = Clock::now();
 		};
 
 		Accounts* accounts = nullptr;
@@ -85,7 +86,14 @@ namespace ob::server
 			owner->m_frames++;
 			for (Client& o : clients)
 				if (&o != &from && o.loggedIn && !o.closing && o.game == from.game)
+				{
+					if (o.out.size() + frame.size() > config.maxOutBytes)
+					{
+						drop(o, "not reading (pending output over the cap), disconnected");
+						continue;
+					}
 					o.out.insert(o.out.end(), frame.begin(), frame.end());
+				}
 		}
 	};
 
@@ -196,6 +204,9 @@ namespace ob::server
 						c.framesSent = 0;
 					}
 				}
+				for (Impl::Client& c : s.clients)
+					if (!c.loggedIn && !c.closing && now - c.connectedAt > std::chrono::seconds(s.config.loginSeconds))
+						s.drop(c, "no login in time, disconnected");
 				for (Impl::Client& c : s.clients)
 					if (!c.closing && now - c.heard > std::chrono::seconds(s.config.idleSeconds))
 						s.drop(c, "silent, disconnected");

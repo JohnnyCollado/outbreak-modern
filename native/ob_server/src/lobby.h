@@ -28,6 +28,12 @@ namespace ob::server
 		std::function<void(const std::string&)> log;        // one line per notable event; may be empty
 		bool trace = false;                                 // also one line per packet in and out (ob_server --trace)
 		GuardLimits limits;                                 // local addresses only; per service and per address (guard.h)
+		// Security review S2-S4 (reports/2026-10-29-security-review.md): a connection that has not logged in by then is
+		// closed; a client whose pending output passes the cap (it stopped reading) is dropped; a dropped client is
+		// removed once its last answer is sent, or after closeGraceMs.
+		int loginSeconds = 15;
+		size_t maxOutBytes = 256 * 1024;
+		int closeGraceMs = 2000;
 	};
 
 	class LobbyServer

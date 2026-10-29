@@ -27,6 +27,10 @@ namespace ob::server
 		// Latency trace: > 0 = every statsMs, a line per logged-in player with the frames it sent and its
 		// connection's round trip (reports/2026-10-26-online-play.md entry 64). 0 = off.
 		int statsMs = 0;
+		// Security review S2/S4 (reports/2026-10-29-security-review.md): a connection that has not logged in by then is
+		// closed; a player whose pending output passes the cap (it stopped reading) is dropped.
+		int loginSeconds = 15;
+		size_t maxOutBytes = 256 * 1024;
 	};
 
 	class RelayServer

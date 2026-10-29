@@ -167,3 +167,52 @@ void TestRelayStats()
 	Check(found, "stats: a line per player with its frames and the round trip");
 	relay.stop();
 }
+
+// Security review S2 and S4 (reports/2026-10-29-security-review.md): a connection that never logs in is closed after
+// the login deadline, and a player who stops reading is dropped once its pending output passes the cap, instead of
+// growing the host's memory without limit.
+void TestRelayLimits()
+{
+	Accounts accounts;
+	const uint32_t sA = accounts.mintSession("A"), sB = accounts.mintSession("B");
+	accounts.setGameNumber("A", 2);
+	accounts.setGameNumber("B", 2);
+	std::mutex logMutex;
+	std::vector<std::string> lines;
+	RelayServer relay;
+	RelayConfig config;
+	config.loginSeconds = 1;
+	config.maxOutBytes = 64 * 1024;
+	config.log = [&](const std::string& l) {
+		std::lock_guard<std::mutex> lock(logMutex);
+		lines.push_back(l);
+	};
+	std::string error;
+	Check(relay.start(accounts, config, "127.0.0.1", 0, &error), "limits: the relay starts");
+
+	RelayClient silent;
+	Check(silent.connect(relay.port()), "limits: a client connects and never logs in");
+	silent.pump(3000);
+	Check(silent.closed, "limits: it is closed after the login deadline");
+
+	RelayClient a, b;
+	Check(a.connect(relay.port()) && b.connect(relay.port()) && a.login(sA) && b.login(sB), "limits: two players log in");
+	for (int i = 0; i < 40 && relay.logins() < 2; i++)
+		std::this_thread::sleep_for(std::chrono::milliseconds(25));
+	std::vector<uint8_t> frames;
+	for (int i = 0; i < 64; i++) // 64 frames of 255 bytes per send: 16 KB
+	{
+		frames.push_back(255);
+		frames.insert(frames.end(), 254, static_cast<uint8_t>(i));
+	}
+	bool dropped = false;
+	for (int i = 0; i < 1024 && !dropped; i++) // up to 16 MB that B never reads
+	{
+		a.sendBytes(frames);
+		std::lock_guard<std::mutex> lock(logMutex);
+		for (const std::string& l : lines)
+			dropped |= l.find("not reading") != std::string::npos;
+	}
+	Check(dropped, "limits: a player who stops reading is dropped at the output cap");
+	relay.stop();
+}
