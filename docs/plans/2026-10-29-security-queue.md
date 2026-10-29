@@ -114,7 +114,7 @@ Order: R1 (high) -> C2 (medium) -> S10, S7, C4, C5, C6, S8, S9 (low) -> hygiene 
 
 | Item | State | Commit | Test first -> green |
 |---|---|---|---|
-| R1 | **Prepared and verified; waiting for the developer.** `tools/repo/purge-history.sh` (built-in filter-branch, no install) built a clean mirror in `C:\ob\purge\outbreak-modern.git` (41 -> 15.6 MB); `purge-check.sh` all ok: no game_files/.exe, no personal address, every branch's tree and commit count unchanged. Publishing = force push + every checkout re-clones: needs the go-ahead, run again right before | - | check failed on the real repo, passes on the copy |
+| R1 | **Done (2026-10-29).** Clean history rebuilt from the final state and checked (`purge-check.sh` all ok); the developer force-pushed `main` (`0ca6343`) and `netplay-research` (`d1131e2`) with leases; a fresh clone from GitHub has no game files, no .exe, no personal address (15.9 MB, was 41 MB). Local branches and both worktrees moved to the clean twins (identical files, same commit counts). Left: the old objects in local storage (the developer runs the clean-up: reflog expire + gc) | - | check failed on the old repo, passes on GitHub and locally |
 | C2 | Done: drivers internal only (migration on Android 11+), net.env only in debuggable builds. Driver load still to see on the Odin | `f1d64a5` | Kotlin unresolved -> 64/64 |
 | S10 | Done: only the host's own subnet (and loopback) may join | `7501ece` | build failed -> 200/200 |
 | S7 | Done: quiet hosts age out of the 32-entry list | `3455a31` | 201/202 -> 202/202 |
