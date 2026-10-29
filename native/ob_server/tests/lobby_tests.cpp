@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -350,4 +351,27 @@ void TestStoppedServicesAnswerSafely()
 	lobby.removeAddress("192.168.0.9");
 	relay.removeAddress("192.168.0.9");
 	Check(lobby.connectedAddresses().empty() && relay.connectedAddresses().empty(), "stopped: after stop, no crash");
+}
+
+// Security queue S8: a client sending endless unknown questions writes at most 10 log lines, not one each.
+void TestLobbyLogFlood()
+{
+	Accounts accounts;
+	const uint32_t session = accounts.mintSession("127.0.0.1");
+	std::mutex logMutex;
+	int unhandled = 0;
+	LobbyServer lobby;
+	LobbyConfig config;
+	config.log = [&](const std::string& line) {
+		std::lock_guard<std::mutex> lock(logMutex);
+		unhandled += line.find("unhandled question") != std::string::npos;
+	};
+	std::string error;
+	Check(lobby.start(accounts, config, "127.0.0.1", 0, &error), "log flood: the lobby starts");
+	GameClient c;
+	Check(c.connect(lobby.port()) && c.login(session, "FLOOD").size() == 6, "log flood: a client logs in");
+	for (int i = 0; i < 50; i++)
+		c.ask(0x6FF0, {});
+	lobby.stop();
+	Check(unhandled <= 10, "log flood: at most 10 lines for 50 unknown questions");
 }

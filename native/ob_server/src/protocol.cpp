@@ -138,6 +138,47 @@ namespace ob::server
 		return text;
 	}
 
+	std::string logSafe(const std::string& text, size_t max)
+	{
+		std::string out;
+		for (unsigned char c : text)
+		{
+			if (out.size() >= max)
+				return out.substr(0, max) + "...";
+			if (c >= 0x20 && c < 0x7F)
+				out.push_back(static_cast<char>(c));
+			else
+			{
+				char hex[8];
+				std::snprintf(hex, sizeof(hex), "\\x%02X", c);
+				out += hex;
+			}
+		}
+		return out.size() > max ? out.substr(0, max) + "..." : out;
+	}
+
+	std::string maskSession(uint32_t session)
+	{
+		const std::string digits = std::to_string(session);
+		return "****" + digits.substr(digits.size() > 4 ? digits.size() - 4 : 0);
+	}
+
+	std::string maskSessionsIn(const std::string& line)
+	{
+		std::string out = line;
+		const std::string key = "sessid=";
+		for (size_t at = out.find(key); at != std::string::npos; at = out.find(key, at + key.size()))
+		{
+			const size_t start = at + key.size();
+			size_t end = start;
+			while (end < out.size() && out[end] >= '0' && out[end] <= '9')
+				end++;
+			if (end - start > 4)
+				out.replace(start, end - start - 4, "****");
+		}
+		return out;
+	}
+
 	void putString(std::vector<uint8_t>& out, const std::string& bytes)
 	{
 		putU16(out, static_cast<uint16_t>(bytes.size()));

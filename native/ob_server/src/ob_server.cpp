@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "ob_server.h"
+#include "protocol.h"
 
 namespace ob::server
 {
@@ -37,7 +38,7 @@ namespace ob::server
 		web.mintSession = [this, log = config.log](const std::string& address) {
 			const uint32_t session = m_accounts.mintSession(address);
 			if (log)
-				log("[web] " + address + ": quick login, session " + std::to_string(session));
+				log("[web] " + address + ": quick login, session " + maskSession(session));
 			return session;
 		};
 		if (!m_web.start(web, config.bindAddress, config.webPort, error))

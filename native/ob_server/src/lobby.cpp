@@ -96,6 +96,7 @@ namespace ob::server
 			bool host = false;
 			uint32_t game = 0;
 			Clock::time_point connectedAt = Clock::now(), closingSince{};
+			int unhandledLogged = 0;
 		};
 
 		void putHandle(std::vector<uint8_t>& out, const Handle& h)
@@ -447,7 +448,7 @@ namespace ob::server
 					version.assign(p.begin() + 7, p.begin() + 7 + static_cast<std::ptrdiff_t>(length - 2));
 					scramble(reinterpret_cast<uint8_t*>(version.data()), version.size(), key);
 				}
-				log(c.address + ": game version '" + version + "'");
+				log(c.address + ": game version '" + logSafe(version) + "'");
 				std::vector<uint8_t> list;
 				const std::vector<Handle> handles = accounts->handles(c.account);
 				list.push_back(static_cast<uint8_t>(handles.size()));
@@ -879,11 +880,14 @@ namespace ob::server
 			dropClient(c);
 			break;
 		default:
-			log(c.address + ": unhandled question 0x" + [&] {
-				char t[8];
-				std::snprintf(t, sizeof(t), "%04X", q.cmd);
-				return std::string(t);
-			}() + " (" + std::to_string(p.size()) + " bytes): answered empty");
+			// At most 10 lines per connection (security queue S8: a client could flood the log).
+			if (++c.unhandledLogged <= 10)
+				log(c.address + ": unhandled question 0x" + [&] {
+					char t[8];
+					std::snprintf(t, sizeof(t), "%04X", q.cmd);
+					return std::string(t);
+				}() + " (" + std::to_string(p.size()) + " bytes): answered empty" +
+					(c.unhandledLogged == 10 ? " (further ones not logged)" : ""));
 			answer(c, q);
 			break;
 		}

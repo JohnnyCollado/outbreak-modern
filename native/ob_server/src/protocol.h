@@ -98,6 +98,14 @@ namespace ob::server
 	std::optional<std::string> readScrambledString(const std::vector<uint8_t>& payload, size_t offset, uint8_t pidLow,
 		size_t* next = nullptr, size_t maxLength = SIZE_MAX);
 
+	// Security queue S8: text from a peer as it may appear in a log line: printable ASCII kept, other bytes as \xNN,
+	// cut at max characters with "...".
+	std::string logSafe(const std::string& text, size_t max = 64);
+	// A session number as logs show it: "****" and its last four digits.
+	std::string maskSession(uint32_t session);
+	// A request line with every "sessid=<digits>" masked as maskSession.
+	std::string maskSessionsIn(const std::string& line);
+
 	// A string as the server sends it: [length:2][bytes], no terminator.
 	void putString(std::vector<uint8_t>& out, const std::string& bytes);
 	void putU16(std::vector<uint8_t>& out, uint16_t value);

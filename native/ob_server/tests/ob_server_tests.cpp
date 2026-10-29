@@ -40,6 +40,7 @@ void TestLobbyLoginDeadline(); // lobby_tests.cpp
 void TestSessionsByAddress(); // relay_tests.cpp
 void TestLobbySessionsByAddress(); // lobby_tests.cpp
 void TestStoppedServicesAnswerSafely(); // lobby_tests.cpp
+void TestLobbyLogFlood(); // lobby_tests.cpp
 void TestGuard();       // guard_tests.cpp
 void TestBeacon();      // beacon_tests.cpp
 void TestLocalHost();   // host_tests.cpp
@@ -154,6 +155,14 @@ static void TestScramble()
 	Check(readScrambledString(payload, 2, 0x10, nullptr, 6).has_value() && !readScrambledString(payload, 2, 0x10, nullptr, 5),
 		"a string over its cap is refused, one at the cap is read");
 	Check(encode(MakePacket(0x6702, 1, std::vector<uint8_t>(70000, 'x'))).empty(), "a payload over 65,535 bytes is not encoded");
+	// Security queue S8: text from a peer is made safe before it reaches a log line, and session numbers are masked.
+	Check(logSafe("abc 1.2") == "abc 1.2", "logSafe: printable text unchanged");
+	Check(logSafe(std::string("a\nb\0c\xFF", 6)) == "a\\x0Ab\\x00c\\xFF", "logSafe: control and high bytes shown as escapes");
+	Check(logSafe(std::string(200, 'x')) == std::string(64, 'x') + "...", "logSafe: cut at 64 characters");
+	Check(maskSession(12345678u) == "****5678", "maskSession: last four digits only");
+	Check(maskSessionsIn("GET /startsession.php?sessid=12345678&x=1 HTTP/1.0") ==
+			  "GET /startsession.php?sessid=****5678&x=1 HTTP/1.0",
+		"maskSessionsIn: the sessid in a request line is masked");
 	Check(encode(MakePacket(0x6702, 1, std::vector<uint8_t>(65535, 'x'))).size() == 12 + 65535, "65,535 bytes still encode");
 }
 
@@ -521,6 +530,7 @@ int main()
 	TestSessionsByAddress();
 	TestLobbySessionsByAddress();
 	TestStoppedServicesAnswerSafely();
+	TestLobbyLogFlood();
 	TestGuard();
 	TestBeacon();
 	TestLocalHost();

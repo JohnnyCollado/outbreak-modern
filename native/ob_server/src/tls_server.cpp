@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cctype>
 #include "tls_server.h"
+#include "protocol.h"
 
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/dhm.h"
@@ -371,7 +372,7 @@ namespace ob::server
 					if (first.size() > 160)
 						first.resize(160);
 					m_config.log("[web] " + address + ": request (" + std::to_string(request.size()) + " bytes, read " +
-								 std::to_string(rc) + "): " + (first.empty() ? "<none>" : first));
+								 std::to_string(rc) + "): " + (first.empty() ? "<none>" : logSafe(maskSessionsIn(first), 160)));
 				}
 				if (!path.empty())
 				{
