@@ -110,11 +110,27 @@ Order: R1 (high) -> C2 (medium) -> S10, S7, C4, C5, C6, S8, S9 (low) -> hygiene 
 | H6 | AGPL text missing for `native/ob_server` | Add `native/ob_server/COPYING.AGPL` (the official text) and a source note in the app's About/Network page | file present; needs the official text from a trusted local copy (no download: research safety rule) |
 | H7 | `tools/net/up-without.sh` deletes and resets outside the repo | Left as is (by design, guarded); documented | none |
 
-## Progress
+## Progress (2026-10-29)
 
-| Item | State |
-|---|---|
-| R1 | planned; needs go-ahead for git-filter-repo install and the force push |
-| C2 | planned |
-| S10, S7, C4, C5, C6, S8, S9 | planned |
-| H1-H7 | planned |
+| Item | State | Commit | Test first -> green |
+|---|---|---|---|
+| R1 | **Prepared and verified; waiting for the developer.** `tools/repo/purge-history.sh` (built-in filter-branch, no install) built a clean mirror in `C:\ob\purge\outbreak-modern.git` (41 -> 15.6 MB); `purge-check.sh` all ok: no game_files/.exe, no personal address, every branch's tree and commit count unchanged. Publishing = force push + every checkout re-clones: needs the go-ahead, run again right before | - | check failed on the real repo, passes on the copy |
+| C2 | Done: drivers internal only (migration on Android 11+), net.env only in debuggable builds. Driver load still to see on the Odin | `f1d64a5` | Kotlin unresolved -> 64/64 |
+| S10 | Done: only the host's own subnet (and loopback) may join | `7501ece` | build failed -> 200/200 |
+| S7 | Done: quiet hosts age out of the 32-entry list | `3455a31` | 201/202 -> 202/202 |
+| S9 | Done: lobby/relay safe when not running | `016aad1` | crash -> 204/204 |
+| S8 | Done: logSafe, 10 unknown-question lines per client, masked sessions | `2199f77` | build failed -> 212/212 |
+| C4 | Done: PCSX2 0005 refuses unmapped loopback connections | `e2f199f` | 30/31 -> 31/31 |
+| C5 | Done: javaSafeText before every NewStringUTF of file text | `24c2c8b` | helper missing -> ob_ui 182/182 |
+| C6 | Done: extractZip with a byte budget and canonical-path check | `b736a20` | unresolved -> Kotlin 69/69 |
+| H1 | Done: the build accepts only the pinned mbedTLS commit | `5a8a8f2` | check missing -> 3/3 |
+| H2 | Already in place: `ob.sh` checks the PCSX2 clone and its base | - | `check-pins.sh` ok |
+| H3 | Done: Gradle distribution SHA-256 pinned (two gradle.org sources agree); checked on the next fresh download | `43720fa` | build still runs |
+| H4 | Done: no Tailscale address or personal mail address tracked; scripts take the address as OLD_EMAIL | `dc6d204` | `personal-data-check.sh` failed -> ok |
+| H5 | Done: .gitignore covers discs, ELFs, cards, keys, net.env, logs, build dirs | `178f0ab` | 9 fails -> all ok |
+| H6 | **Waiting for the developer:** the official AGPL text (no local copy; no downloads by rule) as `native/ob_server/COPYING.AGPL`; the source link for players once the source's public home is decided | - | - |
+| H7 | No change (by design), documented | - | - |
+
+Full suite after the queue: ps2x 577/577, iop 5/5, gs_cache 45/45, ob_diag 24/24, pcsx2_vu 3/3, pcsx2_gs 92/92, spu2 7/7,
+ipu 22/22, sio2 20/20, ob_server 212/212, dev9 31/31, ob_ui 182/182, Kotlin 69/69; Windows and Android builds 0
+warnings. Device checks (Odin): driver load from internal storage, local play and fan server with all fixes.

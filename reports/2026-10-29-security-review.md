@@ -77,4 +77,6 @@ network value validated in Kotlin and C++. PCSX2's DHCP/DNS servers open no host
 
 Full suite after the fixes: ps2x 577/577, iop 5/5, gs_cache 45/45, ob_diag 24/24, pcsx2_vu 3/3, pcsx2_gs 92/92, spu2 7/7,
 ipu 22/22, sio2 20/20, ob_server 194/194, dev9 30/30, ob_ui 173/173, Kotlin 61/61. Not yet run on a device.
-Still open: R1 (history rewrite, needs a force push), S7-S10, C2, C4-C6, the hygiene items.
+Then the queue (`docs/plans/2026-10-29-security-queue.md`): S7-S10, C2, C4-C6 and H1-H5 fixed with tests first; R1
+prepared and verified on a copy (publishing needs a force push: the developer's call); H6 needs the official AGPL text
+from the developer.
