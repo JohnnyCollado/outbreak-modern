@@ -390,6 +390,38 @@ int main()
 
 	ob_dev9_close();
 	Check(ob_dev9_read8(kRev) == 0, "closed again: DEV9 answers 0");
+
+	// A fan server's DNS (PS2X_NET_DNS; report entry 65): the game is told that DNS server, as PCSX2 players set
+	// DNS1 to it, and asks it for the login and DNAS names itself.
+	ob_dev9_config fan{nullptr, nullptr, 0, kLog, nullptr, 0};
+	const uint8_t kFanDns[4] = {203, 0, 113, 53};
+	std::memcpy(fan.dns1, kFanDns, 4);
+	if (ob_dev9_open(&fan))
+	{
+		s_rxBd = s_txBd = 0;
+		for (uint32_t i = 0; i < 64; i++)
+			ob_dev9_write16(kBdRx + i * 8, kBdRxEmpty);
+		ob_dev9_write16(kIntrMask, kIntrRxEnd | kIntrTxEnd);
+		Send(UdpFrame(any, all, 68, 67, dhcp));
+		irq = false;
+		const std::vector<uint8_t> fanOffer = Receive(&irq);
+		uint8_t fanDns[4] = {};
+		if (IsUdpFrom(fanOffer, 67) && fanOffer.size() >= 42 + 240)
+		{
+			const uint8_t* d = &fanOffer[42];
+			for (size_t o = 240; 42 + o + 1 < fanOffer.size() && d[o] != 255;)
+			{
+				if (d[o] == 0) { o++; continue; }
+				if (d[o] == 6 && d[o + 1] >= 4)
+					std::memcpy(fanDns, d + o + 2, 4);
+				o += 2 + d[o + 1];
+			}
+		}
+		Check(std::memcmp(fanDns, kFanDns, 4) == 0, "dns1 set: the DHCP offer names that DNS server");
+		ob_dev9_close();
+	}
+	else
+		Check(false, "dns1 set: the adapter opens");
 	std::printf("pcsx2_dev9: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

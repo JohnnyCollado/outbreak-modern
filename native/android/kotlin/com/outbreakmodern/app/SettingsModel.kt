@@ -602,15 +602,16 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
             "local" -> if (!inGame) localRows(rows)
             "server" -> {
                 val server = settings.ui("net_server")
-                rows += SRow.Action("net_server", "Server address", server.ifEmpty { "Enter…" }, enabled = !inGame) {
-                    askText?.invoke("Fan server address (IPv4)", server) { typed ->
+                rows += SRow.Action("net_server", "Server DNS address", server.ifEmpty { "Enter…" }, enabled = !inGame) {
+                    askText?.invoke("Fan server's DNS address (as in its PCSX2 guide)", server) { typed ->
                         val v = typed.trim()
                         if (isIpv4(v)) { settings.setUi("net_server", v); note("Saved: server address") }
                         else note("Not an address: use four numbers like 203.0.113.9")
                     }
                 }
-                rows += SRow.Info("net-server-hint", "A fan server is run by the community on a PC. Android can only join a " +
-                    "fan server, not host one. Everyone on it plays together: Outbreak Modern, PCSX2 and PS2.", Tone.MUTED)
+                rows += SRow.Info("net-server-hint", "Enter the DNS address the fan server's guide gives for PCSX2 " +
+                    "(\"DNS1\"). Android can only join a fan server, not host one. Everyone on it plays together: " +
+                    "Outbreak Modern, PCSX2 and PS2.", Tone.MUTED)
             }
             else -> rows += SRow.Info("net-off-hint", "The game plays offline.", Tone.MUTED)
         }

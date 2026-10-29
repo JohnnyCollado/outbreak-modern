@@ -1180,6 +1180,26 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
     (`PS2X_NET_TRACE`), never the network ones (`gameEnv`). Kotlin 60/60.
 - Next: install, `PS2X_NET_TRACE=1` in both phones' net.env, one round with the Odin hosting, read both logs.
 
+### 65. Fan server broken on Android: the address players are given is the fan server's DNS, not its login
+
+- **Seen (developer, 2026-10-29):** "Fan Server connection is broken on android"; the address used: 208.72.237.31.
+  Reproduced on the OnePlus (Fan server, that address): the game's "communication error" screen.
+- **Adapter log (`files/pcsx2-gs.log`):** the game opens 443 at the address, sends its 102-byte hello, gets 7 bytes,
+  the connection closes, again and again. Replayed from the OnePlus (`toybox nc`): the answer is
+  `15 03 01 00 02 02 46`, a fatal TLS **protocol_version** alert: that 443 refuses TLS 1.0. (From the PC the probe
+  went through Avast's HTTPS scanning, so its results were discarded; the certificate behind it named obsrv.org.)
+- **Cause:** 208.72.237.31 is obsrv's **DNS server** (a Steam guide gives it as PCSX2's DNS1). Asked directly, it
+  answers `www01.kddi-mmbb.jp` -> 208.72.237.15 and `gate1.jp.dnas.playstation.org` -> 153.121.44.150. The Fan
+  server option sent both names to the address itself, so the login went to a modern web server.
+- **Fix:** the fan server box is the game's DNS server, as PCSX2 players set it: `PS2X_NET_DNS` makes the adapter's
+  DHCP hand that DNS out (PCSX2's DNS1 "manual", `dev9_side.cpp`); manual connection settings get it as DNS 1 with
+  their own DNS 1 second (`fanServerEnv` in `NetPlay.kt` and `core/net_choice.cpp`). The pages say "Server DNS
+  address". Tests first: pcsx2_dev9 (the DHCP offer names the DNS; failed to build without), ob_ui 167/169 -> 169/169,
+  Kotlin 61/61.
+- Sources: Steam guide "Biohazard: Outbreak File#1 and File#2 Online 2023"
+  (https://steamcommunity.com/sharedfiles/filedetails/?id=2358718919, DNS1 208.72.237.31); Dread Central 2021
+  (an older DNS, 173.233.94.154). Not yet tried on the phone.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

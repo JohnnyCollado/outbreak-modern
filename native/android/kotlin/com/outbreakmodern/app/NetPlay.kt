@@ -98,6 +98,23 @@ fun gameNetEnv(server: String, webPort: Int, iface: String, connection: NetConne
 }
 
 /**
+ * A fan server, given by its DNS address as PCSX2 players set DNS1 (obsrv: 208.72.237.31; reports/
+ * 2026-10-26-online-play.md entry 65): the game asks that DNS for its login and DNAS names, which live elsewhere.
+ * DHCP hands it out (PS2X_NET_DNS); manual settings get it as DNS 1, their own DNS 1 second. Null if unsound.
+ */
+fun fanServerEnv(dns: String, iface: String, connection: NetConnection): List<Pair<String, String>>? {
+    if (!isIpv4(dns)) return null
+    if (iface.isNotEmpty() && !INTERFACE_NAME.matches(iface)) return null
+    val settings = if (connection.dhcp) connection else connection.copy(dns1 = dns, dns2 = connection.dns1)
+    val netcnf = netcnfValue(settings) ?: return null
+    val env = mutableListOf("PS2X_DEV9" to "pcsx2")
+    if (iface.isNotEmpty()) env += "PS2X_NET_IF" to iface
+    env += "PS2X_NET_DNS" to dns
+    env += "PS2X_NETCNF" to netcnf
+    return env
+}
+
+/**
  * The game's environment from the Network page's saved choices ([ui] reads outbreak.ini's [ui] keys, "" when unset):
  * net_mode off | local (net_join = "address:webPort" of a host on the local network) | server (net_server = a fan
  * server's IPv4, login on 443); net_connection dhcp | manual (net_address, net_netmask, net_gateway, net_dns1,
@@ -117,7 +134,7 @@ fun chosenNetEnv(ui: (String) -> String, iface: String): List<Pair<String, Strin
                 if (!isLocalIpv4(address) || web == null) null else gameNetEnv(address, web, iface, connection)
             }
         }
-        "server" -> gameNetEnv(ui("net_server"), 443, iface, connection)
+        "server" -> fanServerEnv(ui("net_server"), iface, connection)
         else -> null
     }
     return env ?: emptyList()
@@ -151,7 +168,7 @@ fun joinTarget(ui: (String) -> String): String = when (ui("net_mode")) {
 }
 
 /** The settings that decide where the game connects: with online play on, only the Network page sets them. */
-private val NETWORK_KEYS = setOf("PS2X_DEV9", "PS2X_NET_IF", "PS2X_NET_HOSTS", "PS2X_NET_REMAP", "PS2X_NETCNF")
+private val NETWORK_KEYS = setOf("PS2X_DEV9", "PS2X_NET_IF", "PS2X_NET_HOSTS", "PS2X_NET_REMAP", "PS2X_NETCNF", "PS2X_NET_DNS")
 
 /**
  * The game's environment: with online play on, the Network page's settings plus the developer's net.env lines that do

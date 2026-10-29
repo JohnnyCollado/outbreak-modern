@@ -770,8 +770,14 @@ static void NetTests()
 	Check(obui::chosenNetEnv(ui({{"net_mode", "local"}, {"net_join", "203.0.113.9:443"}}), "").empty() &&
 			  obui::chosenNetEnv(ui({{"net_mode", "local"}, {"net_join", "192.168.0.50"}}), "").empty(),
 		"net: local play joins local addresses with a port only");
-	Check(obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "203.0.113.9"}}), "") == server,
-		"net: a fan server on the standard port");
+	const Env fanDns = {{"PS2X_DEV9", "pcsx2"}, {"PS2X_NET_DNS", "208.72.237.31"}, {"PS2X_NETCNF", "dhcp"}};
+	Check(obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "208.72.237.31"}}), "") == fanDns,
+		"net: a fan server is the game's DNS server (report entry 65)");
+	const obui::EnvList fanManual = obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "208.72.237.31"},
+		{"net_connection", "manual"}, {"net_address", "192.168.0.80"}, {"net_netmask", "255.255.255.0"},
+		{"net_gateway", "192.168.0.1"}, {"net_dns1", "192.168.0.1"}}), "");
+	Check(!fanManual.empty() && fanManual.back().second == "static:192.168.0.80,255.255.255.0,192.168.0.1,208.72.237.31,192.168.0.1",
+		"net: manual settings with a fan server put its DNS first");
 	Check(obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "203.0.113.9"}, {"net_connection", "manual"},
 								  {"net_address", "192.168.0.80"}}),
 			  "")

@@ -131,6 +131,30 @@ namespace obui
 		return env;
 	}
 
+	EnvList fanServerEnv(const std::string& dns, const std::string& iface, const NetConnection& c)
+	{
+		if (!isIpv4(dns))
+			return {};
+		static const std::regex kInterface("[A-Za-z0-9_.]{1,15}");
+		if (!iface.empty() && !std::regex_match(iface, kInterface))
+			return {};
+		NetConnection settings = c;
+		if (!c.dhcp)
+		{
+			settings.dns1 = dns;
+			settings.dns2 = c.dns1;
+		}
+		const std::string netcnf = netcnfValue(settings);
+		if (netcnf.empty())
+			return {};
+		EnvList env = {{"PS2X_DEV9", "pcsx2"}};
+		if (!iface.empty())
+			env.emplace_back("PS2X_NET_IF", iface);
+		env.emplace_back("PS2X_NET_DNS", dns);
+		env.emplace_back("PS2X_NETCNF", netcnf);
+		return env;
+	}
+
 	EnvList chosenNetEnv(const std::function<std::string(const std::string&)>& ui, const std::string& iface)
 	{
 		NetConnection c;
@@ -150,7 +174,7 @@ namespace obui
 			return gameNetEnv(address, port, iface, c);
 		}
 		if (mode == "server")
-			return gameNetEnv(ui("net_server"), 443, iface, c);
+			return fanServerEnv(ui("net_server"), iface, c);
 		return {};
 	}
 } // namespace obui

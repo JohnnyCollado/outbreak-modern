@@ -109,6 +109,11 @@ bool ob_dev9_open(const ob_dev9_config* config)
 	d.AutoGateway = true;
 	d.ModeDNS1 = Pcsx2Config::DEV9Options::DnsMode::Internal;
 	d.ModeDNS2 = Pcsx2Config::DEV9Options::DnsMode::Internal;
+	if (config && (config->dns1[0] | config->dns1[1] | config->dns1[2] | config->dns1[3]))
+	{
+		d.ModeDNS1 = Pcsx2Config::DEV9Options::DnsMode::Manual;
+		std::memcpy(d.DNS1, config->dns1, 4);
+	}
 	d.HddEnable = false;
 	d.EthHosts.clear();
 	for (uint32_t i = 0; config && i < config->host_count; i++)

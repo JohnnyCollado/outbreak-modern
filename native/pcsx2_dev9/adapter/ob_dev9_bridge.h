@@ -45,6 +45,9 @@ struct ob_dev9_config
 	const char* log_path;
 	const ob_dev9_remap* remaps;
 	uint32_t remap_count;
+	// The game's DNS server (DHCP hands it out as DNS1, as PCSX2's "DNS1: manual"): a fan server's DNS, which answers
+	// the login and DNAS names itself (PS2X_NET_DNS). 0.0.0.0 = the internal DNS (the hosts list, then this device's).
+	uint8_t dns1[4];
 };
 
 // Starts DEV9 with the Ethernet adapter in Sockets mode, its DHCP on and its internal DNS (no HDD). false: the adapter

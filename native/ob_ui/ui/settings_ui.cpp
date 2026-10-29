@@ -1599,14 +1599,15 @@ namespace
 		if (m == 2)
 		{
 			std::string server = Ui("net_server");
-			if (TextField("Server address", server, s->launcher))
+			if (TextField("Server DNS address", server, s->launcher))
 			{
 				if (obui::isIpv4(server))
 					SetUi("net_server", server, "server address");
 				else
 					Note("Not an address: use four numbers like 203.0.113.9");
 			}
-			Hint("A fan server is run by the community on a PC. Everyone on it plays together: Outbreak Modern, PCSX2 and PS2.");
+			Hint("Enter the DNS address the fan server's guide gives for PCSX2 (\"DNS1\"). Everyone on it plays together: "
+				 "Outbreak Modern, PCSX2 and PS2.");
 		}
 		EndCard();
 

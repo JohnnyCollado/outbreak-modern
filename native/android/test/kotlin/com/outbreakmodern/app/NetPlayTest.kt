@@ -148,16 +148,28 @@ class NetPlayTest {
         assertEquals(emptyList<Pair<String, String>>(), chosenNetEnv(ui("net_mode" to "local"), "wlan0"))
     }
 
+    // A fan server is given by its DNS address, as PCSX2 players set DNS1 (obsrv: 208.72.237.31 answers the login
+    // name with .15 and DNAS with another server; report entry 65). The game asks that DNS for its names itself.
     @Test
-    fun aFanServerIsJoinedOnTheStandardPort() {
-        assertEquals(gameNetEnv("203.0.113.9", 443, "wlan0", NetConnection.DHCP),
-            chosenNetEnv(ui("net_mode" to "server", "net_server" to "203.0.113.9"), "wlan0"))
+    fun aFanServerIsTheGamesDnsServer() {
+        assertEquals(
+            listOf("PS2X_DEV9" to "pcsx2", "PS2X_NET_IF" to "wlan0", "PS2X_NET_DNS" to "208.72.237.31", "PS2X_NETCNF" to "dhcp"),
+            chosenNetEnv(ui("net_mode" to "server", "net_server" to "208.72.237.31"), "wlan0"))
         assertEquals(emptyList<Pair<String, String>>(), chosenNetEnv(ui("net_mode" to "server", "net_server" to "bad;x"), "wlan0"))
     }
 
     @Test
-    fun manualConnectionIsPassedOn() {
-        val env = chosenNetEnv(ui("net_mode" to "server", "net_server" to "203.0.113.9", "net_connection" to "manual",
+    fun manualConnectionIsPassedOnWithTheFanDns() {
+        val env = chosenNetEnv(ui("net_mode" to "server", "net_server" to "208.72.237.31", "net_connection" to "manual",
+            "net_address" to "192.168.0.80", "net_netmask" to "255.255.255.0", "net_gateway" to "192.168.0.1",
+            "net_dns1" to "192.168.0.1"), "wlan0")
+        assertEquals("static:192.168.0.80,255.255.255.0,192.168.0.1,208.72.237.31,192.168.0.1",
+            env.first { it.first == "PS2X_NETCNF" }.second)
+    }
+
+    @Test
+    fun manualSettingsForLocalPlayKeepTheirOwnDns() {
+        val env = chosenNetEnv(ui("net_mode" to "local", "net_join" to "192.168.0.50:443", "net_connection" to "manual",
             "net_address" to "192.168.0.80", "net_netmask" to "255.255.255.0", "net_gateway" to "192.168.0.1",
             "net_dns1" to "192.168.0.1"), "wlan0")
         assertEquals("static:192.168.0.80,255.255.255.0,192.168.0.1,192.168.0.1", env.first { it.first == "PS2X_NETCNF" }.second)

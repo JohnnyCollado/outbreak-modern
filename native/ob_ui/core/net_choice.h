@@ -34,8 +34,12 @@ namespace obui
 	// the game's server names to it, 443 remapped to webPort when it differs, the interface ("" = automatic) and the
 	// game's settings. Empty if anything is unsound.
 	EnvList gameNetEnv(const std::string& server, int webPort, const std::string& iface, const NetConnection& c);
+	// A fan server, given by its DNS address as PCSX2 players set DNS1 (report entry 65): the game asks that DNS for
+	// its login and DNAS names. DHCP hands it out (PS2X_NET_DNS); manual settings get it as DNS 1, their own DNS 1
+	// second. Empty if anything is unsound.
+	EnvList fanServerEnv(const std::string& dns, const std::string& iface, const NetConnection& c);
 	// From the saved choices (ui reads outbreak.ini's [ui] keys, "" when unset): net_mode off | local (net_join =
-	// "address:webPort", local addresses only) | server (net_server, login on 443); net_connection dhcp | manual
+	// "address:webPort", local addresses only) | server (net_server = the fan server's DNS); net_connection dhcp | manual
 	// (net_address, net_netmask, net_gateway, net_dns1, net_dns2). Empty = the game plays offline.
 	EnvList chosenNetEnv(const std::function<std::string(const std::string&)>& ui, const std::string& iface);
 } // namespace obui

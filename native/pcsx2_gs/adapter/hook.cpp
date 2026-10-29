@@ -368,8 +368,22 @@ ps2x::iop::Dev9Device* ps2CreateExternalDev9(const std::string& interfaceName, c
 		std::fprintf(stderr, "[dev9] PS2X_NET_REMAP: %u entr%s ignored (from[:port]=to[:port])\n", bad, bad == 1 ? "y" : "ies");
 	// The adapter's messages (DNS host-list answers, socket errors) -> pcsx2-dev9.log in the working dir, as PCSX2's
 	// own log goes to pcsx2-gs.log (pcsx2_side.cpp) when that one is open first.
-	const ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size()), "pcsx2-dev9.log",
-		remaps, remapCount};
+	ob_dev9_config config{interfaceName.c_str(), list.data(), static_cast<uint32_t>(list.size()), "pcsx2-dev9.log",
+		remaps, remapCount, {}};
+	// A fan server's DNS, PS2X_NET_DNS=a.b.c.d (the game's DNS1, as PCSX2 players set it; report entry 65).
+	if (const char* dns = std::getenv("PS2X_NET_DNS"); dns && *dns)
+	{
+		unsigned a = 0, b = 0, c = 0, d = 0;
+		char tail = 0;
+		if (std::sscanf(dns, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4 && (a | b | c | d) <= 255)
+		{
+			const uint8_t bytes[4] = {uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
+			std::memcpy(config.dns1, bytes, 4);
+			std::fprintf(stderr, "[dev9] DNS server %s (PS2X_NET_DNS)\n", dns);
+		}
+		else
+			std::fprintf(stderr, "[dev9] PS2X_NET_DNS=%s ignored (a.b.c.d)\n", dns);
+	}
 	if (!ob_dev9_open(&config))
 	{
 		ob_dev9_close();
