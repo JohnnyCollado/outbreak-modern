@@ -1123,8 +1123,19 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   the host's 18443 (Android apps cannot listen below 1024), the Wi-Fi interface passed in (closes entry 53's
   "Auto interface" workaround). Tests first: 13 failed to compile before `NetPlay.kt`, the 2 manifest checks failed
   before the service; now Kotlin 55/55, 0 warnings.
-- **Not yet tried on a device.** Next: Windows host and Network page (step 4), then the three-device test with the
-  Odin hosting (step 5, needs the developer's go-ahead to install).
+- **Windows (step 4):** the menu's Network page (Off / Local play / Fan server; Nearby games with Join; Host a game
+  with players, Remove, Play on this host, Stop; Connection DHCP or Manual with text boxes), the host on this PC's
+  address (`findLocalNetwork`: an adapter that is up with a gateway; login on 443, 18443 if 443 is taken), and the
+  choices applied at Play (`core/net_choice.*`, the same rules and cases as `NetPlay.kt`; a scripted run's own
+  `PS2X_DEV9` wins). Tests first: `ob_ui` failed to build without `net_choice.h`; now 168/168; ob_server 167/167.
+- **Issue: the menu included PCSX2's `Host.h` instead of the server's `host.h`** (Windows file names ignore case;
+  `'ob': is not a class or namespace name`). Fix: included by path.
+- **Issue: the menu's keys (Backspace = back, arrows) would fight a text box.** Fix: while a box has the keyboard
+  the menu ignores the keyboard, and the editing keys go to the box.
+- Full suite (2026-10-28): ps2x 576/576, iop 5/5, gs_cache 45/45, ob_diag 24/24, pcsx2_vu 3/3, pcsx2_gs 92/92, spu2
+  7/7, ipu 22/22, sio2 20/20, ob_server 167/167, dev9 28/28, ob_ui 168/168.
+- **Not yet tried on a device or on screen.** Next: step 5, the three-device test with the Odin hosting (needs the
+  developer's go-ahead to install and launch).
 
 ## Mistakes and corrections
 

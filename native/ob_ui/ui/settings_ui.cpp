@@ -20,7 +20,11 @@
 #include "memory_card.h"
 #include "widescreen.h"
 #include "menu_trigger.h"
+#include "net_choice.h"
 #include "touch_pad.h"
+#if !defined(__ANDROID__)
+#include "../../ob_server/src/host.h" // the built-in host and nearby search (by path: PCSX2 has a Host.h); Windows only
+#endif
 
 #include "ob_gs_bridge.h"
 
@@ -42,6 +46,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -121,14 +126,16 @@ namespace
 		Mods,
 		Cards,
 		Audio,
+		Network,
 		Driver,
 		Advanced,
 		Count,
 	};
-	const char* const kPageNames[] = {"Game", "Controls", "Camera", "Display", "Mods", "Memory cards", "Audio",
+	const char* const kPageNames[] = {"Game", "Controls", "Camera", "Display", "Mods", "Memory cards", "Audio", "Network",
 		"Graphics driver", "Advanced"};
-	// Segoe Fluent Icons / Segoe MDL2 Assets: Home, Game, Camera, TVMonitor, Puzzle, SDCard, Volume, Component, Setting.
-	const unsigned kPageIcons[] = {0xE80F, 0xE7FC, 0xE722, 0xE7F4, 0xEA86, 0xE7F1, 0xE767, 0xE950, 0xE713};
+	// Segoe Fluent Icons / Segoe MDL2 Assets: Home, Game, Camera, TVMonitor, Puzzle, SDCard, Volume, Wifi, Component,
+	// Setting.
+	const unsigned kPageIcons[] = {0xE80F, 0xE7FC, 0xE722, 0xE7F4, 0xEA86, 0xE7F1, 0xE767, 0xE701, 0xE950, 0xE713};
 
 	// input.ini rows: key, label, keyboard default, gamepad default (PCSX2's mappings, native/input.ini.example).
 	struct BindRow
@@ -482,7 +489,9 @@ namespace
 		const bool fast = std::max(ax, ay) > 0.9f;
 		const bool padDir[4] = {in.pad.up || s->stick[0], in.pad.down || s->stick[1], in.pad.left || s->stick[2],
 			in.pad.right || s->stick[3]};
-		const bool keyDir[4] = {in.keys2.up, in.keys2.down, in.keys2.left, in.keys2.right};
+		// A text box being typed in owns the keyboard: its arrows and Backspace are not the menu's.
+		const ObUiInput::Held keys = ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput ? ObUiInput::Held{} : in.keys2;
+		const bool keyDir[4] = {keys.up, keys.down, keys.left, keys.right};
 		bool ev[4];
 		for (int d = 0; d < 4; d++)
 			ev[d] = StepRepeat(d, padDir[d] || keyDir[d], fast && s->stick[d]);
@@ -491,18 +500,18 @@ namespace
 		s->evLeft = ev[2];
 		s->evRight = ev[3];
 		auto edge = [](bool now, bool before) { return now && !before; };
-		s->evA = edge(in.pad.a, s->prevPad.a) || edge(in.keys2.a, s->prevKeys.a);
-		s->evB = edge(in.pad.b, s->prevPad.b) || edge(in.keys2.b, s->prevKeys.b);
+		s->evA = edge(in.pad.a, s->prevPad.a) || edge(keys.a, s->prevKeys.a);
+		s->evB = edge(in.pad.b, s->prevPad.b) || edge(keys.b, s->prevKeys.b);
 		s->evY = edge(in.pad.y, s->prevPad.y);
-		s->evL1 = edge(in.pad.l1, s->prevPad.l1) || edge(in.keys2.l1, s->prevKeys.l1);
-		s->evR1 = edge(in.pad.r1, s->prevPad.r1) || edge(in.keys2.r1, s->prevKeys.r1);
+		s->evL1 = edge(in.pad.l1, s->prevPad.l1) || edge(keys.l1, s->prevKeys.l1);
+		s->evR1 = edge(in.pad.r1, s->prevPad.r1) || edge(keys.r1, s->prevKeys.r1);
 		s->evStart = edge(in.pad.start, s->prevPad.start);
 		// Input mode: the last device used. Controller or keyboard shows the focus and the prompts; the mouse hides them.
 		const bool padUsed = (padDir[0] || padDir[1] || padDir[2] || padDir[3]) || edge(in.pad.a, s->prevPad.a) ||
 			edge(in.pad.b, s->prevPad.b) || edge(in.pad.y, s->prevPad.y) || edge(in.pad.l1, s->prevPad.l1) ||
 			edge(in.pad.r1, s->prevPad.r1) || edge(in.pad.start, s->prevPad.start);
-		const bool keysUsed = (keyDir[0] || keyDir[1] || keyDir[2] || keyDir[3]) || edge(in.keys2.a, s->prevKeys.a) ||
-			edge(in.keys2.b, s->prevKeys.b) || edge(in.keys2.l1, s->prevKeys.l1) || edge(in.keys2.r1, s->prevKeys.r1);
+		const bool keysUsed = (keyDir[0] || keyDir[1] || keyDir[2] || keyDir[3]) || edge(keys.a, s->prevKeys.a) ||
+			edge(keys.b, s->prevKeys.b) || edge(keys.l1, s->prevKeys.l1) || edge(keys.r1, s->prevKeys.r1);
 		if (padUsed)
 			s->mode = Mode::Pad;
 		else if (keysUsed)
@@ -510,7 +519,7 @@ namespace
 		else if (in.mouseMoved)
 			s->mode = Mode::Mouse;
 		s->prevPad = in.pad;
-		s->prevKeys = in.keys2;
+		s->prevKeys = keys;
 	}
 	bool Steering() { return s->mode != Mode::Mouse; }
 	void ClearNav() { s->evUp = s->evDown = s->evLeft = s->evRight = s->evA = s->evB = s->evY = s->evL1 = s->evR1 = s->evStart = false; }
@@ -1480,6 +1489,258 @@ namespace
 		EndCard();
 	}
 
+	// A one-line text box: click it (or A on its row) and type; Enter saves. While it has the keyboard the menu's own
+	// keys (Backspace = back, arrows) are the box's (ReadNav). True when Enter saved; value is then the new text.
+	bool TextField(const char* label, std::string& value, bool enabled = true, size_t maxLen = 40)
+	{
+		Row r = BeginRow(enabled);
+		RowLabel(label);
+		char buf[64] = {};
+		std::snprintf(buf, sizeof(buf), "%s", value.c_str());
+		ImGui::BeginDisabled(!enabled);
+		if (RowA(r))
+			ImGui::SetKeyboardFocusHere();
+		ImGui::SetNextItemWidth(ControlWidth());
+		const bool saved = ImGui::InputText("##t", buf, std::min(sizeof(buf), maxLen + 1), ImGuiInputTextFlags_EnterReturnsTrue);
+		ImGui::EndDisabled();
+		EndRow(r);
+		if (!enabled || !saved)
+			return false;
+		value = buf;
+		return true;
+	}
+
+	// ---- Network (docs/plans/2026-10-28-local-play.md): online play off, local play (nearby games, hosting) or a
+	// fan server. The saved choices become the game's settings at Play (ApplyNetwork). Windows only.
+#if !defined(__ANDROID__)
+	// The built-in host lives as long as the runner (it keeps running during the game); the search only while the
+	// Network page shows local play in the launcher.
+	void TryPlay(); // below, with the footer
+	std::unique_ptr<ob::server::LocalHost> g_host;
+	ob::server::BeaconListener g_search;
+	bool g_searching = false, g_searchWanted = false;
+	std::string g_hostAddress, g_removePrompt;
+
+	void Search(bool on)
+	{
+		if (on == g_searching)
+			return;
+		g_searching = on;
+		if (!on)
+		{
+			g_search.stop();
+			return;
+		}
+		std::string err;
+		if (!g_search.start(ob::server::kBeaconPort, &err))
+		{
+			g_searching = false;
+			Note("Can't look for nearby games: " + err);
+		}
+	}
+
+	bool Hosting() { return g_host && g_host->running(); }
+
+	std::string HostName()
+	{
+		const std::string saved = Ui("host_name");
+		const char* pc = std::getenv("COMPUTERNAME");
+		return obui::cleanHostName(!saved.empty() ? saved : pc ? pc : "");
+	}
+
+	void StartHosting()
+	{
+		std::string address;
+		int prefix = 0;
+		if (!ob::server::findLocalNetwork(address, prefix))
+		{
+			Note("No local network found: connect to Wi-Fi or Ethernet to host");
+			return;
+		}
+		ob::server::HostOptions o;
+		o.name = HostName();
+		o.address = address;
+		o.webPort = 443; // a PC may listen on 443: players join with no remap
+		o.log = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
+		const std::string bc = obui::broadcastAddress(address, prefix);
+		if (!bc.empty() && bc != "255.255.255.255")
+			o.beaconTargets.push_back(bc);
+		if (!g_host)
+			g_host = std::make_unique<ob::server::LocalHost>();
+		std::string err;
+		if (!g_host->start(o, &err))
+		{
+			o.webPort = 18443; // 443 taken by another program: the port joiners remap to (the beacon tells them)
+			if (!g_host->start(o, &err))
+			{
+				Note("Hosting didn't start: " + err);
+				return;
+			}
+		}
+		g_hostAddress = address;
+		SetUi("net_join", address + ":" + std::to_string(g_host->webPort()), "hosting");
+		Note("Hosting on " + address);
+	}
+
+	void PageNetwork()
+	{
+		const std::string mode = Ui("net_mode", "off");
+		int m = mode == "local" ? 1 : mode == "server" ? 2 : 0;
+		BeginCard("ONLINE PLAY");
+		const char* const modes[] = {"Off", "Local play", "Fan server"};
+		if (Choice("Online play", m, modes, 3, s->launcher))
+			SetUi("net_mode", m == 1 ? "local" : m == 2 ? "server" : "off", "online play");
+		LaunchOnlyNote();
+		const char* dev9 = std::getenv("PS2X_DEV9");
+		if (dev9 && *dev9)
+			Hint("This run's network comes from PS2X_DEV9 and the other PS2X_NET settings (a scripted run); these are used otherwise.");
+		if (m == 0)
+			Hint("The game plays offline.");
+		if (m == 2)
+		{
+			std::string server = Ui("net_server");
+			if (TextField("Server address", server, s->launcher))
+			{
+				if (obui::isIpv4(server))
+					SetUi("net_server", server, "server address");
+				else
+					Note("Not an address: use four numbers like 203.0.113.9");
+			}
+			Hint("A fan server is run by the community on a PC. Everyone on it plays together: Outbreak Modern, PCSX2 and PS2.");
+		}
+		EndCard();
+
+		if (m == 1)
+		{
+			g_searchWanted = s->launcher;
+			Search(g_searchWanted);
+			if (s->launcher)
+			{
+				BeginCard("NEARBY GAMES");
+				int shown = 0;
+				for (const ob::server::FoundHost& h : g_search.hosts())
+				{
+					if (Hosting() && h.address == g_hostAddress)
+						continue; // this PC's own game: "Play on this host" below
+					shown++;
+					const std::string label = obui::cleanHostName(h.info.name) + "  -  " + std::to_string(h.info.players) +
+						(h.info.players == 1 ? " player, " : " players, ") + h.address;
+					const char* const join[] = {"Join"};
+					if (Actions(label.c_str(), join, 1) == 0 && obui::isLocalIpv4(h.address))
+					{
+						SetUi("net_join", h.address + ":" + std::to_string(h.info.webPort), "game to join");
+						TryPlay();
+					}
+				}
+				if (!shown)
+					Hint("Looking for games on this network...");
+				EndCard();
+			}
+
+			BeginCard("HOST A GAME");
+			if (Hosting())
+			{
+				Info("Hosting", HostName() + " on " + g_hostAddress + " (" + std::to_string(g_host->players().size()) +
+					" in the lobby)", &kSuccess);
+				for (const std::string& p : g_host->players())
+				{
+					const char* const remove[] = {"Remove"};
+					if (Actions(p.c_str(), remove, 1) == 0)
+					{
+						g_removePrompt = p;
+						OpenDialog("Remove this player?", p + "\n\nThey are disconnected and can't rejoin until you stop hosting.",
+							{"Remove", "Cancel"}, [](int i) {
+								if (i == 0 && g_host)
+								{
+									g_host->removePlayer(g_removePrompt);
+									Note("Removed " + g_removePrompt);
+								}
+								g_removePrompt.clear();
+							}, 1);
+					}
+				}
+				const char* const both[] = {"Play on this host", "Stop hosting"};
+				const char* const stop[] = {"Stop hosting"};
+				const int a = s->launcher ? Actions(nullptr, both, 2) : Actions(nullptr, stop, 1);
+				if (s->launcher && a == 0)
+				{
+					SetUi("net_join", g_hostAddress + ":" + std::to_string(g_host->webPort()), "game to join");
+					TryPlay();
+				}
+				else if (a == (s->launcher ? 1 : 0))
+				{
+					g_host->stop();
+					Note("Stopped hosting");
+				}
+			}
+			else
+			{
+				std::string name = HostName();
+				if (TextField("Host name", name, s->launcher))
+					SetUi("host_name", obui::cleanHostName(name), "host name");
+				const char* const host[] = {"Host a game"};
+				if (Actions(nullptr, host, 1, s->launcher) == 0)
+					StartHosting();
+			}
+			Hint("Players on the same network join from their Nearby games list. Windows may ask once whether Outbreak "
+				 "Modern may use the network: allow it on private networks. Phones join here too; they can't host for PCSX2 "
+				 "or PS2 players, who join a fan server.");
+			EndCard();
+		}
+
+		if (m != 0)
+		{
+			BeginCard("CONNECTION");
+			const char* const how[] = {"Automatic (DHCP)", "Manual"};
+			int c = Ui("net_connection") == "manual" ? 1 : 0;
+			if (Choice("Network settings", c, how, 2, s->launcher))
+				SetUi("net_connection", c == 1 ? "manual" : "dhcp", "network settings");
+			if (c == 1)
+			{
+				const char* const keys[] = {"net_address", "net_netmask", "net_gateway", "net_dns1", "net_dns2"};
+				const char* const labels[] = {"IP address", "Subnet mask", "Gateway", "DNS 1", "DNS 2 (optional)"};
+				for (int i = 0; i < 5; i++)
+				{
+					std::string v = Ui(keys[i]);
+					if (TextField(labels[i], v, s->launcher))
+					{
+						if (obui::isIpv4(v) || (i == 4 && v.empty()))
+							SetUi(keys[i], v, labels[i]);
+						else
+							Note("Not an address: use four numbers like 192.168.0.80");
+					}
+				}
+				obui::NetConnection nc{false, Ui("net_address"), Ui("net_netmask"), Ui("net_gateway"), Ui("net_dns1"), Ui("net_dns2")};
+				if (obui::netcnfValue(nc).empty())
+					Info(nullptr, "Fill in every address above, or the game plays offline.", &kDanger);
+			}
+			Hint("The game's own network settings. Automatic suits almost every home network.");
+			EndCard();
+		}
+	}
+
+	// At Play: the Network page's choices become the game's environment (core/net_choice.h), read when the runtime
+	// starts the network adapter (after the launcher). A scripted run that set PS2X_DEV9 itself keeps its own.
+	void ApplyNetwork()
+	{
+		const char* dev9 = std::getenv("PS2X_DEV9");
+		if (dev9 && *dev9)
+			return;
+		const obui::EnvList env = obui::chosenNetEnv([](const std::string& k) { return Ui(k.c_str()); }, "");
+		for (const auto& [key, value] : env)
+#if defined(_WIN32)
+			_putenv_s(key.c_str(), value.c_str());
+#else
+			setenv(key.c_str(), value.c_str(), 1);
+#endif
+		if (!env.empty())
+			std::fprintf(stderr, "[ui] online play: %s\n", Ui("net_mode").c_str());
+	}
+#else
+	void PageNetwork() {}
+	void ApplyNetwork() {}
+#endif
+
 #if defined(__ANDROID__)
 	std::string ReadSmall(const fs::path& p)
 	{
@@ -1818,6 +2079,7 @@ namespace
 			case Page::Mods: PageMods(); break;
 			case Page::Cards: PageCards(); break;
 			case Page::Audio: PageAudio(); break;
+			case Page::Network: PageNetwork(); break;
 			case Page::Driver: PageDriver(); break;
 			case Page::Advanced: PageAdvanced(); break;
 			default: break;
@@ -1964,6 +2226,24 @@ namespace
 		io.AddKeyEvent(ImGuiMod_Alt, s->in.alt);
 		for (int c = 0; c < s->in.charCount; c++)
 			io.AddInputCharacter(s->in.chars[c]);
+		// Editing keys for text boxes (TextField); ImGui's own keyboard navigation stays off.
+		for (int k = 0; k < s->in.keyCount; k++)
+		{
+			ImGuiKey key = ImGuiKey_None;
+			switch (s->in.keys[k].code)
+			{
+				case ObUiNavKey::Left: key = ImGuiKey_LeftArrow; break;
+				case ObUiNavKey::Right: key = ImGuiKey_RightArrow; break;
+				case ObUiNavKey::Home: key = ImGuiKey_Home; break;
+				case ObUiNavKey::End: key = ImGuiKey_End; break;
+				case ObUiNavKey::Delete: key = ImGuiKey_Delete; break;
+				case ObUiNavKey::Backspace: key = ImGuiKey_Backspace; break;
+				case ObUiNavKey::Enter: key = ImGuiKey_Enter; break;
+				default: break;
+			}
+			if (key != ImGuiKey_None)
+				io.AddKeyEvent(key, s->in.keys[k].down);
+		}
 	}
 
 	std::vector<Page> VisiblePages()
@@ -1974,6 +2254,8 @@ namespace
 			const Page p = static_cast<Page>(i);
 			if (p == Page::Driver && !s->host.android)
 				continue;
+			if (p == Page::Network && s->host.android)
+				continue; // Android's Network page is the Kotlin launcher's (NetPlay.kt)
 			if (!s->launcher && (p == Page::Game || p == Page::Cards || p == Page::Advanced || p == Page::Driver))
 				continue; // launch-only pages live in the launcher
 			pages.push_back(p);
@@ -2537,7 +2819,10 @@ namespace obui
 		gamePath = s->gamePath;
 		if (!interactive)
 			return true;
-		return Ui("launcher", "on") == "off" && DiscOk();
+		const bool skip = Ui("launcher", "on") == "off" && DiscOk();
+		if (skip)
+			ApplyNetwork(); // straight into the game: the launcher's Play does this otherwise
+		return skip;
 	}
 
 	int launcherFrame(const ObUiInput& in, std::string& gamePath)
@@ -2548,9 +2833,17 @@ namespace obui
 #if defined(__ANDROID__)
 		PollAndroidPick();
 #endif
+#if !defined(__ANDROID__)
+		g_searchWanted = false;
+#endif
 		Present(in);
+#if !defined(__ANDROID__)
+		if (!g_searchWanted || s->frameResult != 0)
+			Search(false); // not on the Network page's local play (or leaving the launcher): stop listening
+#endif
 		if (s->frameResult == 1)
 		{
+			ApplyNetwork();
 			if (Ui("card_backup", "on") == "on")
 			{
 				const char* env = std::getenv("PS2X_SAVES");

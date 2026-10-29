@@ -29,6 +29,11 @@ namespace ob::server
 		std::function<void(const std::string&)> log;
 	};
 
+	// This PC's local network for hosting: an adapter that is up, has a gateway and a local IPv4 (guard.h), not
+	// loopback. Windows: GetAdaptersAddresses; elsewhere: the first wlan/eth/en interface with one. Android passes the
+	// Wi-Fi address from the launcher instead. False (address empty) when there is none.
+	bool findLocalNetwork(std::string& address, int& prefix);
+
 	class LocalHost
 	{
 	public:

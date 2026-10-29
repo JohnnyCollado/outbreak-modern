@@ -9,12 +9,14 @@
 // - touch pad: touch buttons press on top of the host pad, a pushed touch stick wins, a centred one leaves the
 //   physical stick, physical use is counted (buttons, a stick past its threshold) and touch alone is not;
 // - game screen: menu layout before the game task and while the menu byte is set, play layout otherwise, the
-//   controller type, the attached RAM read live.
+//   controller type, the attached RAM read live;
+// - network: strict addresses, the game's settings from the Network page's choices, no injection.
 #include "disc_check.h"
 #include "game_screen.h"
 #include "ini_file.h"
 #include "memory_card.h"
 #include "menu_trigger.h"
+#include "net_choice.h"
 #include "touch_pad.h"
 #include "widescreen.h"
 
@@ -710,6 +712,76 @@ static void ScreenTests()
 	Check(!obui::currentScreen().known, "screen: detached = unknown");
 }
 
+// The Network page's rules (core/net_choice.h; the Android launcher's NetPlay.kt has the same cases): strict addresses,
+// the game's settings from the saved choices, nothing that could inject a server name or remap.
+static void NetTests()
+{
+	using obui::NetConnection;
+	using Env = std::vector<std::pair<std::string, std::string>>;
+	Check(obui::isIpv4("192.168.0.76") && obui::isIpv4("0.0.0.0"), "net: dotted quads");
+	for (const char* bad : {"", "192.168.0", "192.168.0.256", "1.2.3.4.5", "1..2.3", "a.b.c.d", " 1.2.3.4", "1.2.3.4;",
+			 "0192.168.0.1", "1.2.3.4=5.6.7.8", "::1"})
+		Check(!obui::isIpv4(bad), (std::string("net: not an address: '") + bad + "'").c_str());
+	Check(obui::isLocalIpv4("10.0.0.2") && obui::isLocalIpv4("172.31.255.254") && obui::isLocalIpv4("192.168.1.20") &&
+			  obui::isLocalIpv4("169.254.3.4"),
+		"net: private and link-local are local");
+	Check(!obui::isLocalIpv4("172.32.0.1") && !obui::isLocalIpv4("8.8.8.8") && !obui::isLocalIpv4("127.0.0.1") &&
+			  !obui::isLocalIpv4("255.255.255.255"),
+		"net: public, loopback and broadcast are not");
+	Check(obui::broadcastAddress("192.168.0.76", 24) == "192.168.0.255" &&
+			  obui::broadcastAddress("172.16.2.9", 23) == "172.16.3.255" && obui::broadcastAddress("1.2.3.4", 0).empty() &&
+			  obui::broadcastAddress("x", 24).empty(),
+		"net: broadcast address from the prefix");
+
+	const NetConnection dhcp;
+	Check(obui::netcnfValue(dhcp) == "dhcp", "net: DHCP");
+	NetConnection manual{false, "192.168.0.80", "255.255.255.0", "192.168.0.1", "192.168.0.1", ""};
+	Check(obui::netcnfValue(manual) == "static:192.168.0.80,255.255.255.0,192.168.0.1,192.168.0.1", "net: manual");
+	manual.dns2 = "8.8.8.8";
+	Check(obui::netcnfValue(manual) == "static:192.168.0.80,255.255.255.0,192.168.0.1,192.168.0.1,8.8.8.8", "net: manual, DNS 2");
+	manual.address = "192.168.0.80,1.2.3.4";
+	Check(obui::netcnfValue(manual).empty(), "net: a manual field that is not one address is refused");
+
+	const Env join = {{"PS2X_DEV9", "pcsx2"}, {"PS2X_NET_IF", "wlan0"},
+		{"PS2X_NET_HOSTS", "www01.kddi-mmbb.jp=192.168.0.50;gate1.jp.dnas.playstation.org=192.168.0.50"},
+		{"PS2X_NET_REMAP", "192.168.0.50:443=192.168.0.50:18443"}, {"PS2X_NETCNF", "dhcp"}};
+	Check(obui::gameNetEnv("192.168.0.50", 18443, "wlan0", dhcp) == join, "net: a host on a high port gets the login remapped");
+	const Env server = obui::gameNetEnv("203.0.113.9", 443, "", dhcp);
+	Check(server.size() == 3 && server[1].second == "www01.kddi-mmbb.jp=203.0.113.9;gate1.jp.dnas.playstation.org=203.0.113.9",
+		"net: a server on 443, automatic interface: no remap, no interface");
+	Check(obui::gameNetEnv("192.168.0.50;evil=1.2.3.4", 443, "", dhcp).empty() &&
+			  obui::gameNetEnv("example.com", 443, "", dhcp).empty() && obui::gameNetEnv("192.168.0.50", 0, "", dhcp).empty() &&
+			  obui::gameNetEnv("192.168.0.50", 65536, "", dhcp).empty() &&
+			  obui::gameNetEnv("192.168.0.50", 443, "wlan0;x", dhcp).empty(),
+		"net: anything that could inject a setting is refused");
+
+	auto ui = [](std::vector<std::pair<std::string, std::string>> kv) {
+		return [kv](const std::string& key) {
+			for (const auto& [k, v] : kv)
+				if (k == key)
+					return v;
+			return std::string();
+		};
+	};
+	Check(obui::chosenNetEnv(ui({}), "").empty() && obui::chosenNetEnv(ui({{"net_mode", "off"}, {"net_server", "203.0.113.9"}}), "").empty(),
+		"net: off or unset = offline");
+	Check(obui::chosenNetEnv(ui({{"net_mode", "local"}, {"net_join", "192.168.0.50:18443"}}), "wlan0") == join,
+		"net: local play joins the chosen host");
+	Check(obui::chosenNetEnv(ui({{"net_mode", "local"}, {"net_join", "203.0.113.9:443"}}), "").empty() &&
+			  obui::chosenNetEnv(ui({{"net_mode", "local"}, {"net_join", "192.168.0.50"}}), "").empty(),
+		"net: local play joins local addresses with a port only");
+	Check(obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "203.0.113.9"}}), "") == server,
+		"net: a fan server on the standard port");
+	Check(obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "203.0.113.9"}, {"net_connection", "manual"},
+								  {"net_address", "192.168.0.80"}}),
+			  "")
+			  .empty(),
+		"net: incomplete manual settings = offline");
+	Check(obui::cleanHostName("  Johnny's PC  ") == "Johnny's PC" && obui::cleanHostName("\x01\x07") == "Host" &&
+			  obui::cleanHostName(std::string(40, 'x')).size() == 24,
+		"net: host names are short and printable");
+}
+
 int main()
 {
 	IniTests();
@@ -721,6 +793,7 @@ int main()
 	EnsureNetworkFolderTests();
 	WidescreenTests();
 	TouchTests();
+	NetTests();
 	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

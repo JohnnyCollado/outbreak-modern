@@ -89,3 +89,16 @@ void TestLocalHost()
 	Check(within(2000, [&] { return listener.hosts(300).empty(); }), "host: the beacon stops with the host");
 	listener.stop();
 }
+
+// The Windows host finds its own address: a local IPv4 on an adapter with a gateway (not loopback, not a virtual
+// adapter without one). A machine with no such network finds none and says so.
+void TestFindLocalNetwork()
+{
+	std::string address;
+	int prefix = 0;
+	if (findLocalNetwork(address, prefix))
+		Check(isLocalAddress(address) && address.rfind("127.", 0) != 0 && prefix >= 1 && prefix <= 32,
+			"host: this PC's network is a local, non-loopback address with a prefix");
+	else
+		Check(address.empty(), "host: no local network found, no address given");
+}

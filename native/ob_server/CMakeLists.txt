@@ -28,7 +28,7 @@ add_library(ob_server STATIC src/datafile.cpp src/protocol.cpp src/web.cpp src/t
 target_include_directories(ob_server PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(ob_server PUBLIC mbedtls mbedx509 mbedcrypto)
 if(WIN32)
-    target_link_libraries(ob_server PUBLIC ws2_32)
+    target_link_libraries(ob_server PUBLIC ws2_32 iphlpapi)
 endif()
 if(MSVC)
     target_compile_options(ob_server PRIVATE /W4 /permissive-)

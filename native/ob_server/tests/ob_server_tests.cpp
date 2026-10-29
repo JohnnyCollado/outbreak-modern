@@ -37,6 +37,7 @@ void TestRelay();       // relay_tests.cpp
 void TestGuard();       // guard_tests.cpp
 void TestBeacon();      // beacon_tests.cpp
 void TestLocalHost();   // host_tests.cpp
+void TestFindLocalNetwork(); // host_tests.cpp
 void Check(bool ok, const char* what)
 {
 	++s_total;
@@ -463,6 +464,7 @@ int main()
 	TestGuard();
 	TestBeacon();
 	TestLocalHost();
+	TestFindLocalNetwork();
 	std::printf("ob_server: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

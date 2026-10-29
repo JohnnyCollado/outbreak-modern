@@ -9,7 +9,8 @@ add_library(ob_ui_core STATIC
     core/menu_trigger.cpp
     core/memory_card.cpp
     core/touch_pad.cpp
-    core/widescreen.cpp)
+    core/widescreen.cpp
+    core/net_choice.cpp)
 target_include_directories(ob_ui_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
 if(MSVC)
     target_compile_options(ob_ui_core PRIVATE /EHsc) # the including directory strips /EHsc for PCSX2
@@ -31,6 +32,10 @@ if(TARGET ps2_runtime)
     target_include_directories(ob_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/ui"
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_gs/adapter")
     target_link_libraries(ob_ui PUBLIC ob_ui_core PRIVATE ob_pcsx2_gs_adapter)
+    if(NOT ANDROID)
+        # The Network page's built-in host and nearby search (native/ob_server; added by native/pcsx2_gs).
+        target_link_libraries(ob_ui PRIVATE ob_server)
+    endif()
     if(MSVC)
         target_compile_options(ob_ui PRIVATE /EHsc)
         target_link_libraries(ob_ui PRIVATE comdlg32 shell32 ole32) # file_dialog.cpp: Windows' Browse dialogs
