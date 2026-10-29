@@ -185,9 +185,16 @@ namespace ob::server
 				if (!info)
 					continue;
 				std::lock_guard<std::mutex> lock(m_mutex);
+				const auto now = std::chrono::steady_clock::now();
+				// Hosts that went quiet make room (security queue S7: fakes could fill the 32 places for good).
+				for (auto it = m_seen.begin(); it != m_seen.end();)
+					if (now - it->second.at > std::chrono::milliseconds(m_staleMs))
+						it = m_seen.erase(it);
+					else
+						++it;
 				if (m_seen.size() >= kMaxListedHosts && !m_seen.count(from))
 					continue;
-				m_seen[from] = Seen{*info, std::chrono::steady_clock::now()};
+				m_seen[from] = Seen{*info, now};
 			}
 		});
 		return true;

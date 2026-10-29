@@ -73,6 +73,8 @@ namespace ob::server
 		bool start(uint16_t port, std::string* error); // port 0 = any free port (tests)
 		uint16_t port() const { return m_port; }
 		std::vector<FoundHost> hosts(int maxAgeMs = 3000) const;
+		// Entries silent this long are dropped before a new host is counted against the 32 cap (security queue S7).
+		void setStaleMs(int ms) { m_staleMs = ms; }
 		void stop();
 
 	private:
@@ -83,6 +85,7 @@ namespace ob::server
 		};
 		mutable std::mutex m_mutex;
 		std::map<std::string, Seen> m_seen;
+		int m_staleMs = 10000;
 		std::atomic<bool> m_running{false};
 		std::thread m_thread;
 		net::Socket m_socket = net::kInvalid;

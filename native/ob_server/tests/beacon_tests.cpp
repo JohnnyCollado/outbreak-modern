@@ -79,6 +79,45 @@ static void TestBeaconOverLoopback()
 	listener.stop();
 }
 
+// Security queue S7: 32 fake hosts (any device on the network can send beacons) filled the list for good; entries
+// that stop announcing now age out, so a real host is listed again.
+static void TestBeaconListAgesOut()
+{
+	BeaconListener listener;
+	std::string error;
+	listener.setStaleMs(300);
+	if (!listener.start(0, &error))
+	{
+		Check(false, "beacon aging: the listener starts");
+		return;
+	}
+	const std::string fake = encodeBeacon(BeaconInfo{"Fake", 443, 8300, 0});
+	for (int i = 2; i < 2 + int(kMaxListedHosts); i++)
+	{
+		const std::string from = "127.0.0." + std::to_string(i);
+		const net::Socket s = net::openUdp(from, 0, false, nullptr, &error);
+		if (s == net::kInvalid)
+			continue;
+		net::sendUdp(s, "127.0.0.1", listener.port(), reinterpret_cast<const uint8_t*>(fake.data()), fake.size());
+		net::closeSocket(s);
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	Check(listener.hosts().size() == kMaxListedHosts, "beacon aging: 32 fake hosts fill the list");
+	std::this_thread::sleep_for(std::chrono::milliseconds(400)); // they go quiet past the stale time
+	BeaconSender real;
+	real.start(BeaconInfo{"Real host", 18443, 8300, 1}, {"127.0.0.1"}, listener.port(), 100, &error);
+	bool listed = false;
+	for (int i = 0; i < 20 && !listed; i++)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		for (const FoundHost& h : listener.hosts(300))
+			listed |= h.info.name == "Real host";
+	}
+	Check(listed, "beacon aging: a real host is listed once the fakes go quiet");
+	real.stop();
+	listener.stop();
+}
+
 // Random and truncated input to every parser of network bytes: no crash, no hang, and what comes out is bounded.
 static void TestFuzz()
 {
@@ -126,5 +165,6 @@ void TestBeacon()
 {
 	TestBeaconFormat();
 	TestBeaconOverLoopback();
+	TestBeaconListAgesOut();
 	TestFuzz();
 }
