@@ -43,6 +43,8 @@ namespace ob::server
 
 	// The packet as sent: header (length = payload size, bytes 9..11 = FF FF FF) + payload. Payloads over 65,535 bytes
 	// are a programming error (none comes close: the largest is ~5 KB).
+	// Empty for a payload over 65,535 bytes: the header's 16-bit length cannot say it, and a cut length would desync
+	// the receiver's stream (security review S5).
 	std::vector<uint8_t> encode(const Packet& packet);
 
 	// Splits the lobby's TCP stream into packets: each is 12 + length bytes. Partial packets wait for more bytes.
@@ -91,9 +93,10 @@ namespace ob::server
 
 	// A scrambled string as the game sends it: [length:2][sum:2][length - 2 bytes], length counting the sum; the sum
 	// is not checked (the fan server ignores it too). Reads at payload[offset]; on success *next = the offset after it.
-	// The key restarts at 0 for each string.
+	// The key restarts at 0 for each string. A string longer than maxLength bytes is refused (security review S5:
+	// strings passed on to other players are capped; refused, not cut, so a Shift-JIS character is never split).
 	std::optional<std::string> readScrambledString(const std::vector<uint8_t>& payload, size_t offset, uint8_t pidLow,
-		size_t* next = nullptr);
+		size_t* next = nullptr, size_t maxLength = SIZE_MAX);
 
 	// A string as the server sends it: [length:2][bytes], no terminator.
 	void putString(std::vector<uint8_t>& out, const std::string& bytes);

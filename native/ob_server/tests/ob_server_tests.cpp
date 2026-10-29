@@ -146,6 +146,12 @@ static void TestScramble()
 	(void)readScrambledString(payload, 3, 0x10); // a misaligned read must not crash (any result is fine)
 	std::vector<uint8_t> shortPayload = {0x00, 0x20, 0x00, 0x00, 'a'};
 	Check(!readScrambledString(shortPayload, 0, 0).has_value(), "a string longer than the payload is refused");
+	// Security review S5: strings passed on to other players are refused over their cap, and a packet too long for the
+	// header's 16-bit length is not sent at all (it would desync every receiver's stream).
+	Check(readScrambledString(payload, 2, 0x10, nullptr, 6).has_value() && !readScrambledString(payload, 2, 0x10, nullptr, 5),
+		"a string over its cap is refused, one at the cap is read");
+	Check(encode(MakePacket(0x6702, 1, std::vector<uint8_t>(70000, 'x'))).empty(), "a payload over 65,535 bytes is not encoded");
+	Check(encode(MakePacket(0x6702, 1, std::vector<uint8_t>(65535, 'x'))).size() == 12 + 65535, "65,535 bytes still encode");
 }
 
 static void TestSession()

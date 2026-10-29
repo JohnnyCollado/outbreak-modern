@@ -8,6 +8,8 @@ namespace ob::server
 {
 	std::vector<uint8_t> encode(const Packet& packet)
 	{
+		if (packet.payload.size() > 0xFFFF)
+			return {};
 		std::vector<uint8_t> out;
 		out.reserve(kHeaderSize + packet.payload.size());
 		out.push_back(packet.who);
@@ -121,12 +123,12 @@ namespace ob::server
 	}
 
 	std::optional<std::string> readScrambledString(const std::vector<uint8_t>& payload, size_t offset, uint8_t pidLow,
-		size_t* next)
+		size_t* next, size_t maxLength)
 	{
 		if (offset + 4 > payload.size())
 			return std::nullopt;
 		const size_t length = getU16(payload, offset);
-		if (length < 2 || offset + 2 + length > payload.size())
+		if (length < 2 || offset + 2 + length > payload.size() || length - 2 > maxLength)
 			return std::nullopt;
 		std::string text(payload.begin() + static_cast<std::ptrdiff_t>(offset + 4),
 			payload.begin() + static_cast<std::ptrdiff_t>(offset + 2 + length));

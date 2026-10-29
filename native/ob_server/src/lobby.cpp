@@ -60,6 +60,10 @@ namespace ob::server
 			{"friendly fire", {"off", "on"}},
 		};
 		const int kWaitMinutes[5] = {3, 5, 10, 15, 30};
+		// Caps on strings passed on to other players (security review S5): handles are 6 characters
+		// (research/2026-10-27-lobby-protocol.md); the others are generous guesses well above the game's own use.
+		constexpr size_t kMaxHandle = 6, kMaxNickname = 32, kMaxChat = 128, kMaxSlotName = 32, kMaxPassword = 16,
+						 kMaxEvent = 8192;
 		const char* kAreaNames[kAreas] = {"East Town", "West Town"};
 		const char* kAreaDescriptions[kAreas] = {"<BODY><SIZE=3>standard rules<END>", "<BODY><SIZE=3>individual games<END>"};
 
@@ -470,7 +474,9 @@ namespace ob::server
 				getReady(c.area, c.room, c.slot);
 			else if (q.cmd == CHATIN)
 			{
-				const auto text = readScrambledString(p, 0, key);
+				const auto text = readScrambledString(p, 0, key, nullptr, kMaxChat);
+				if (!text)
+					return; // over the cap: not passed on
 				std::vector<uint8_t> out;
 				putHandle(out, c.handle);
 				putString(out, text.value_or(""));
@@ -495,8 +501,8 @@ namespace ob::server
 		case HNSELECT:
 		{
 			size_t next = 0;
-			const auto id = readScrambledString(p, 0, key, &next);
-			const auto nick = id ? readScrambledString(p, next, key) : std::nullopt;
+			const auto id = readScrambledString(p, 0, key, &next, kMaxHandle);
+			const auto nick = id ? readScrambledString(p, next, key, nullptr, kMaxNickname) : std::nullopt;
 			const auto h = (id && nick) ? accounts->selectHandle(c.account, *id, *nick) : std::nullopt;
 			if (!h)
 			{
@@ -683,7 +689,7 @@ namespace ob::server
 		case SLOTNAME:
 		{
 			if (Slot* s = slotOf(c.area, c.room, c.slot))
-				s->name = readScrambledString(p, 0, key).value_or(s->name);
+				s->name = readScrambledString(p, 0, key, nullptr, kMaxSlotName).value_or(s->name);
 			answer(c, q);
 			const int area = c.area, room = c.room, slot = c.slot;
 			broadcast([&](const Client& o) { return o.area == area && o.room == room; }, SLOTTITLE, slotTitle(area, room, slot));
@@ -691,7 +697,7 @@ namespace ob::server
 		}
 		case SLOTPASSWD:
 			if (Slot* s = slotOf(c.area, c.room, c.slot))
-				s->password = readScrambledString(p, 0, key).value_or("");
+				s->password = readScrambledString(p, 0, key, nullptr, kMaxPassword).value_or("");
 			answer(c, q);
 			break;
 		case SETRULE:
@@ -849,8 +855,8 @@ namespace ob::server
 			// Answered with the recipient's handle; passed on as EVENTDATBC [sender's handle][event], both decoded, to
 			// that player only (Bioserver1 Packet.getEvenData + sendEventDat).
 			size_t next = 0;
-			const auto to = readScrambledString(p, 0, key, &next);
-			const auto event = to ? readScrambledString(p, next, key) : std::nullopt;
+			const auto to = readScrambledString(p, 0, key, &next, kMaxHandle);
+			const auto event = to ? readScrambledString(p, next, key, nullptr, kMaxEvent) : std::nullopt;
 			if (!to || !event)
 			{
 				answerError(c, q, "<LF=6><BODY><CENTER>not possible<END>");
