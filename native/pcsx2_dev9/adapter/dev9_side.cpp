@@ -26,8 +26,11 @@ namespace
 	bool s_irq = false;     // INTC line 13 raised, not yet taken
 	bool s_dmaDone = false; // channel 8 ended, not yet taken
 	// dev9Irq(cycles): IOP cycles left until DEV9's interrupt event fires; < 0 = none pending (PSX_INT keeps one event
-	// per source, the later call replacing the earlier).
+	// per source, the later call replacing the earlier). Counted down by the IOP thread only; dev9Irq also comes from
+	// PCSX2's receive thread (net.cpp NetRxThread -> rx_process), so it posts into s_irqAsk, which the IOP thread takes
+	// (security review C3: both threads wrote s_irqIn, and a request landing mid-countdown could be lost).
 	int64_t s_irqIn = -1;
+	std::atomic<int64_t> s_irqAsk{-1};
 
 	// The latency trace (ob_dev9_set_trace): when the pending interrupt was asked for (0 = none), and the totals.
 	// dev9Irq comes from the receive thread too (net.cpp NetRxThread -> rx_process), hence the atomic.
@@ -79,7 +82,7 @@ namespace
 // IopIrq.cpp: DEV9 asks for its interrupt in `cycles` IOP cycles (PSX_INT(IopEvt_DEV9, cycles)).
 void dev9Irq(int cycles)
 {
-	s_irqIn = cycles < 0 ? 0 : cycles;
+	s_irqAsk.store(cycles < 0 ? 0 : cycles);
 	if (s_trace)
 	{
 		int64_t none = 0;
@@ -151,6 +154,7 @@ bool ob_dev9_open(const ob_dev9_config* config)
 	Sessions::HostRemap::Set(std::move(remaps));
 	s_irq = s_dmaDone = false;
 	s_irqIn = -1;
+	s_irqAsk = -1;
 	if (DEV9init() != 0)
 		return false;
 	DEV9open();
@@ -219,6 +223,8 @@ void ob_dev9_advance(uint32_t iop_cycles)
 	if (!s_open)
 		return;
 	DEV9async(iop_cycles);
+	if (const int64_t ask = s_irqAsk.exchange(-1); ask >= 0)
+		s_irqIn = ask; // the latest request replaces a pending one, as PSX_INT
 	if (s_irqIn >= 0)
 	{
 		s_irqIn -= iop_cycles;
