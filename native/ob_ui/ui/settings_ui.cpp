@@ -1560,6 +1560,7 @@ namespace
 		ob::server::HostOptions o;
 		o.name = HostName();
 		o.address = address;
+		o.prefix = prefix; // only this network may join (security queue S10)
 		o.webPort = 443; // a PC may listen on 443: players join with no remap
 		o.log = [](const std::string& line) { std::fprintf(stderr, "%s\n", line.c_str()); };
 		const std::string bc = obui::broadcastAddress(address, prefix);

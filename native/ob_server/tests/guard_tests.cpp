@@ -75,9 +75,31 @@ static void TestLobbyRefusesBeyondLimit()
 	lobby.stop();
 }
 
+// Security queue S10: a host on a big shared network (a hotel's or campus's 10.x) accepts only its own subnet, not
+// every private address; this device (loopback) still may.
+static void TestGuardSubnet()
+{
+	GuardLimits limits;
+	limits.subnet = "192.168.0.76";
+	limits.prefix = 24;
+	ConnectionGuard guard(limits);
+	Check(guard.admit("192.168.0.9"), "subnet: an address on the host's /24 is admitted");
+	Check(!guard.admit("192.168.1.5"), "subnet: another 192.168 network is refused");
+	Check(!guard.admit("10.0.0.2"), "subnet: another private range is refused");
+	Check(guard.admit("127.0.0.1"), "subnet: this device (loopback) is admitted");
+	GuardLimits wide;
+	wide.subnet = "10.20.30.40";
+	wide.prefix = 8;
+	ConnectionGuard campus(wide);
+	Check(campus.admit("10.200.1.1") && !campus.admit("192.168.0.9"), "subnet: a /8 admits its range only");
+	ConnectionGuard open;
+	Check(open.admit("192.168.1.5") && open.admit("10.0.0.2"), "subnet: none set = any local address, as before");
+}
+
 void TestGuard()
 {
 	TestLocalAddresses();
+	TestGuardSubnet();
 	TestGuardLimits();
 	TestLobbyRefusesBeyondLimit();
 }

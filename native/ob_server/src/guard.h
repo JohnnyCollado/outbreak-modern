@@ -24,7 +24,13 @@ namespace ob::server
 	{
 		size_t total = 16;     // connections at once to one service
 		size_t perAddress = 4; // of them from one address
+		// Security queue S10: the host's own network (its Wi-Fi address and prefix length); prefix 0 = any local address.
+		// This device (loopback) is always admitted.
+		std::string subnet;
+		int prefix = 0;
 	};
+	// address and subnet (dotted IPv4) share their first prefix bits (1..32); false for anything malformed.
+	bool inSubnet(const std::string& address, const std::string& subnet, int prefix);
 
 	// Thread-safe: services accept on their own threads, the host's Remove comes from the UI.
 	class ConnectionGuard

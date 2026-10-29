@@ -11,6 +11,7 @@ namespace ob::server
 		RelayConfig relay;
 		relay.log = config.log;
 		relay.statsMs = config.relayStatsMs;
+		relay.limits = config.limits;
 		if (!m_relay.start(m_accounts, relay, config.bindAddress, config.relayPort, error))
 			return false;
 		LobbyConfig lobby;
@@ -19,6 +20,7 @@ namespace ob::server
 		lobby.messageOfTheDay = config.messageOfTheDay;
 		lobby.log = config.log;
 		lobby.trace = config.trace;
+		lobby.limits = config.limits;
 		if (!m_lobby.start(m_accounts, lobby, config.bindAddress, config.lobbyPort, error))
 		{
 			m_relay.stop();
@@ -29,6 +31,7 @@ namespace ob::server
 		web.lobbyPort = m_lobby.port();
 		web.log = config.log;
 		web.trace = config.trace;
+		web.limits = config.limits;
 		// Quick login (plan P12): one account per device. Until the app's hello (step E) names the device, its
 		// network address does.
 		web.mintSession = [this, log = config.log](const std::string& address) {

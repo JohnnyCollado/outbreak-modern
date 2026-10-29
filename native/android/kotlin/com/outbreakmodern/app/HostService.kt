@@ -32,10 +32,11 @@ class HostService : Service() {
         val name = cleanHostName(intent.getStringExtra(EXTRA_NAME) ?: "")
         val address = intent.getStringExtra(EXTRA_ADDRESS) ?: ""
         val broadcast = intent.getStringExtra(EXTRA_BROADCAST) ?: ""
+        val prefix = intent.getIntExtra(EXTRA_PREFIX, 0)
         // Foreground first (required within seconds of the start), then the server; on failure the service ends.
         val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         startForeground(NOTIFICATION_ID, notification(name, address), type)
-        val err = if (isLocalIpv4(address)) NativeBridge.hostStart(name, address, WEB_PORT, broadcast)
+        val err = if (isLocalIpv4(address)) NativeBridge.hostStart(name, address, prefix, WEB_PORT, broadcast)
         else "no Wi-Fi address"
         lastError = err
         if (err.isNotEmpty()) stopHosting()
@@ -75,6 +76,7 @@ class HostService : Service() {
         private const val EXTRA_NAME = "name"
         private const val EXTRA_ADDRESS = "address"
         private const val EXTRA_BROADCAST = "broadcast"
+        private const val EXTRA_PREFIX = "prefix"
         private const val CHANNEL = "host"
         private const val NOTIFICATION_ID = 18443
         /** Why the last start failed ("" = it did not). */
@@ -84,7 +86,8 @@ class HostService : Service() {
             lastError = ""
             context.startForegroundService(Intent(context, HostService::class.java).setAction(ACTION_START)
                 .putExtra(EXTRA_NAME, name).putExtra(EXTRA_ADDRESS, link.address)
-                .putExtra(EXTRA_BROADCAST, broadcastAddress(link.address, link.prefix) ?: ""))
+                .putExtra(EXTRA_BROADCAST, broadcastAddress(link.address, link.prefix) ?: "")
+                .putExtra(EXTRA_PREFIX, link.prefix))
         }
 
         fun stop(context: Context) {

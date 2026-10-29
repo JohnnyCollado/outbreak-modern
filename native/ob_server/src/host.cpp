@@ -97,6 +97,8 @@ namespace ob::server
 		config.relayPort = options.relayPort;
 		config.log = options.log;
 		config.relayStatsMs = options.relayStatsMs;
+		config.limits.subnet = options.address;
+		config.limits.prefix = options.prefix;
 		if (!m_server.start(config, error))
 			return false;
 		BeaconInfo info{options.name, m_server.webPort(), m_server.lobbyPort(), 0};

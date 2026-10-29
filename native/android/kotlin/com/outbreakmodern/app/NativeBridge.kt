@@ -42,8 +42,11 @@ object NativeBridge {
     @JvmStatic external fun requestMenu()
 
     // Local play (native/pcsx2_gs/adapter/host_jni.cpp; docs/plans/2026-10-28-local-play.md), in the launcher's process.
-    /** Hosts on [address] (this device's Wi-Fi IPv4, the only address it listens on); "" = hosting, else why not. */
-    @JvmStatic external fun hostStart(name: String, address: String, webPort: Int, broadcast: String): String
+    /**
+     * Hosts on [address] (this device's Wi-Fi IPv4, the only address it listens on); only its /[prefix] network may join
+     * (security queue S10). "" = hosting, else why not.
+     */
+    @JvmStatic external fun hostStart(name: String, address: String, prefix: Int, webPort: Int, broadcast: String): String
     @JvmStatic external fun hostStop()
     @JvmStatic external fun hostRunning(): Boolean
     /** The addresses in this host's lobby now. */

@@ -52,16 +52,18 @@ extern "C" void ObHostJniKeep() {}
 
 extern "C" {
 
-// hostStart(name, address, webPort, broadcast): "" when hosting, else why not. address = this device's Wi-Fi IPv4
-// (the server listens there only); broadcast = the Wi-Fi subnet's broadcast address ("" = 255.255.255.255 only).
+// hostStart(name, address, prefix, webPort, broadcast): "" when hosting, else why not. address = this device's Wi-Fi
+// IPv4 (the server listens there only) and prefix its network's length (only that subnet may join: security queue
+// S10); broadcast = the Wi-Fi subnet's broadcast address ("" = 255.255.255.255 only).
 JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_hostStart(JNIEnv* env, jclass, jstring name,
-	jstring address, jint webPort, jstring broadcast)
+	jstring address, jint prefix, jint webPort, jstring broadcast)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 	ob::server::HostOptions options;
 	options.name = Str(env, name);
 	options.address = Str(env, address);
 	options.webPort = static_cast<uint16_t>(webPort);
+	options.prefix = prefix >= 1 && prefix <= 32 ? static_cast<int>(prefix) : 0;
 	const std::string subnet = Str(env, broadcast);
 	if (!subnet.empty() && subnet != "255.255.255.255")
 		options.beaconTargets.push_back(subnet);

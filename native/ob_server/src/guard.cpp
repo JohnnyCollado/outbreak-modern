@@ -45,6 +45,17 @@ namespace ob::server
 			   (a[0] == 169 && a[1] == 254) || a[0] == 127;
 	}
 
+	bool inSubnet(const std::string& address, const std::string& subnet, int prefix)
+	{
+		std::array<uint8_t, 4> a{}, s{};
+		if (prefix < 1 || prefix > 32 || !parseIpv4(address, a) || !parseIpv4(subnet, s))
+			return false;
+		const uint32_t ia = (uint32_t(a[0]) << 24) | (uint32_t(a[1]) << 16) | (uint32_t(a[2]) << 8) | a[3];
+		const uint32_t is = (uint32_t(s[0]) << 24) | (uint32_t(s[1]) << 16) | (uint32_t(s[2]) << 8) | s[3];
+		const uint32_t mask = prefix == 32 ? 0xFFFFFFFFu : ~(0xFFFFFFFFu >> prefix);
+		return (ia & mask) == (is & mask);
+	}
+
 	void ConnectionGuard::setLimits(GuardLimits limits)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -55,6 +66,8 @@ namespace ob::server
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (!isLocalAddress(address) || m_removed.count(address) || m_total >= m_limits.total)
+			return false;
+		if (m_limits.prefix > 0 && address.rfind("127.", 0) != 0 && !inSubnet(address, m_limits.subnet, m_limits.prefix))
 			return false;
 		size_t& open = m_open[address];
 		if (open >= m_limits.perAddress)

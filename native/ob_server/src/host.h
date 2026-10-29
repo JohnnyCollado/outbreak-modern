@@ -27,6 +27,7 @@ namespace ob::server
 		uint16_t beaconPort = kBeaconPort;
 		int beaconIntervalMs = 1000;
 		int relayStatsMs = 10000; // the relay's per-player latency line (frames, round trip); 0 = off
+		int prefix = 0;           // the Wi-Fi network's prefix length: only that subnet may join (S10); 0 = any local
 		std::function<void(const std::string&)> log;
 	};
 
