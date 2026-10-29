@@ -1071,6 +1071,10 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   connection restarts the network modules without closing NETCNF's. **PS2Recomp 0104:** the longest-open handle is
   reused (read-only files). Test first (24 unclosed opens), ps2x 576/576. (Not proven to be the cause on the phone.)
 - Installed on the OnePlus; server restarted with the mbedTLS fix.
+- **Result (OnePlus, 2026-10-28 ~20:5x, Avast off):** `[web] 192.168.0.63: TLSv1.0 TLS-RSA-WITH-3DES-EDE-CBC-SHA`,
+  `quick login, session 90249284`, then the lobby: the 0x600E exchange and `game version '0311172218'` (as the
+  Windows clients). **The first Android phone reached the lobby** over the LAN, the game's own SSL talking to
+  ob_server directly.
 
 ## Mistakes and corrections
 
