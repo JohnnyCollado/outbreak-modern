@@ -66,7 +66,12 @@ namespace ob::server
 			const auto session = p.cmd == GSLOGIN && p.payload.size() >= 10
 				? decodeSessionDigits(p.payload.data(), p.pid)
 				: std::nullopt;
-			const auto account = session ? accounts->accountForSession(*session) : std::nullopt;
+			auto account = session ? accounts->accountForSession(*session) : std::nullopt;
+			if (account && config.sessionsByAddress && *account != c.address)
+			{
+				drop(c, "another device's session, disconnected");
+				return;
+			}
 			const uint32_t game = account ? accounts->gameNumber(*account) : 0;
 			if (!account || game == 0)
 			{

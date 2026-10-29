@@ -5,7 +5,14 @@
 
 namespace ob::server
 {
-	Accounts::Accounts() : m_random(static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())) {}
+	// Seeded from the system's random source, not the clock alone (security review S6: clock seeds are guessable).
+	Accounts::Accounts()
+	{
+		std::random_device device;
+		std::seed_seq seed{device(), device(), device(), device(),
+			static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
+		m_random.seed(seed);
+	}
 
 	uint32_t Accounts::mintSession(const std::string& key)
 	{

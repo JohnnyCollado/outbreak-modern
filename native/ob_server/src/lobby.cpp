@@ -402,9 +402,9 @@ namespace ob::server
 				return;
 			const auto session = decodeSessionDigits(q.payload.data() + 2, q.pid);
 			const auto account = session ? accounts->accountForSession(*session) : std::nullopt;
-			if (!account)
+			if (!account || (config.sessionsByAddress && *account != c.address))
 			{
-				log(c.address + ": unknown session, disconnected");
+				log(c.address + (account ? ": another device's session, disconnected" : ": unknown session, disconnected"));
 				c.closing = true;
 				return;
 			}

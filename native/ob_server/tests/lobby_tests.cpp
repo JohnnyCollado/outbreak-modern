@@ -163,6 +163,7 @@ void TestLobby()
 	LobbyServer lobby;
 	LobbyConfig config;
 	config.relayAddress = {192, 168, 1, 20};
+	config.sessionsByAddress = false; // two players from loopback, accounts named for them
 	std::string error;
 	Check(lobby.start(accounts, config, "127.0.0.1", 0, &error) && lobby.port() != 0, "the lobby starts on loopback");
 
@@ -313,5 +314,20 @@ void TestLobbyLoginDeadline()
 	}
 	Check(closed, "login deadline: a connection that never logs in is closed");
 	net::closeSocket(silent);
+	lobby.stop();
+}
+
+// Security review S6: the lobby accepts a session only from the address it was issued to.
+void TestLobbySessionsByAddress()
+{
+	Accounts accounts;
+	const uint32_t other = accounts.mintSession("10.0.0.9"), mine = accounts.mintSession("127.0.0.1");
+	LobbyServer lobby;
+	LobbyConfig config;
+	std::string error;
+	Check(lobby.start(accounts, config, "127.0.0.1", 0, &error), "lobby by address: starts");
+	GameClient thief, owner;
+	Check(thief.connect(lobby.port()) && thief.login(other, "THIEF").empty(), "lobby by address: another device's session is refused");
+	Check(owner.connect(lobby.port()) && owner.login(mine, "OWNER").size() == 6, "lobby by address: its own session logs in");
 	lobby.stop();
 }

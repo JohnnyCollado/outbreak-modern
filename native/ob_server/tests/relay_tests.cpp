@@ -93,6 +93,7 @@ void TestRelay()
 	accounts.setGameNumber("C", 3);
 	RelayServer relay;
 	RelayConfig config;
+	config.sessionsByAddress = false; // several players from loopback, accounts named for them
 	std::string error;
 	Check(relay.start(accounts, config, "127.0.0.1", 0, &error) && relay.port() != 0, "the relay starts on loopback");
 
@@ -142,6 +143,7 @@ void TestRelayStats()
 	std::vector<std::string> lines;
 	RelayServer relay;
 	RelayConfig config;
+	config.sessionsByAddress = false; // several players from loopback, accounts named for them
 	config.statsMs = 300;
 	config.log = [&](const std::string& l) {
 		std::lock_guard<std::mutex> lock(logMutex);
@@ -181,6 +183,7 @@ void TestRelayLimits()
 	std::vector<std::string> lines;
 	RelayServer relay;
 	RelayConfig config;
+	config.sessionsByAddress = false; // several players from loopback, accounts named for them
 	config.loginSeconds = 1;
 	config.maxOutBytes = 64 * 1024;
 	config.log = [&](const std::string& l) {
@@ -214,5 +217,28 @@ void TestRelayLimits()
 			dropped |= l.find("not reading") != std::string::npos;
 	}
 	Check(dropped, "limits: a player who stops reading is dropped at the output cap");
+	relay.stop();
+}
+
+// Security review S6: a session works only from the address it was issued to (accounts are keyed by the device's
+// address, ob_server.cpp quick login), so a sniffed or guessed number does not let another device act as its owner.
+void TestSessionsByAddress()
+{
+	Accounts accounts;
+	const uint32_t other = accounts.mintSession("10.0.0.9"), mine = accounts.mintSession("127.0.0.1");
+	accounts.setGameNumber("10.0.0.9", 2);
+	accounts.setGameNumber("127.0.0.1", 2);
+	RelayServer relay;
+	RelayConfig config;
+	std::string error;
+	Check(relay.start(accounts, config, "127.0.0.1", 0, &error), "by address: the relay starts");
+	RelayClient thief, owner;
+	Check(thief.connect(relay.port()) && thief.login(other), "by address: a client answers with another device's session");
+	thief.pump(500);
+	Check(thief.closed, "by address: the relay refuses a session from another address");
+	Check(owner.connect(relay.port()) && owner.login(mine), "by address: a client answers with its own session");
+	for (int i = 0; i < 40 && relay.logins() < 1; i++)
+		std::this_thread::sleep_for(std::chrono::milliseconds(25));
+	Check(relay.logins() == 1, "by address: its own session is accepted");
 	relay.stop();
 }
