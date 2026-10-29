@@ -18,12 +18,14 @@
 #include "mbedtls/ssl.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace ob::server;
@@ -201,7 +203,7 @@ static void TestWebPages()
 // One HTTPS GET over loopback with the protocol version and the single suite given; returns the body ("" on failure).
 // peerCert: the server's certificate as sent (DER), when given.
 static std::string FetchTlsCert(uint16_t port, int minor, int suite, const char* path,
-	std::vector<unsigned char>* peerCert)
+	std::vector<unsigned char>* peerCert, const std::string* postBody = nullptr)
 {
 	mbedtls_net_context net;
 	mbedtls_ssl_context ssl;
@@ -239,9 +241,19 @@ static std::string FetchTlsCert(uint16_t port, int minor, int suite, const char*
 			peerCert->assign(crt->raw.p, crt->raw.p + crt->raw.len);
 	if (ok)
 	{
-		const std::string request = std::string("GET ") + path + " HTTP/1.0\r\nUser-Agent: test\r\n\r\n";
+		// A POST's body goes in a second write after a pause, as the game sends it (report entry 61).
+		const std::string request = postBody
+			? std::string("POST ") + path + " HTTP/1.0\r\nUser-Agent: test\r\nContent-Length: " +
+				  std::to_string(postBody->size()) + "\r\n\r\n"
+			: std::string("GET ") + path + " HTTP/1.0\r\nUser-Agent: test\r\n\r\n";
 		ok = mbedtls_ssl_write(&ssl, reinterpret_cast<const unsigned char*>(request.data()), request.size()) ==
 			 static_cast<int>(request.size());
+		if (ok && postBody)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			ok = mbedtls_ssl_write(&ssl, reinterpret_cast<const unsigned char*>(postBody->data()), postBody->size()) ==
+				 static_cast<int>(postBody->size());
+		}
 		unsigned char buffer[4096];
 		while (ok && (rc = mbedtls_ssl_read(&ssl, buffer, sizeof(buffer))) > 0)
 			response.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(rc));
@@ -350,6 +362,44 @@ static void TestTlsServer()
 	Check(handshake, "the TLS server logs the handshake's protocol and suite");
 }
 
+// The game POSTs enterareas.html with its body in a second TLS record. The server answered after the headers and
+// closed with the body unread, so the connection was reset and the Odin lost the page (report entry 61): the body is
+// read (Content-Length) before the reply.
+static void TestTlsPost()
+{
+	TlsWebServer server;
+	std::string error;
+	auto lines = std::make_shared<std::vector<std::string>>();
+	auto linesMutex = std::make_shared<std::mutex>();
+	WebConfig config = TestWebConfig();
+	config.log = [lines, linesMutex](const std::string& line) {
+		std::lock_guard<std::mutex> lock(*linesMutex);
+		lines->push_back(line);
+	};
+	if (!server.start(config, "127.0.0.1", 0, &error))
+	{
+		Check(false, "the TLS web server starts (POST)");
+		return;
+	}
+	const std::string body(77, 'x');
+	const std::string page = FetchTlsCert(server.port(), MBEDTLS_SSL_MINOR_VERSION_1, MBEDTLS_TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+		"/00000002/enterareas.html", nullptr, &body);
+	server.stop();
+	Check(page.find("LOCAL") != std::string::npos, "a POST with a delayed body gets its page");
+	const std::string headers = "POST /00000002/enterareas.html HTTP/1.0\r\nUser-Agent: test\r\nContent-Length: 77\r\n\r\n";
+	bool wholeRequest = false;
+	{
+		std::lock_guard<std::mutex> lock(*linesMutex);
+		for (const std::string& line : *lines)
+		{
+			const size_t open = line.find("request (");
+			if (open != std::string::npos && line.find("POST /00000002/enterareas.html") != std::string::npos)
+				wholeRequest = std::stoul(line.substr(open + 9)) == headers.size() + body.size();
+		}
+	}
+	Check(wholeRequest, "the server reads the POST's body before answering");
+}
+
 // The login data file (6881/6882), its first piece being the room rules' scenario list (report entries 42-43).
 static void TestDataFile()
 {
@@ -403,6 +453,7 @@ int main()
 	TestSession();
 	TestWebPages();
 	TestTlsServer();
+	TestTlsPost();
 	TestLobby();
 	TestServerChain();
 	TestRelay();

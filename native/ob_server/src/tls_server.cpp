@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <algorithm>
+#include <cctype>
 #include "tls_server.h"
 
 #include "mbedtls/ctr_drbg.h"
@@ -304,7 +305,40 @@ namespace ob::server
 						break;
 					request.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(rc));
 				}
+				// A POST's body (the game's enterareas.html sends it in a second record): read all of it before the
+				// reply. Closing with it unread resets the connection, and the client can lose the reply (entry 61).
+				const size_t headerEnd = request.find("\r\n\r\n");
+				if (headerEnd != std::string::npos)
+				{
+					std::string headers = request.substr(0, headerEnd);
+					std::transform(headers.begin(), headers.end(), headers.begin(),
+						[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+					const size_t at = headers.find("\r\ncontent-length:");
+					size_t length = 0;
+					if (at != std::string::npos)
+						for (size_t i = at + 17; i < headers.size() && headers[i] != '\r'; i++)
+							if (headers[i] >= '0' && headers[i] <= '9')
+								length = length * 10 + static_cast<size_t>(headers[i] - '0');
+					const size_t want = headerEnd + 4 + std::min<size_t>(length, 65536);
+					while (request.size() < want)
+					{
+						rc = mbedtls_ssl_read(&ssl, buffer, sizeof(buffer));
+						if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE)
+							continue;
+						if (rc <= 0)
+							break;
+						request.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(rc));
+					}
+				}
 				const std::string path = webRequestPath(request);
+				if (m_config.log)
+				{
+					std::string first = request.substr(0, request.find("\r\n"));
+					if (first.size() > 160)
+						first.resize(160);
+					m_config.log("[web] " + address + ": request (" + std::to_string(request.size()) + " bytes, read " +
+								 std::to_string(rc) + "): " + (first.empty() ? "<none>" : first));
+				}
 				if (!path.empty())
 				{
 					const std::string reply = webSerialize(webRespond(m_config, path, address));
@@ -322,6 +356,15 @@ namespace ob::server
 					m_served++;
 				}
 				mbedtls_ssl_close_notify(&ssl);
+				// Whatever the client still sends (its close_notify) is read before the socket closes: a close with
+				// unread data is a reset, which can throw away the reply before the client reads it. Up to ~2 s.
+				for (int i = 0; i < 10; i++)
+				{
+					unsigned char drain[512];
+					const int got = mbedtls_net_recv_timeout(&client, drain, sizeof(drain), 200);
+					if (got == 0 || (got < 0 && got != MBEDTLS_ERR_SSL_TIMEOUT))
+						break;
+				}
 			}
 			mbedtls_ssl_free(&ssl);
 			mbedtls_net_free(&client);

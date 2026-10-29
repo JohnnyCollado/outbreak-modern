@@ -1076,6 +1076,20 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   Windows clients). **The first Android phone reached the lobby** over the LAN, the game's own SSL talking to
   ob_server directly.
 
+### 61. The Odin was bounced after the login pages: the server reset the POST connection
+
+- **Seen (developer):** the Odin "got to the login and bumped back"; the OnePlus reached the lobby. Both phones get the
+  same internal address from their own adapter's DHCP; the server keys sessions on the real address (.63 / .221),
+  so they do not share an address on the server (`accounts.cpp:10-23`).
+- **Server log, new per-request line:** `GET CRS-top.jsp`, `GET startsession.php?sessid=...`, then
+  `POST /00000002/enterareas.html` (335 bytes read = headers only); the Odin's adapter: `[PS2] Sending 365` + `77`
+  (the body in a second record), `[SRV] Sending 29`, `TCP: Recv error: 104`. The server answered after the headers and
+  closed with the body unread: the close becomes a reset, which can throw the reply away before the client reads it
+  (timing: the OnePlus got through, the Odin did not).
+- **Fix (`tls_server.cpp`):** the body is read by its `Content-Length` before the reply; after close_notify the
+  server reads what the client still sends (up to ~2 s) before closing. Test first (a POST whose body comes 100 ms
+  later): both checks failed, the page itself was lost on loopback too (99/101); with the fix 101/101.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
