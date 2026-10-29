@@ -297,8 +297,15 @@ namespace
 	static_assert(OB_SIO2_DMA_IGNORED == ps2x::iop::kSio2DmaIgnored);
 } // namespace
 
+#if defined(__ANDROID__)
+extern "C" void ObHostJniKeep(); // host_jni.cpp: keeps the launcher's host/search JNI functions in the library
+#endif
+
 ps2x::iop::Sio2Device* ps2CreateExternalSio2(const std::string& cardFolder, bool createSlot1)
 {
+#if defined(__ANDROID__)
+	ObHostJniKeep();
+#endif
 	if (!ob_sio2_open(cardFolder.c_str(), createSlot1))
 		return nullptr;
 	return new Pcsx2Sio2(cardFolder, createSlot1);

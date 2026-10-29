@@ -252,6 +252,14 @@ if(TARGET ps2_runtime)
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ob_ui" "${CMAKE_BINARY_DIR}/ob_ui")
 
     add_library(ps2x_external_gs STATIC adapter/hook.cpp adapter/ui_hook.cpp)
+    # The built-in host for local play (native/ob_server, AGPL-3.0; docs/plans/2026-10-28-local-play.md): the server,
+    # its beacon and the nearby-game search, in the game on both platforms. Android: the launcher's JNI (host_jni.cpp).
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ob_server" "${CMAKE_BINARY_DIR}/ob_server")
+    target_link_libraries(ps2x_external_gs PRIVATE ob_server)
+    if(ANDROID)
+        target_sources(ps2x_external_gs PRIVATE adapter/host_jni.cpp)
+        target_link_libraries(ps2x_external_gs PRIVATE log)
+    endif()
     if(MSVC)
         target_compile_options(ps2x_external_gs PRIVATE /EHsc) # this directory strips /EHsc for PCSX2 (above)
     else()

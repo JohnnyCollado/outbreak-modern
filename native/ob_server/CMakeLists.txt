@@ -36,7 +36,8 @@ else()
     target_compile_options(ob_server PRIVATE -Wall -Wextra)
 endif()
 
-if(NOT ANDROID)
+# Tests and the console server only in the server's own build, not when the game links it (native/pcsx2_gs).
+if(NOT ANDROID AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     add_executable(ob_server_tests tests/ob_server_tests.cpp tests/lobby_tests.cpp tests/relay_tests.cpp tests/guard_tests.cpp tests/beacon_tests.cpp tests/host_tests.cpp)
     target_link_libraries(ob_server_tests PRIVATE ob_server)
     # ob_server.exe: the same server as a console program for a dedicated PC (plan N6).
