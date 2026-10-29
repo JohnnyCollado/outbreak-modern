@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local play mock-up</title>
+<style>
+:root { --bg:#f6f5f1; --card:#fff; --text:#1f1e1b; --muted:#6b6a65; --line:#dcdad3; --accent:#185fa5; --accent-bg:#e6f1fb; --ok:#3b6d11; }
+@media (prefers-color-scheme: dark) { :root { --bg:#1b1b19; --card:#262624; --text:#f1efe8; --muted:#b4b2a9; --line:#444441; --accent:#85b7eb; --accent-bg:#0c447c; --ok:#97c459; } }
+* { box-sizing: border-box; }
+body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+.note { color:var(--muted); font-size:13px; margin:0 0 16px; }
+.label { color:var(--muted); font-size:12px; margin:20px 0 6px; text-transform:none; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+.pills { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 14px; }
+.pill { font-size:13px; padding:5px 10px; border-radius:8px; border:1px solid var(--line); }
+.pill.on { background:var(--accent-bg); color:var(--accent); border-color:transparent; }
+.list { border:1px solid var(--line); border-radius:8px; }
+.row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px; border-bottom:1px solid var(--line); }
+.row:last-child { border-bottom:0; }
+.name { font-weight:600; margin:0; }
+.sub { font-size:12px; color:var(--muted); margin:0; }
+button { font:inherit; font-size:14px; padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--text); }
+.wide { width:100%; margin-top:12px; }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--ok); margin-right:6px; }
+.two { display:flex; gap:8px; margin-top:12px; } .two button { flex:1; }
+</style>
+</head>
+<body>
+<h1>Local play</h1>
+<p class="note">Mock-up of the planned Network page. Nothing here is built yet.</p>
+
+<p class="label">Screen 1 — Settings › Network (joining)</p>
+<div class="card">
+  <p class="name">Online play</p>
+  <div class="pills"><span class="pill">Off</span><span class="pill on">Local play</span><span class="pill">Internet server</span></div>
+  <p class="sub" style="margin-bottom:6px">Nearby games (same Wi-Fi)</p>
+  <div class="list">
+    <div class="row"><div><p class="name">Odin 3</p><p class="sub">2 in lobby · 1 room open</p></div><button>Join</button></div>
+    <div class="row"><div><p class="name">Johnny's PC</p><p class="sub">empty lobby</p></div><button>Join</button></div>
+  </div>
+  <p class="sub" style="margin-top:8px">Searching… new games appear here</p>
+  <button class="wide">Host a game on this device</button>
+  <p class="sub" style="margin-top:14px">Connection</p>
+  <div class="pills"><span class="pill on">Automatic (DHCP)</span><span class="pill">Manual IP</span></div>
+</div>
+
+<p class="label">Screen 2 — Hosting (this device is the server)</p>
+<div class="card">
+  <p class="name"><span class="dot"></span>Hosting "Odin 3"</p>
+  <p class="sub" style="margin:4px 0 12px">Others on this Wi-Fi see it under Nearby games. Address 192.168.0.221</p>
+  <p class="sub" style="margin-bottom:6px">Players connected</p>
+  <div class="list">
+    <div class="row"><p class="name" style="font-weight:400">Odin 3 <span class="sub">(you)</span></p></div>
+    <div class="row"><p class="name" style="font-weight:400">OnePlus 13</p></div>
+    <div class="row"><p class="name" style="font-weight:400">Johnny's PC</p></div>
+  </div>
+  <p class="sub" style="margin-top:10px">The host plays too. Rooms and starting a scenario happen in the game, as before.</p>
+  <div class="two"><button>Play</button><button>Stop hosting</button></div>
+</div>
+
+<p class="label">How players meet</p>
+<div class="card">
+  <p class="sub">Local play opens on Nearby games, as DS Download Play and PSP "Search for game" do. A host announces itself on the Wi-Fi about once a second; everyone else just taps Join. Hosting is the second option, so the group gathers on one host instead of everyone hosting alone.</p>
+</div>
+</body>
+</html>
