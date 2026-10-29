@@ -36,7 +36,7 @@ namespace
 	// dev9Irq comes from the receive thread too (net.cpp NetRxThread -> rx_process), hence the atomic.
 	bool s_trace = false;
 	std::atomic<int64_t> s_irqAskedUs{0};
-	uint32_t s_waits = 0, s_windowWaits = 0;
+	uint32_t s_waits = 0, s_windowWaits = 0, s_windowOverFrame = 0; // over one frame: 16.7 ms
 	double s_longestMs = 0.0, s_windowSumMs = 0.0, s_windowLongestMs = 0.0;
 	int64_t s_windowStartUs = 0;
 
@@ -56,16 +56,18 @@ namespace
 		s_waits++;
 		s_longestMs = std::max(s_longestMs, ms);
 		s_windowWaits++;
+		if (ms > 1000.0 / 60.0)
+			s_windowOverFrame++;
 		s_windowSumMs += ms;
 		s_windowLongestMs = std::max(s_windowLongestMs, ms);
 		if (!s_windowStartUs)
 			s_windowStartUs = now;
 		if (now - s_windowStartUs >= 10'000'000)
 		{
-			std::printf("[dev9] interrupt wait: %u in 10 s, average %.2f ms, longest %.2f ms\n", s_windowWaits,
-				s_windowSumMs / s_windowWaits, s_windowLongestMs);
+			std::printf("[dev9] interrupt wait: %u in 10 s, average %.2f ms, longest %.2f ms, %u over a frame\n",
+				s_windowWaits, s_windowSumMs / s_windowWaits, s_windowLongestMs, s_windowOverFrame);
 			std::fflush(stdout);
-			s_windowWaits = 0;
+			s_windowWaits = s_windowOverFrame = 0;
 			s_windowSumMs = s_windowLongestMs = 0.0;
 			s_windowStartUs = now;
 		}
@@ -76,6 +78,8 @@ namespace
 		s_irqIn = -1;
 		if (DEV9irqHandler() == 1)
 			s_irq = true;
+		else
+			s_irqAskedUs = 0; // masked or no cause: nothing to take, so the trace's clock does not run on
 	}
 } // namespace
 
@@ -246,7 +250,7 @@ void ob_dev9_set_trace(bool on)
 {
 	s_trace = on;
 	s_irqAskedUs = 0;
-	s_waits = s_windowWaits = 0;
+	s_waits = s_windowWaits = s_windowOverFrame = 0;
 	s_longestMs = s_windowSumMs = s_windowLongestMs = 0.0;
 	s_windowStartUs = 0;
 }

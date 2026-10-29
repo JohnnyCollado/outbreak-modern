@@ -435,6 +435,33 @@ int main()
 	}
 	else
 		Check(false, "dns1 set: the adapter opens");
+
+	// The latency trace times only interrupts the driver can take: a frame that arrives while the SMAP's interrupts
+	// are masked must not start the clock (the OnePlus run showed "longest 98497 ms": the time since boot).
+	const ob_dev9_config plain{nullptr, nullptr, 0, kLog, nullptr, 0, {}};
+	ob_dev9_set_trace(true);
+	if (ob_dev9_open(&plain))
+	{
+		s_rxBd = s_txBd = 0;
+		for (uint32_t i = 0; i < 64; i++)
+			ob_dev9_write16(kBdRx + i * 8, kBdRxEmpty);
+		ob_dev9_write16(kIntrMask, 0); // masked: the driver does not want interrupts yet
+		Send(UdpFrame(any, all, 68, 67, dhcp));
+		bool masked = false;
+		Receive(&masked, 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		ob_dev9_write16(kIntrMask, kIntrRxEnd | kIntrTxEnd);
+		Send(UdpFrame(any, all, 68, 67, dhcp));
+		bool taken = false;
+		Receive(&taken);
+		uint32_t n = 0;
+		double longest = -1.0;
+		ob_dev9_irq_wait_stats(&n, &longest);
+		Check(taken && n >= 1 && longest < 200.0, "trace: time spent masked is not counted as waiting");
+		ob_dev9_close();
+	}
+	else
+		Check(false, "trace: the adapter opens");
 	std::printf("pcsx2_dev9: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }
