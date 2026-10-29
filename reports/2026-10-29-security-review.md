@@ -63,3 +63,18 @@ info chunks, web request parsing, beacon decoding: bounded. Android: only the la
 exported, immutable explicit PendingIntent, `allowBackup=false`, no cleartext config; zip slip blocked; every typed
 network value validated in Kotlin and C++. PCSX2's DHCP/DNS servers open no host sockets. Build downloads in
 `pcsx2-deps*.bat` are SHA-256 checked; Gradle repositories restricted to Google and Maven Central.
+
+## Fixed (2026-10-29)
+
+| # | Fix | Commit | Test first |
+|---|---|---|---|
+| S1 | The login site cuts each connection at 15 s and notices a stop within 250 ms; one read timeout (5 s) | `e8f2a29` | trickling peer not cut: 193/194 -> 194/194 |
+| S2-S4 | Lobby and relay: 15 s login deadline, 256 KB pending-output cap, dropped lobby clients removed after 2 s and their input discarded | `7aa0fb3` | build failed without the settings; 181/181 |
+| S5 | String caps (handle 6, nickname 32, chat 128, room name 32, password 16, event 8192 bytes; refused, not cut); `encode` refuses payloads over 65,535 | `fafe91a` | build failed without the cap argument; 184/184 |
+| S6 | A session works only from the address its account is named for; sessions seeded from `std::random_device` | `cef4a89` | build failed without the setting; 192/192 |
+| C1 | Card writer: layout fields and FAT values outside the card refused, nothing saved; bounded directory scans | `c547517` | a corrupted card crashed the test program; 173/173 |
+| C3 | DEV9 interrupt requests from the receive thread posted atomically | `7250f0b` | no failing test possible for the race on MSVC; adapter 30/30 |
+
+Full suite after the fixes: ps2x 577/577, iop 5/5, gs_cache 45/45, ob_diag 24/24, pcsx2_vu 3/3, pcsx2_gs 92/92, spu2 7/7,
+ipu 22/22, sio2 20/20, ob_server 194/194, dev9 30/30, ob_ui 173/173, Kotlin 61/61. Not yet run on a device.
+Still open: R1 (history rewrite, needs a force push), S7-S10, C2, C4-C6, the hygiene items.
