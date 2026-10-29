@@ -1213,7 +1213,7 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   Test first: 64 threads that run a callback and delete themselves exhaust the pool without (576/577), 577/577 with.
 - **Result (2026-10-29, OnePlus):** the developer: "I fully get in" — **Android reaches the obsrv fan server's lobby**
   (DNS fix, entry 65, plus 0105). No games were listed at the time (early morning US time; whether anyone was
-  online is unknown).
+  online is unknown). Minutes later another player showed up in the lobby (developer: "I see someone, it works").
 
 ## Mistakes and corrections
 
