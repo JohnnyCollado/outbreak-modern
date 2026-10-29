@@ -1059,7 +1059,7 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **The handshake (-0x7900):** a Windows client against the LAN server succeeded, but its first bytes were a *modern*
   TLS 1.0 hello (`16 03 01`, extensions ff01/0023/0005/0017): not the game. Likely Avast's HTTPS scanning on this PC
   re-originating the connection (my inference; the developer then turned Avast off for an hour). The phone sends the
-  game's own SSLv2-format hello. Cause in mbedTLS 2.28's v2 parser (`C:\ob\mbedtls2.28.10\library\ssl_srv.c:1254-1271`):
+  game's own SSLv2-format hello. Cause in mbedTLS 2.28's v2 parser (`C:\ob\mbedtls\v2.28.10\library\ssl_srv.c:1254-1271`):
   the fallback-SCSV check is `!= MBEDTLS_SSL_FALLBACK_SCSV_VALUE`, so every 00-xx-xx cipher spec counts as the signal
   and a TLS 1.0 client is refused as an "inappropriate fallback". **Fix:** `#undef MBEDTLS_SSL_FALLBACK_SCSV`
   (`mbedtls_config_ob.h`). Test first with the OnePlus's captured 102 bytes: 98/99 without, 99/99 with. So the Windows
