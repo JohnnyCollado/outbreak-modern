@@ -94,7 +94,7 @@ R1.1-008 | R1.1-007 follow-up. Exact addresses/offsets/values for a host poll sc
 - carry/request: 1964 chars, 474 requests (prev 3624 chars, 474 requests, growth -45.8%)
 - flag: 3 whole-plan reads by main, pa-expert
 - flag: 1 tool-source reads by pa-expert
-  C:/Users/johnn/.claude/projects/D--NEXTJJEN-repos-outbreak-modern/memory/pcsx2-debugging-setup.md  2.0k chars  pa-expert
+  %USERPROFILE%/.claude/projects/D--NEXTJJEN-repos-outbreak-modern/memory/pcsx2-debugging-setup.md  2.0k chars  pa-expert
 
 ## Agent runs
 - - | pa-expert | expert | claude-opus-5-5 | medium | ctx 98k | $1.384 | saved - | completed | parent 92285478

@@ -32,7 +32,7 @@ headers, an old version of the queue plan), and the Odin's Tailscale address in 
 | F5 | Low | `PS2X_NET_DNS` parsing looser than the UI's; 127/0/broadcast/multicast accepted as a fan DNS | `hook.cpp:374`, `fanServerEnv` | Reviewer |
 | F6 | Low | Latency trace timestamp race (statistics only) | `dev9_side.cpp:89` | Reviewer |
 | F7 | Low | A zip of millions of empty files passes the byte budget | `ZipExtract.kt` | Reviewer |
-| H8 | Low | Home paths `C:/Users/johnn` in 9 tracked files; pins: mbedTLS check falls back to a version string without `.git`; no Gradle dependency verification metadata | `tools/ob.sh:55` etc. | Reviewer |
+| H8 | Low | Home paths `%USERPROFILE%` in 9 tracked files; pins: mbedTLS check falls back to a version string without `.git`; no Gradle dependency verification metadata | `tools/ob.sh:55` etc. | Reviewer |
 | H9 | Low | `.claude/settings.json` denies only `git push:*` (not `git -C … push`, `gh`); `bash tools/*` allowed lets an agent run the history rewrite unprompted | `.claude/settings.json` | Reviewer |
 | Assets | Decide | Third-party files in history: Vita `.suprx` modules (~3.5 MB), a 12 MB symbol header, fonts, `.pyc` with home paths; in HEAD: 3 icon PNGs (AI-generated per metadata), a game screenshot, `.pnach` patches | history / `docs/assets/`, `legacy/results/` | Reviewer |
 

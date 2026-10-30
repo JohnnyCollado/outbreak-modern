@@ -17,6 +17,14 @@ if cmake -DOB_MBEDTLS="$MBEDTLS" -DOB_MBEDTLS_COMMIT=000000000000000000000000000
 else
     echo "ok: mbedTLS at another commit is refused"
 fi
+NOGIT=$(mktemp -d)
+mkdir -p "$NOGIT/include/mbedtls" && cp "$MBEDTLS/include/mbedtls/version.h" "$NOGIT/include/mbedtls/"
+if cmake -DOB_MBEDTLS="$NOGIT" -DOB_MBEDTLS_COMMIT=$PIN -P "$CHECK" > /dev/null 2>&1; then
+    echo "FAIL: mbedTLS without git is accepted"; fail=1
+else
+    echo "ok: mbedTLS without git is refused"
+fi
+rm -rf "$NOGIT"
 PCSX2=${OB_PCSX2:-C:/ob/pcsx2}
 if git -C "$PCSX2" merge-base --is-ancestor a81f1aa39fc56ef60dbc913637c74c49c1792033 HEAD 2>/dev/null; then
     echo "ok: PCSX2 is based on v2.9.134 (a81f1aa)"

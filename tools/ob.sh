@@ -52,7 +52,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -W) || exit 1
 : "${OB_SERVER_BUILD:=$OB_ROOT/ob-server-build}"
 : "${OB_VCVARS:=C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 export OB_VCVARS
-PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
+PY="${OB_PY:-python}"
 VC="$REPO/tools/ob/vc.bat"
 JOBS=14
 mkdir -p "$OB_LOGS"

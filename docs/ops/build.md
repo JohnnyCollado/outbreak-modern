@@ -32,7 +32,7 @@ From PowerShell, set the variable first: `$env:PS2X_GS="pcsx2-vk"; bash tools/ob
 
 ## Environment
 
-- Windows, Git Bash and PowerShell. Python: `C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe`
+- Windows, Git Bash and PowerShell. Python: `%USERPROFILE%/AppData/Local/Python/pythoncore-3.14-64/python.exe`
   (override with `OB_PY`).
 - Pins (`pins.md`): MSVC 19.44 / VS 2022, CMake 3.30, PS2Recomp `eb8688b` + `upstream/ps2recomp/` patches,
   PCSX2 v2.9.134, game SLPM-65428 v1.04 + English patch v2.1.

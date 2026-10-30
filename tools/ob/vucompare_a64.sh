@@ -12,7 +12,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd -W) || exit 1
 : "${OB_A64VU_B:=$OB_ROOT/android-vu-build}"
 : "${OB_ANDROID_SDK:=$(cygpath -m "$LOCALAPPDATA")/Android/Sdk}"
 : "${OB_ANDROID_NDK:=$OB_ANDROID_SDK/ndk/27.0.12077973}"
-PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
+PY="${OB_PY:-python}"
 LLVM="$OB_ANDROID_NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
 RELFLAGS="-O3 -DNDEBUG -g0" # as tools/ob/android.sh
 log="$OB_LOGS/ob-vucompare-a64.log" start=$(date +%s)

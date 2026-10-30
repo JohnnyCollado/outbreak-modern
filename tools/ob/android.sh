@@ -31,7 +31,7 @@ HOOKS="libhook_impl.so libmain_hook.so"
 : "${OB_ANDROID_NDK:=$OB_ANDROID_SDK/ndk/27.0.12077973}"
 : "${OB_ANDROID_BT:=$OB_ANDROID_SDK/build-tools/35.0.0}"
 : "${OB_JDK:=C:/Program Files/Android/Android Studio/jbr}"
-PY="${OB_PY:-C:/Users/johnn/AppData/Local/Python/pythoncore-3.14-64/python.exe}"
+PY="${OB_PY:-python}"
 PKG=com.outbreakmodern.app
 API=29 TARGET_SDK=35
 JAR="$OB_ANDROID_SDK/platforms/android-$TARGET_SDK/android.jar"
@@ -154,6 +154,14 @@ step_package() {
     [ -f "$v" ] || { echo "package: $v missing (build first)"; return 1; }
     "$LLVM/llvm-strip.exe" --strip-unneeded -o "$st/lib/arm64-v8a/libob_a64vu.so" "$v" || return 1
     cp -r "$OB_PCSX2/bin/resources/shaders" "$st/assets/resources/" || return 1
+    # Licence texts travel with the app (THIRD_PARTY_NOTICES.md; security queue 2).
+    mkdir -p "$st/assets/licenses" &&
+    cp "$REPO/THIRD_PARTY_NOTICES.md" "$REPO/COPYING" "$st/assets/licenses/" &&
+    cp "${OB_MBEDTLS:-C:/ob/mbedtls/v2.28.10}/LICENSE" "$st/assets/licenses/LICENSE-mbedtls" &&
+    cp "${OB_ADRENOTOOLS:-$OB_ROOT/adrenotools}/LICENSE" "$st/assets/licenses/LICENSE-adrenotools" &&
+    cp "$OB_T_DEPS/raylib-src/LICENSE" "$st/assets/licenses/LICENSE-raylib" &&
+    cp "$OB_PCSX2/3rdparty/libzip/LICENSE" "$st/assets/licenses/LICENSE-libzip" &&
+    cp "$OB_PCSX2/3rdparty/imgui/LICENSE.txt" "$st/assets/licenses/LICENSE-imgui" || return 1
     (cd "$st/assets/resources" && find . -type f ! -name files.txt | sed 's|^\./||' | sort > files.txt)
     # Gradle (native/android: AGP 9.4.0, wrapper Gradle 9.7.1, JDK 17) compiles the Java bridge, packs the staged
     # libraries (lib/) and assets, and signs with the debug key; the build tree stays outside the repo.
