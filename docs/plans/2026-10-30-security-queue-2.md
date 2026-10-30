@@ -28,6 +28,23 @@ with no warnings. P1's rewrite runs last, since it changes every commit ID; publ
 | H9 | Settings: denying more push forms is the developer's call (agents don't edit their own permissions) | `.claude/settings.json` | none: proposed text only |
 | Assets | The developer decides which third-party files leave history | none yet | none |
 
-## Progress
+## Progress (2026-10-30)
 
-See the commit log; final state recorded at the end of the queue.
+| Item | State |
+|---|---|
+| P2 | Done: `purge-check.sh` fails on a failed git, searches contents |
+| P1 | Scrubbed copy built and checked; **waiting for the developer's force push**, then local branches switch again |
+| M1, F1, F3, F5, F7, L1, L2, L3, L5, L6 | Done, tests first where a test can fail |
+| M2 | **Reduced, not eliminated:** an 8 s handshake limit; the site still serves one connection at a time, so a persistent peer can slow logins. A worker pool is the full fix |
+| M3 | Done: the sender is dropped by its own budget (lobby 64 KB/s, relay 512 KB/s). The limits are estimates: check them in real play |
+| F2 | **Partly:** driver imports staged internally. On Android 10 settings, mods and textures stay external (players manage them by USB), so another app with storage permission could change them. Raising minSdk to 30 would close it: the developer's call |
+| F4 | Done; the size test passed before the cap, so it guards rather than proves |
+| F6 | Left: statistics only, no memory hazard |
+| L4 | Partly: the host's device can't be Removed; the list still shows connections for up to 15 s before login |
+| H8 | Done: mbedTLS must be an unmodified pinned checkout; no home paths in tools. Not done: Gradle dependency verification metadata, hashes for FetchContent |
+| H9 | **The developer's:** agents don't edit their own permissions. Proposed: deny `Bash(git -C * push*)`, `Bash(gh *)`, `Bash(bash tools/repo/*)` |
+| Licensing | Done for COPYING and the notices in the APK; **the AGPL text, the source link and the texts marked "project repository" remain before a public release** |
+| Assets | The developer decides |
+
+Not run on a device yet: this batch. Full suite: ps2x 577/577, iop 5/5, gs_cache 45/45, ob_diag 24/24, pcsx2_vu 3/3, pcsx2_gs
+92/92, spu2 7/7, ipu 22/22, sio2 20/20, ob_server 228/228, dev9 33/33, ob_ui 191/191, Kotlin 72/72; 0 warnings.
