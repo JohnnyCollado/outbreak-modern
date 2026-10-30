@@ -1,0 +1,50 @@
+From fa98c144aa908a3fd15a56e6fe73af13a88351eb Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 11:18:09 -0400
+Subject: [PATCH] DEV9 Sockets: UDP to this host's loopback and 0.x is refused;
+ TCP to 0.x too
+
+A fan server's DNS answer now decides where the game connects. UDP had no check at all, and 0.x reaches loopback on
+Linux and Android, which 0005 did not cover (outbreak-modern security queue 2, F1). Test: native/pcsx2_dev9 "UDP to
+127.0.0.1 from the game does not reach a loopback socket" (32/33 without, 33/33 with).
+---
+ pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp | 2 +-
+ pcsx2/DEV9/Sessions/UDP_Session/UDP_Session.cpp     | 9 +++++++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+index 02b3a81..d761123 100644
+--- a/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
++++ b/pcsx2/DEV9/Sessions/TCP_Session/TCP_Session_Out.cpp
+@@ -170,7 +170,7 @@ namespace Sessions
+ 		// loopback, so binding alone does not stop it).
+ 		const bool remapped = HostRemap::Apply(&hostIP, &hostPort, &source);
+ 		const bool loopback = hostIP.bytes[0] == 127;
+-		if (loopback && !remapped)
++		if ((loopback || hostIP.bytes[0] == 0) && !remapped) // 0.x reaches loopback on Linux and Android
+ 		{
+ 			Console.Warning("DEV9: TCP: refused a connection to loopback that no remap entry names");
+ 			CloseSocket();
+diff --git a/pcsx2/DEV9/Sessions/UDP_Session/UDP_Session.cpp b/pcsx2/DEV9/Sessions/UDP_Session/UDP_Session.cpp
+index 276a2a4..bfa97fc 100644
+--- a/pcsx2/DEV9/Sessions/UDP_Session/UDP_Session.cpp
++++ b/pcsx2/DEV9/Sessions/UDP_Session/UDP_Session.cpp
+@@ -114,6 +114,15 @@ namespace Sessions
+ 	{
+ 		deathClockStart.store(std::chrono::steady_clock::now());
+ 
++		// This host's loopback and 0.x (loopback on Linux and Android) are out of the PS2's reach, as for TCP. Every
++		// route goes through here (the fixed-port socket included). DHCP's 0.0.0.0 source is not a destination.
++		if (destIP.bytes[0] == 127 || destIP.bytes[0] == 0)
++		{
++			Console.Warning("DEV9: UDP: refused a destination on this host");
++			RaiseEventConnectionClosed();
++			return false;
++		}
++
+ 		IP_PayloadPtr* ipPayload = static_cast<IP_PayloadPtr*>(payload);
+ 		UDP_Packet udp(ipPayload->data, ipPayload->GetLength());
+ 
+-- 
+2.46.2.windows.1
+

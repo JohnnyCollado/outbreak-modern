@@ -159,6 +159,13 @@ class NetPlayTest {
     }
 
     @Test
+    fun aFanDnsMustBeAnAddressAServerCanHave() {
+        for (bad in listOf("127.0.0.1", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.1.1.1", "255.255.255.255"))
+            assertEquals(bad, emptyList<Pair<String, String>>(), chosenNetEnv(ui("net_mode" to "server", "net_server" to bad), "wlan0"))
+        assertTrue(chosenNetEnv(ui("net_mode" to "server", "net_server" to "192.168.0.5"), "wlan0").isNotEmpty())
+    }
+
+    @Test
     fun manualConnectionIsPassedOnWithTheFanDns() {
         val env = chosenNetEnv(ui("net_mode" to "server", "net_server" to "208.72.237.31", "net_connection" to "manual",
             "net_address" to "192.168.0.80", "net_netmask" to "255.255.255.0", "net_gateway" to "192.168.0.1",

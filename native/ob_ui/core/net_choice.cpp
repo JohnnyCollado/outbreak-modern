@@ -133,7 +133,9 @@ namespace obui
 
 	EnvList fanServerEnv(const std::string& dns, const std::string& iface, const NetConnection& c)
 	{
-		if (!isIpv4(dns))
+		// An address a server can have: not 0.x, loopback, multicast or broadcast (security queue 2, F1).
+		std::array<int, 4> b{};
+		if (!Bytes(dns, b) || b[0] == 0 || b[0] == 127 || b[0] >= 224)
 			return {};
 		static const std::regex kInterface("[A-Za-z0-9_.]{1,15}");
 		if (!iface.empty() && !std::regex_match(iface, kInterface))

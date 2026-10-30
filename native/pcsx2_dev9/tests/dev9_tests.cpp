@@ -396,6 +396,29 @@ int main()
 	}
 	Check(!accepted, "a connection to 127.0.0.1 without a remap entry does not reach a loopback listener");
 
+	// Security queue 2, F1: the same for UDP (a fan server's DNS answer could name loopback).
+	SOCKET udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	sockaddr_in udpAddr{};
+	udpAddr.sin_family = AF_INET;
+	udpAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	bind(udp, reinterpret_cast<sockaddr*>(&udpAddr), sizeof(udpAddr));
+	int udpLen = sizeof(udpAddr);
+	getsockname(udp, reinterpret_cast<sockaddr*>(&udpAddr), &udpLen);
+	u_long udpNonBlocking = 1;
+	ioctlsocket(udp, FIONBIO, &udpNonBlocking);
+	const std::vector<uint8_t> probe = {1, 2, 3, 4};
+	Send(UdpFrame(yiaddr, kLoopback, 40004, ntohs(udpAddr.sin_port), probe));
+	bool udpArrived = false;
+	const auto deadline4 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!udpArrived && std::chrono::steady_clock::now() < deadline4)
+	{
+		Receive(&irq, 50);
+		char got[16];
+		udpArrived = recv(udp, got, sizeof(got), 0) > 0;
+	}
+	closesocket(udp);
+	Check(!udpArrived, "UDP to 127.0.0.1 from the game does not reach a loopback socket");
+
 	std::vector<uint8_t> ram(0x10000, 0);
 	Check(ob_dev9_dma(ram.data(), static_cast<uint32_t>(ram.size()), 0x100, (1u << 16) | 1u, 0x00000201u) ==
 			  OB_DEV9_DMA_IGNORED,

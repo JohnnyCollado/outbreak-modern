@@ -17,6 +17,7 @@
 #include "ob_spu2_bridge.h"
 #include "ob_ipu_bridge.h"
 #include "ob_sio2_bridge.h"
+#include "net_choice.h"
 #include "ob_ui.h"
 #include "memory_card.h"
 
@@ -375,7 +376,7 @@ ps2x::iop::Dev9Device* ps2CreateExternalDev9(const std::string& interfaceName, c
 	{
 		unsigned a = 0, b = 0, c = 0, d = 0;
 		char tail = 0;
-		if (std::sscanf(dns, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4 && (a | b | c | d) <= 255)
+		if (obui::isIpv4(dns) && std::sscanf(dns, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4)
 		{
 			const uint8_t bytes[4] = {uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
 			std::memcpy(config.dns1, bytes, 4);

@@ -630,8 +630,10 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
         val name = cleanHostName(settings.ui("host_name").ifEmpty { Build.MODEL ?: "" })
         if (hosting) {
             rows += SRow.Info("host-on", "Hosting \"$name\". Players in the lobby: ${hostPlayers.size}", Tone.GOOD)
+            val self = localLink(context)?.address
             for (p in hostPlayers)
-                rows += SRow.Buttons("player-$p", p, "", listOf("Remove"), danger = setOf(0)) {
+                if (p == self) rows += SRow.Info("player-$p", "$p (this device)") // can't remove itself (queue 2, L4)
+                else rows += SRow.Buttons("player-$p", p, "", listOf("Remove"), danger = setOf(0)) {
                     nav.ask(Confirm("Remove $p?", "They are disconnected and can't rejoin until you stop hosting.", "Remove", "Cancel", {
                         NativeBridge.hostRemove(p)
                         note("Removed $p")

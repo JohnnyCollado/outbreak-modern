@@ -1646,6 +1646,11 @@ namespace
 					" in the lobby)", &kSuccess);
 				for (const std::string& p : g_host->players())
 				{
+					if (p == g_hostAddress)
+					{
+						Info(p.c_str(), "This device"); // can't remove itself (security queue 2, L4)
+						continue;
+					}
 					const char* const remove[] = {"Remove"};
 					if (Actions(p.c_str(), remove, 1) == 0)
 					{

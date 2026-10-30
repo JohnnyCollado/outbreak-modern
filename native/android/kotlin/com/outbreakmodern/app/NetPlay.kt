@@ -103,7 +103,9 @@ fun gameNetEnv(server: String, webPort: Int, iface: String, connection: NetConne
  * DHCP hands it out (PS2X_NET_DNS); manual settings get it as DNS 1, their own DNS 1 second. Null if unsound.
  */
 fun fanServerEnv(dns: String, iface: String, connection: NetConnection): List<Pair<String, String>>? {
-    if (!isIpv4(dns)) return null
+    // An address a server can have: not 0.x, loopback, multicast or broadcast (security queue 2, F1).
+    val first = ipv4Bytes(dns)?.get(0) ?: return null
+    if (first == 0 || first == 127 || first >= 224) return null
     if (iface.isNotEmpty() && !INTERFACE_NAME.matches(iface)) return null
     val settings = if (connection.dhcp) connection else connection.copy(dns1 = dns, dns2 = connection.dns1)
     val netcnf = netcnfValue(settings) ?: return null

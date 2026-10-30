@@ -825,6 +825,12 @@ static void NetTests()
 			  "")
 			  .empty(),
 		"net: incomplete manual settings = offline");
+	// Security queue 2, F1: a fan server's DNS must be an address a server can have.
+	for (const char* bad : {"127.0.0.1", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.1.1.1", "255.255.255.255"})
+		Check(obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", bad}}), "").empty(),
+			(std::string("net: not a fan DNS: ") + bad).c_str());
+	Check(!obui::chosenNetEnv(ui({{"net_mode", "server"}, {"net_server", "192.168.0.5"}}), "").empty(),
+		"net: a fan DNS on the local network is fine");
 	Check(obui::cleanHostName("  Johnny's PC  ") == "Johnny's PC" && obui::cleanHostName("\x01\x07") == "Host" &&
 			  obui::cleanHostName(std::string(40, 'x')).size() == 24,
 		"net: host names are short and printable");
