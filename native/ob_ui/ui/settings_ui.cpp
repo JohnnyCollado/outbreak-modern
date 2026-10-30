@@ -21,6 +21,7 @@
 #include "widescreen.h"
 #include "menu_trigger.h"
 #include "net_choice.h"
+#include "window_size.h"
 #include "touch_pad.h"
 #if !defined(__ANDROID__)
 #include "../../ob_server/src/host.h" // the built-in host and nearby search (by path: PCSX2 has a Host.h); Windows only
@@ -1269,6 +1270,17 @@ namespace
 		EndCard();
 	}
 
+	// The saved window size and mode, on the game window: at Play, or at start-up when the launcher is skipped.
+	void ApplyGameWindow()
+	{
+		int w = 0, h = 0;
+		if (s->host.setWindowSize && obui::parseWindowSize(Get("window"), w, h))
+			s->host.setWindowSize(w, h);
+		const std::string m = Ui("window_mode", "windowed");
+		if (s->host.setWindowMode && m != "windowed")
+			s->host.setWindowMode(m == "borderless" ? 1 : 2);
+	}
+
 	void PageDisplay()
 	{
 		if (!s->host.android)
@@ -1280,7 +1292,8 @@ namespace
 			if (Choice("Window mode", m, modes, 3))
 			{
 				SetUi("window_mode", m == 1 ? "borderless" : m == 2 ? "fullscreen" : "windowed", "window mode");
-				if (s->host.setWindowMode)
+				// The launcher keeps its own window: these apply to the game window, at Play (ApplyGameWindow).
+				if (s->host.setWindowMode && !s->launcher)
 					s->host.setWindowMode(m);
 			}
 			const std::string win = Get("window");
@@ -1294,9 +1307,11 @@ namespace
 			if (Choice(m == 1 ? "Output resolution (desktop)" : "Output resolution", cur, sizes, 5, m != 1))
 			{
 				Set("window", std::to_string(kWindowSizes[cur].w) + "x" + std::to_string(kWindowSizes[cur].h), "resolution");
-				if (s->host.setWindowSize)
+				if (s->host.setWindowSize && !s->launcher)
 					s->host.setWindowSize(kWindowSizes[cur].w, kWindowSizes[cur].h);
 			}
+			if (s->launcher)
+				Hint("These apply to the game window when the game starts.");
 			EndCard();
 		}
 
@@ -2783,13 +2798,7 @@ namespace obui
 			else
 				std::fprintf(stderr, "[ui] default widescreen not set: %s\n", err.c_str());
 		}
-		// Start-up settings the menu owns ([ui]).
-		if (s->host.setWindowMode && interactive)
-		{
-			const std::string m = Ui("window_mode", "windowed");
-			if (m != "windowed")
-				s->host.setWindowMode(m == "borderless" ? 1 : 2);
-		}
+		// Start-up settings the menu owns ([ui]). The window mode waits for the game (ApplyGameWindow).
 		if (s->host.setVolume)
 			s->host.setVolume(std::atoi(Ui("volume", "100").c_str()) / 100.0f);
 		const std::string vs = Ui("vsync", "on");
@@ -2828,7 +2837,10 @@ namespace obui
 			return true;
 		const bool skip = Ui("launcher", "on") == "off" && DiscOk();
 		if (skip)
+		{
 			ApplyNetwork(); // straight into the game: the launcher's Play does this otherwise
+			ApplyGameWindow();
+		}
 		return skip;
 	}
 
@@ -2851,6 +2863,7 @@ namespace obui
 		if (s->frameResult == 1)
 		{
 			ApplyNetwork();
+			ApplyGameWindow();
 			if (Ui("card_backup", "on") == "on")
 			{
 				const char* env = std::getenv("PS2X_SAVES");

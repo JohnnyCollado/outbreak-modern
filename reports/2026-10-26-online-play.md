@@ -1215,6 +1215,25 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   (DNS fix, entry 65, plus 0105). No games were listed at the time (early morning US time; whether anyone was
   online is unknown). Minutes later another player showed up in the lobby (developer: "I see someone, it works").
 
+### 67. build-all.bat and dist/; the launcher keeps its own window
+
+- **Asked (developer, 2026-10-30):** one batch building both versions into `dist/`, the PC one a .exe; window mode applies
+  to the game only, "almost like a launcher and a game".
+- **`build-all.bat` -> `tools/dist.sh`:** `dist/windows/OutbreakModern.exe` with its DLLs, shaders and licences,
+  `dist/android/outbreak-modern.apk`. Only named files are copied; the script refuses saves, settings, logs and keys.
+- **Launcher window:** always its own 1280x720; Window mode and Output resolution only save there and apply at Play
+  (`ApplyGameWindow`), or at start-up when the launcher is skipped; the in-game menu still applies them at once. **Not
+  yet seen on screen.** Test: `parseWindowSize`; the rest needs a run.
+- **Issue: removing the worktree broke build folders that remembered its path.** Fix: `dist.sh` repoints the runner and
+  Android trees; the test trees' caches were cleared once.
+- **Issue: "0 warnings" in earlier reports covered only recompiled files.** The full rebuild showed C4530 in
+  `ob_server` (the game's build folder strips /EHsc) and two redundant Kotlin `else`. Fixed; the full count is now 0.
+- **Issue: `ob_diag` could not configure from scratch in the net trees** (ignored `OB_T_DEPS`). Fixed in `ob.sh`.
+- **APK 95 -> 66 MB after building from the new path.** Libraries, shaders, licences and host code are all present, signature
+  v2; the cause is not established (guess: stale files in the old build). To be checked on a device.
+- Suites: ps2x 577/577, iop 5/5, gs_cache 45/45, ob_diag 24/24, vu 3/3, gs 92/92, spu2 7/7, ipu 22/22, sio2 20/20, ob_server
+  228/228, dev9 33/33, ob_ui 201/201, Kotlin 72/72.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

@@ -44,3 +44,6 @@ net.env
 *.log
 !gate/evidence/**/*.log
 build/
+
+# build-all.bat output
+dist/

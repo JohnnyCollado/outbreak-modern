@@ -34,7 +34,7 @@ if(WIN32)
     target_link_libraries(ob_server PUBLIC ws2_32 iphlpapi)
 endif()
 if(MSVC)
-    target_compile_options(ob_server PRIVATE /W4 /permissive-)
+    target_compile_options(ob_server PRIVATE /W4 /permissive- /EHsc) # /EHsc: the game's build folder strips it for PCSX2
 else()
     target_compile_options(ob_server PRIVATE -Wall -Wextra)
 endif()

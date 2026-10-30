@@ -86,7 +86,7 @@ diag_build() {
     start=$(date +%s)
     mkdir -p "$OB_DIAG_BUILD"
     { { [ -f "$OB_DIAG_BUILD/build.ninja" ] ||
-          vc cmake -S "$REPO/native/ob_diag" -B "$OB_DIAG_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_SRC="$OB_SRC" -DOB_T="$OB_T"; } &&
+          vc cmake -S "$REPO/native/ob_diag" -B "$OB_DIAG_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DOB_SRC="$OB_SRC" -DOB_T="$OB_T" "-DOB_STB_DIR=${OB_T_DEPS:-$OB_T/_deps}/raylib-src/src/external"; } &&
       vc cmake --build "$OB_DIAG_BUILD" -j $JOBS; } > "$log" 2>&1
     rc=$?
     echo "ob_diag: build exit $rc in $(( $(date +%s) - start )) s ($log)"

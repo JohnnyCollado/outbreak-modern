@@ -401,7 +401,6 @@ private fun RowView(r: SRow, focused: Boolean, picked: Int = 0, onPick: (Int) ->
                     is SRow.Choice -> r.label
                     is SRow.Toggle -> r.label
                     is SRow.Slider -> r.label
-                    else -> ""
                 }
                 Text(label, color = if (enabled) TextHi else TextLo, fontSize = 17.sp, modifier = Modifier.weight(1f))
                 when (r) {
@@ -416,7 +415,6 @@ private fun RowView(r: SRow, focused: Boolean, picked: Int = 0, onPick: (Int) ->
                             valueRange = r.min.toFloat()..r.max.toFloat(), enabled = enabled, modifier = Modifier.weight(1f))
                         Text("${r.value}${r.suffix}", color = TextHi, fontSize = 15.sp, modifier = Modifier.padding(start = 10.dp))
                     }
-                    else -> {}
                 }
             }
         }

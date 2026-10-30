@@ -18,6 +18,7 @@
 #include "menu_trigger.h"
 #include "net_choice.h"
 #include "safe_text.h"
+#include "window_size.h"
 #include "touch_pad.h"
 #include "widescreen.h"
 
@@ -840,6 +841,13 @@ static void NetTests()
 // Modified UTF-8, or a debuggable build aborts. Invalid bytes, NUL and 4-byte characters become '?'.
 static void SafeTextTests()
 {
+	// The saved Output resolution, applied to the game window at Play.
+	{
+		int w = 0, h = 0;
+		Check(obui::parseWindowSize("1920x1080", w, h) && w == 1920 && h == 1080, "window size: 1920x1080");
+		for (const char* bad : {"", "1920", "x1080", "1920x", "axb", "0x0", "1920x1080x3", "-1x5", "99999x99999"})
+			Check(!obui::parseWindowSize(bad, w, h), (std::string("window size refused: '") + bad + "'").c_str());
+	}
 	// Security queue 2, F3: a value with a line break must not become a second setting.
 	{
 		obui::IniFile injected;

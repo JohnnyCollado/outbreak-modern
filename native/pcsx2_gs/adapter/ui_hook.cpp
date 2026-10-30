@@ -224,6 +224,7 @@ namespace
 	// Window calls for ob_ui (main thread).
 	bool s_borderless = false; // our own borderless (ob_gs_set_borderless), not raylib's flag
 	bool s_fullscreen = false; // the monitor switched by ob_gs_set_display_mode
+	uint32_t s_outputW = 0, s_outputH = 0; // the Output resolution last set through the menu
 	void UiSetWindowMode(int mode)
 	{
 #if !defined(__ANDROID__)
@@ -235,8 +236,10 @@ namespace
 		s_fullscreen = false;
 		if (mode == 2)
 		{
+			// The size just chosen (the launcher's Play), else the settings the runner read at start.
 			const ps2game::Settings& st = ps2game::activeSettings();
-			const uint32_t w = st.windowWidth ? st.windowWidth : 1920u, h = st.windowHeight ? st.windowHeight : 1080u;
+			const uint32_t w = s_outputW ? s_outputW : st.windowWidth ? st.windowWidth : 1920u;
+			const uint32_t h = s_outputH ? s_outputH : st.windowHeight ? st.windowHeight : 1080u;
 			s_fullscreen = ob_gs_set_display_mode(GetWindowHandle(), w, h);
 		}
 		s_borderless = mode != 0;
@@ -252,6 +255,8 @@ namespace
 	void UiSetWindowSize(int w, int h)
 	{
 #if !defined(__ANDROID__)
+		s_outputW = static_cast<uint32_t>(w);
+		s_outputH = static_cast<uint32_t>(h);
 		if (s_borderless)
 			return; // applies when back in a window, and at the next start
 		SetWindowSize(w, h);
@@ -356,10 +361,9 @@ namespace
 			SetWindowTitle("Outbreak Modern");
 			SetIconOnce();
 #if !defined(__ANDROID__)
-			// No window size in the settings: the runner's built-in 640x448 is too small for the launcher. Open at
-			// 1280x720 (at most 90% of the monitor), centred; the game then keeps this window.
-			if (ps2game::activeSettings().windowWidth == 0 && !IsWindowFullscreen() &&
-				!s_borderless)
+			// The launcher has its own window whatever the game's size and mode are: 1280x720 (at most 90% of the
+			// monitor), centred. Play applies the game's (obui ApplyGameWindow).
+			if (!IsWindowFullscreen() && !s_borderless)
 			{
 				const int mon = GetCurrentMonitor();
 				const int mw = GetMonitorWidth(mon), mh = GetMonitorHeight(mon);
