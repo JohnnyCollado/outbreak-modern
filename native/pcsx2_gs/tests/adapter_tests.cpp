@@ -159,6 +159,12 @@ int main()
 	std::snprintf(d, sizeof(d), "(%u bytes, %d bad)", n, bad);
 	Check("after exit: inline readback sees the same frame", n == RW * RH * 4 && bad == 0, d);
 
+	// Closing the GS destroys ImGui and its fonts; a new context can land at the old address, so the menu can't tell by
+	// the pointer (report entry 68: F1 crashed on stale fonts). Every close counts.
+	const unsigned generation = ob_gs_ui_generation();
+	ob_gs_reopen();
+	Check("reopen: the UI generation moves on, so the menu reloads its fonts", ob_gs_ui_generation() != generation);
+
 	std::printf("Passed: %d\nTotal Tests: %d\n", g_passed, g_total);
 	std::fflush(stdout);
 	// No GSclose (the runner never closes either): PCSX2's static destructors then fault on the open device at a

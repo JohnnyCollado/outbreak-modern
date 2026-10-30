@@ -62,6 +62,9 @@ bool ob_gs_ui_present(void (*build)(void* user), void* user);
 // Main thread, after the settings file was read again (the launcher): closes the GS now if it is open; the next GS
 // call opens it with the options set since. Android keeps the Vulkan driver it chose first (one per process).
 void ob_gs_reopen();
+// Counts the closes of the GS, each of which destroys ImGui with its fonts. What the UI holds from ImGui is valid only
+// for the generation it was made in (a new context can land at the old address, so its pointer can't tell).
+unsigned ob_gs_ui_generation();
 // Vsync, live: 0 = off, 1 = on (Mailbox, the default), 2 = strict (FIFO). Only for a visible window.
 void ob_gs_set_vsync(int mode);
 // A small "NN.N fps" readout (guest vsyncs per second) in the top-left corner of every frame. Off by default.

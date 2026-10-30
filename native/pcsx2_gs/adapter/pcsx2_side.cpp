@@ -1153,11 +1153,19 @@ bool ob_gs_ui_present(void (*build)(void* user), void* user)
 	return true;
 }
 
+static std::atomic<unsigned> s_ui_generation{0};
+
+unsigned ob_gs_ui_generation()
+{
+	return s_ui_generation.load(std::memory_order_relaxed);
+}
+
 void ob_gs_reopen()
 {
 	std::lock_guard<std::mutex> lk(s_mu);
 	if (!s_tried)
 		return;
+	s_ui_generation.fetch_add(1, std::memory_order_relaxed);
 	s_icon_font.store(nullptr, std::memory_order_relaxed); // ImGui's fonts go with its context
 	if (s_open)
 		GSclose();
@@ -1179,6 +1187,7 @@ bool ob_gs_reopen_if_changed()
 		Pcsx2Config::GSOptions::AspectRatioNames[static_cast<int>(o.aspect)],
 		Pcsx2Config::GSOptions::AspectRatioNames[static_cast<int>(s_aspect)], o.serial.c_str(), ob_disc_serial.c_str());
 	std::fflush(stderr);
+	s_ui_generation.fetch_add(1, std::memory_order_relaxed);
 	s_icon_font.store(nullptr, std::memory_order_relaxed); // ImGui's fonts go with its context (the menu sets it again)
 	GSclose();
 	s_tried = s_open = false;

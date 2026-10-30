@@ -2116,10 +2116,11 @@ namespace
 		// A GS reopen (the game's options differ from the launcher's: ob_gs_reopen_if_changed) destroys ImGui's context
 		// with its fonts (GSclose -> ImGuiManager::Shutdown) and makes a new one: the fonts and style here then point at
 		// freed memory (developer, 2026-10-26: Start + Select, the menu, crashed on Windows). Start over on a new context.
-		static ImGuiContext* s_ctx = nullptr;
-		if (s_ctx != ImGui::GetCurrentContext())
+		// By the generation: the new context can land at the old address (report entry 68).
+		static unsigned s_generation = 0;
+		if (s_generation != ob_gs_ui_generation())
 		{
-			s_ctx = ImGui::GetCurrentContext();
+			s_generation = ob_gs_ui_generation();
 			s->fontsTried = false;
 			s->styleReady = false;
 			s->fontText = s->fontBold = g_pendingText = g_pendingBold = nullptr;

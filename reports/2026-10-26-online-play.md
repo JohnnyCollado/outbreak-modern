@@ -1234,6 +1234,17 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - Suites: ps2x 577/577, iop 5/5, gs_cache 45/45, ob_diag 24/24, vu 3/3, gs 92/92, spu2 7/7, ipu 22/22, sio2 20/20, ob_server
   228/228, dev9 33/33, ob_ui 201/201, Kotlin 72/72.
 
+### 68. Opening the in-game menu crashed (stale fonts after a GS reopen)
+
+- **Seen (developer, 2026-10-30):** "Opening the settings window crashed the game", first run of `dist/windows`.
+- **Dump** (`OutbreakModern.exe.25340.dmp`, read with a small parser and a relinked `/MAP`): access violation reading
+  0xD8 in `ImGuiStorage::GetVoidPtrRef`, from `ImFont::GetFontBaked` <- `ImGui::PushFont` <- the menu's `Build`.
+- **Cause (likely, not proven):** a GS reopen after the launcher ("settings changed for the GS") destroys ImGui with its
+  fonts. The menu's guard from 2026-10-26 compared the ImGui context's address, and a new context can land at the old one,
+  so the menu kept freed fonts. A fresh install changes GS settings on first run, which is why this run hit it.
+- **Fix:** `ob_gs_ui_generation()` counts every GS close; `LoadFonts` compares that. Test first (build failed without
+  it): pcsx2_gs 93/93. The crash itself needs a run in the game: not yet retried.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |
