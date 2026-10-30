@@ -33,7 +33,7 @@ with no warnings. P1's rewrite runs last, since it changes every commit ID; publ
 | Item | State |
 |---|---|
 | P2 | Done: `purge-check.sh` fails on a failed git, searches contents |
-| P1 | Scrubbed copy built and checked; **waiting for the developer's force push**, then local branches switch again |
+| P1 | Done: force-pushed by the developer; a fresh clone from GitHub passes `purge-check.sh`, and so do the local branches (switched). Incident: a merge right after the first push (`814108a`, 22 s after GitHub Desktop started; likely its Pull/Sync) brought the old history back onto `netplay-research`; a second force push removed it. Any other clone must be replaced, not merged. Left: deleting the old objects from local storage (developer) |
 | M1, F1, F3, F5, F7, L1, L2, L3, L5, L6 | Done, tests first where a test can fail |
 | M2 | **Reduced, not eliminated:** an 8 s handshake limit; the site still serves one connection at a time, so a persistent peer can slow logins. A worker pool is the full fix |
 | M3 | Done: the sender is dropped by its own budget (lobby 64 KB/s, relay 512 KB/s). The limits are estimates: check them in real play |
