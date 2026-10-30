@@ -1245,6 +1245,15 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
 - **Fix:** `ob_gs_ui_generation()` counts every GS close; `LoadFonts` compares that. Test first (build failed without
   it): pcsx2_gs 93/93. The crash itself needs a run in the game: not yet retried.
 
+### 69. Double-clicking the .exe did nothing
+
+- **Seen (developer, 2026-10-30):** "double click does not open it". Reproduced with no environment: `[gs] backend=cpu`, then
+  `fatal exception: No game`, no window. My own launches had set `PS2X_GS` and `PS2X_VU1`, which hid it.
+- **Fix:** `core/player_defaults.h`: started by a person (no `PS2X_GS`, window not hidden, launcher on), the GS is
+  pcsx2-vk; at Play the VU1 is mvu unless `PS2X_VU1` or the Advanced page says otherwise. Scripted runs (the gate) are
+  unchanged. Test first (header missing): ob_ui 209/209. Checked for real: started with no environment, it reached
+  `[gs] backend=pcsx2-vk`, `[ui] launcher`. Whether a double-click itself opens it: for the developer to confirm.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

@@ -21,6 +21,7 @@
 #include "widescreen.h"
 #include "menu_trigger.h"
 #include "net_choice.h"
+#include "player_defaults.h"
 #include "window_size.h"
 #include "touch_pad.h"
 #if !defined(__ANDROID__)
@@ -1745,6 +1746,13 @@ namespace
 	// starts the network adapter (after the launcher). A scripted run that set PS2X_DEV9 itself keeps its own.
 	void ApplyNetwork()
 	{
+		// Not the network, but the same moment: the fast VU1 unless asked otherwise (report entry 69).
+		if (obui::playerWantsMvu(std::getenv("PS2X_VU1"), Get("vu1")))
+#if defined(_WIN32)
+			_putenv_s("PS2X_VU1", "mvu");
+#else
+			setenv("PS2X_VU1", "mvu", 1);
+#endif
 		const char* dev9 = std::getenv("PS2X_DEV9");
 		if (dev9 && *dev9)
 			return;

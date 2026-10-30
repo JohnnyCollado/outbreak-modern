@@ -18,6 +18,7 @@
 #include "menu_trigger.h"
 #include "net_choice.h"
 #include "safe_text.h"
+#include "player_defaults.h"
 #include "window_size.h"
 #include "touch_pad.h"
 #include "widescreen.h"
@@ -841,6 +842,16 @@ static void NetTests()
 // Modified UTF-8, or a debuggable build aborts. Invalid bytes, NUL and 4-byte characters become '?'.
 static void SafeTextTests()
 {
+	// Double-clicking the .exe has no environment: a person gets the real graphics and VU1 (report entry 69); scripted
+	// runs (hidden window, launcher off, or their own PS2X_GS) keep what they asked for, so the gate is untouched.
+	Check(obui::playerWantsVulkan(nullptr, nullptr, nullptr), "player: a double-click gets Vulkan");
+	Check(!obui::playerWantsVulkan("cpu", nullptr, nullptr), "player: PS2X_GS wins");
+	Check(!obui::playerWantsVulkan(nullptr, "1", nullptr), "player: a hidden run stays as it was");
+	Check(!obui::playerWantsVulkan(nullptr, nullptr, "0"), "player: a run with the launcher off stays as it was");
+	Check(obui::playerWantsVulkan("", "0", "1"), "player: empty or off values count as unset");
+	Check(obui::playerWantsMvu(nullptr, ""), "player: the fast VU1 by default");
+	Check(!obui::playerWantsMvu("interp", ""), "player: PS2X_VU1 wins");
+	Check(!obui::playerWantsMvu(nullptr, "interp"), "player: the Advanced page wins");
 	// The saved Output resolution, applied to the game window at Play.
 	{
 		int w = 0, h = 0;
