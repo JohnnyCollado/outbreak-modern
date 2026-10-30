@@ -23,6 +23,13 @@ enum class ImportKind(val label: String) { TEXTURES("texture pack"), MODS("mods"
  * folder first and moves into place only when complete, so a cancelled or failed import never leaves half a pack, and
  * the previous pack goes only after the new one is in.
  */
+/**
+ * Where an import is staged. A driver is native code, so internal storage: on Android 10 other apps may write the
+ * external folder, between the check and the copy inside (security queue 2, F2).
+ */
+fun stagingDir(kind: ImportKind, internal: File, external: File): File =
+    File(if (kind == ImportKind.DRIVER) internal else external, "import-tmp/${kind.name.lowercase()}")
+
 class Importer(private val context: Context, private val settings: Settings, private val scope: CoroutineScope) {
     private var job: Job? = null
     private val buffer = ByteArray(1 shl 20)
@@ -117,6 +124,7 @@ class Importer(private val context: Context, private val settings: Settings, pri
         job = scope.launch {
             val result = runCatching { withContext(Dispatchers.IO) { body() } }
             val staging = File(settings.filesDir, "import-tmp")
+            if (result.isFailure) withContext(Dispatchers.IO) { File(context.filesDir, "import-tmp").deleteRecursively() }
             if (result.isFailure) withContext(Dispatchers.IO) { staging.deleteRecursively() }
             val e = result.exceptionOrNull()
             when {
@@ -170,7 +178,7 @@ class Importer(private val context: Context, private val settings: Settings, pri
     }
 
     private fun freshStaging(kind: ImportKind): File =
-        File(settings.filesDir, "import-tmp/${kind.name.lowercase()}").apply { deleteRecursively(); mkdirs() }
+        stagingDir(kind, context.filesDir, settings.filesDir).apply { deleteRecursively(); mkdirs() }
 
     /** Moves a finished copy into place; returns the status note. */
     private fun place(kind: ImportKind, staging: File, base: File, name: String): String {

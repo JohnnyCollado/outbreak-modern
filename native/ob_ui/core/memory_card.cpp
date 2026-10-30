@@ -78,7 +78,8 @@ namespace obui
 				return false;
 			f.seekg(0, std::ios::end);
 			const std::streamoff n = f.tellg();
-			if (n < 0)
+			// Nothing here is larger than a card (16 MiB covers every size the game knows): security queue 2, F4.
+			if (n < 0 || n > 16 * 1024 * 1024)
 				return false;
 			out.resize(static_cast<size_t>(n));
 			f.seekg(0);
@@ -381,6 +382,8 @@ namespace obui
 			{
 				uint8_t* w = FatWord(c);
 				PutLe32(w, v);
+				if (bad)
+					return; // the word was the scratch page: no card page to refresh
 				const uint64_t page = uint64_t(w - d.data()) / kRaw;
 				std::vector<uint8_t> copy(PageData(page), PageData(page) + kPage);
 				PutPage(page, copy.data(), kPage); // the page's ECC follows its new contents

@@ -75,6 +75,28 @@ class ZipExtractTest {
         assertFalse(File(dir, "readme.txt").exists())
     }
 
+    // Security queue 2, F7: empty entries cost something, or a small zip could create millions of files.
+    @Test
+    fun manyEmptyFilesUseUpTheBudget() = inTemp { dir ->
+        val entries = Array(2000) { "e$it.txt" to ByteArray(0) }
+        try {
+            extractZip(ByteArrayInputStream(zip(*entries)), dir, budget = 100_000) { true }
+            fail("a zip of many empty files must stop")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("too large"))
+        }
+        assertTrue(dir.listFiles()!!.size < 100)
+    }
+
+    // F2: a driver is native code; its import is staged in internal storage, others stay beside their destination.
+    @Test
+    fun driversAreStagedInternally() {
+        val int = File("internal")
+        val ext = File("external")
+        assertEquals(File(int, "import-tmp/driver"), stagingDir(ImportKind.DRIVER, int, ext))
+        assertEquals(File(ext, "import-tmp/mods"), stagingDir(ImportKind.MODS, int, ext))
+    }
+
     @Test
     fun theBudgetIsTheSmallerOfFreeSpaceAndAHundredTimesTheZip() {
         assertEquals(100_000L, zipBudget(zipBytes = 1_000, freeBytes = 10_000_000))

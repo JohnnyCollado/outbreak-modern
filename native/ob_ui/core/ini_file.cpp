@@ -246,6 +246,8 @@ namespace obui
 	void IniFile::set(std::string_view section, std::string_view key, std::string_view value)
 	{
 		std::string v(value);
+		// One setting stays one line, whatever the caller passes (security queue 2, F3).
+		v.erase(std::remove_if(v.begin(), v.end(), [](char c) { return c == '\r' || c == '\n'; }), v.end());
 		const bool needsQuotes = !v.empty() && (std::isspace(static_cast<unsigned char>(v.front())) ||
 			std::isspace(static_cast<unsigned char>(v.back())) || v.front() == '"' ||
 			(m_inlineComments && v.find_first_of(";#") != std::string::npos));

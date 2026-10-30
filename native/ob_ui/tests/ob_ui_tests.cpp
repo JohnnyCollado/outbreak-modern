@@ -840,6 +840,25 @@ static void NetTests()
 // Modified UTF-8, or a debuggable build aborts. Invalid bytes, NUL and 4-byte characters become '?'.
 static void SafeTextTests()
 {
+	// Security queue 2, F3: a value with a line break must not become a second setting.
+	{
+		obui::IniFile injected;
+		injected.parse("a = 1\n");
+		injected.set("", "a", "2\nnet_mode = server\r\nb = 3");
+		Check(injected.text().find("\nnet_mode") == std::string::npos && injected.text().find("\nb =") == std::string::npos,
+			"ini: a line break in a value does not add a line");
+	}
+	// F4: a card file far larger than a card is refused without being read into memory.
+	{
+		const fs::path big = TempDir("bigcard") / "big.ps2";
+		{
+			std::ofstream f(big, std::ios::binary);
+			f.seekp(64 * 1024 * 1024);
+			f.put('x');
+		}
+		const obui::CardInfo info = obui::readCard(big);
+		Check(info.present && !info.formatted, "card: an oversized file is not read as a card");
+	}
 	Check(obui::javaSafeText("Mcd001 OK") == "Mcd001 OK", "safe text: ASCII unchanged");
 	Check(obui::javaSafeText("caf\xC3\xA9 \xE3\x81\x82") == "caf\xC3\xA9 \xE3\x81\x82", "safe text: valid 2- and 3-byte UTF-8 unchanged");
 	Check(obui::javaSafeText("a\x80" "b") == "a?b", "safe text: a lone continuation byte");

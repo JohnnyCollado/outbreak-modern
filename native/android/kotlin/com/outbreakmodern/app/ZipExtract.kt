@@ -28,6 +28,9 @@ fun extractZip(
             val out = File(root, rel).canonicalFile
             if (!out.path.startsWith(root.path + File.separator)) continue
             out.parentFile?.mkdirs()
+            // Each entry costs something, so a zip of millions of empty files stops too (security queue 2, F7).
+            total += ENTRY_COST
+            if (total > budget) error("That zip is too large: it holds too many files.")
             out.outputStream().use { o ->
                 while (true) {
                     val n = z.read(buffer)
@@ -46,6 +49,8 @@ fun extractZip(
     }
     return count
 }
+
+private const val ENTRY_COST = 4096L
 
 /** The unpacking budget: the smaller of the free space and 100 times the zip's size (no real pack compresses more). */
 fun zipBudget(zipBytes: Long, freeBytes: Long): Long = minOf(freeBytes, zipBytes * 100)
