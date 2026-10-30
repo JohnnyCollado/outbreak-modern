@@ -41,6 +41,9 @@ void TestSessionsByAddress(); // relay_tests.cpp
 void TestLobbySessionsByAddress(); // lobby_tests.cpp
 void TestStoppedServicesAnswerSafely(); // lobby_tests.cpp
 void TestLobbyLogFlood(); // lobby_tests.cpp
+void TestLobbySlotsAndFloods(); // lobby_tests.cpp
+void TestLobbyNothingAfterLogout(); // lobby_tests.cpp
+void TestRelaySenderBudget(); // relay_tests.cpp
 void TestGuard();       // guard_tests.cpp
 void TestBeacon();      // beacon_tests.cpp
 void TestLocalHost();   // host_tests.cpp
@@ -466,6 +469,41 @@ static void TestTlsSlowPeer()
 	server.stop();
 }
 
+// M2: a peer stalling in the handshake is cut at the handshake's shorter deadline.
+static void TestTlsHandshakeDeadline()
+{
+	TlsWebServer server;
+	std::string error;
+	WebConfig config = TestWebConfig();
+	config.handshakeSeconds = 1;
+	if (!server.start(config, "127.0.0.1", 0, &error))
+	{
+		Check(false, "the TLS web server starts (handshake deadline)");
+		return;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	mbedtls_net_context slow;
+	mbedtls_net_init(&slow);
+	bool cut = false;
+	if (mbedtls_net_connect(&slow, "127.0.0.1", std::to_string(server.port()).c_str(), MBEDTLS_NET_PROTO_TCP) == 0)
+	{
+		for (int i = 0; i < 10 && !cut; i++)
+		{
+			const unsigned char b = i == 0 ? 0x16 : 0x03;
+			if (mbedtls_net_send(&slow, &b, 1) < 0)
+				cut = true;
+			unsigned char in[64];
+			const int got = mbedtls_net_recv_timeout(&slow, in, sizeof(in), 300);
+			if (got == 0 || (got < 0 && got != MBEDTLS_ERR_SSL_TIMEOUT))
+				cut = true;
+		}
+	}
+	mbedtls_net_free(&slow);
+	const double after = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+	Check(cut && after < 2.5, "a peer stalling in the handshake is cut at its deadline");
+	server.stop();
+}
+
 // The login data file (6881/6882), its first piece being the room rules' scenario list (report entries 42-43).
 static void TestDataFile()
 {
@@ -521,6 +559,7 @@ int main()
 	TestTlsServer();
 	TestTlsPost();
 	TestTlsSlowPeer();
+	TestTlsHandshakeDeadline();
 	TestLobby();
 	TestServerChain();
 	TestRelay();
@@ -531,6 +570,9 @@ int main()
 	TestLobbySessionsByAddress();
 	TestStoppedServicesAnswerSafely();
 	TestLobbyLogFlood();
+	TestLobbySlotsAndFloods();
+	TestLobbyNothingAfterLogout();
+	TestRelaySenderBudget();
 	TestGuard();
 	TestBeacon();
 	TestLocalHost();

@@ -31,6 +31,8 @@ namespace ob::server
 		// closed; a player whose pending output passes the cap (it stopped reading) is dropped.
 		int loginSeconds = 15;
 		size_t maxOutBytes = 256 * 1024;
+		// Bytes a player may pass on per second (security queue 2, M3): past it the sender is dropped. 0 = no limit.
+		size_t passOnBytesPerSecond = 512 * 1024;
 		// Security review S6: a session is accepted only from the address its account is named for (quick login names
 		// the account by the device's address, ob_server.cpp), so a sniffed or guessed number is useless elsewhere.
 		bool sessionsByAddress = true;

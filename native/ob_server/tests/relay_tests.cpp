@@ -186,6 +186,7 @@ void TestRelayLimits()
 	config.sessionsByAddress = false; // several players from loopback, accounts named for them
 	config.loginSeconds = 1;
 	config.maxOutBytes = 64 * 1024;
+	config.passOnBytesPerSecond = 0; // off here: this test floods on purpose to reach the receiver's cap
 	config.log = [&](const std::string& l) {
 		std::lock_guard<std::mutex> lock(logMutex);
 		lines.push_back(l);
@@ -240,5 +241,36 @@ void TestSessionsByAddress()
 	for (int i = 0; i < 40 && relay.logins() < 1; i++)
 		std::this_thread::sleep_for(std::chrono::milliseconds(25));
 	Check(relay.logins() == 1, "by address: its own session is accepted");
+	relay.stop();
+}
+
+// Security queue 2, M3: a flooding sender is dropped by its own pass-on budget, so it can't get others kicked.
+void TestRelaySenderBudget()
+{
+	Accounts accounts;
+	const uint32_t sA = accounts.mintSession("A"), sB = accounts.mintSession("B");
+	accounts.setGameNumber("A", 2);
+	accounts.setGameNumber("B", 2);
+	RelayServer relay;
+	RelayConfig config;
+	config.sessionsByAddress = false;
+	config.passOnBytesPerSecond = 2000;
+	std::string error;
+	Check(relay.start(accounts, config, "127.0.0.1", 0, &error), "budget: the relay starts");
+	RelayClient a, b;
+	Check(a.connect(relay.port()) && b.connect(relay.port()) && a.login(sA) && b.login(sB), "budget: two log in");
+	for (int i = 0; i < 40 && relay.logins() < 2; i++)
+		std::this_thread::sleep_for(std::chrono::milliseconds(25));
+	std::vector<uint8_t> frames;
+	for (int i = 0; i < 64; i++)
+	{
+		frames.push_back(255);
+		frames.insert(frames.end(), 254, 0x55);
+	}
+	a.sendBytes(frames);
+	a.pump(1000);
+	b.pump(300);
+	Check(a.closed, "budget: the flooding sender is dropped");
+	Check(!b.closed, "budget: the receiver stays");
 	relay.stop();
 }

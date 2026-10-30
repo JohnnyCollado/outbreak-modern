@@ -193,7 +193,15 @@ namespace ob::server
 					else
 						++it;
 				if (m_seen.size() >= kMaxListedHosts && !m_seen.count(from))
-					continue;
+				{
+					// Full of fresh entries: the oldest makes room, so re-sent fakes can't keep a real host out
+					// (security queue 2, L2); a real host announces every second and comes straight back.
+					auto oldest = m_seen.begin();
+					for (auto it = m_seen.begin(); it != m_seen.end(); ++it)
+						if (it->second.at < oldest->second.at)
+							oldest = it;
+					m_seen.erase(oldest);
+				}
 				m_seen[from] = Seen{*info, now};
 			}
 		});

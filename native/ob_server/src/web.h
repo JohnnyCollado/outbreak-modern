@@ -27,6 +27,8 @@ namespace ob::server
 		// Security review S1: the whole connection (handshake, request, answer) must finish within this, or it is cut:
 		// the site serves one connection at a time, so a slow peer would hold everyone's login.
 		int connectionSeconds = 15;
+		// The handshake's own, shorter limit (security queue 2, M2). A real one takes the game about 2 s.
+		int handshakeSeconds = 8;
 	};
 
 	struct WebResponse

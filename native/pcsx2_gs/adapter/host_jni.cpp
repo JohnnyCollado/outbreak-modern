@@ -60,11 +60,13 @@ JNIEXPORT jstring JNICALL Java_com_outbreakmodern_app_NativeBridge_hostStart(JNI
 	jstring address, jint prefix, jint webPort, jstring broadcast)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
+	if (prefix < 1 || prefix > 32) // unknown network: refuse rather than admit every private address (queue 2, L3)
+		return env->NewStringUTF("this device's network could not be read");
 	ob::server::HostOptions options;
 	options.name = Str(env, name);
 	options.address = Str(env, address);
 	options.webPort = static_cast<uint16_t>(webPort);
-	options.prefix = prefix >= 1 && prefix <= 32 ? static_cast<int>(prefix) : 0;
+	options.prefix = static_cast<int>(prefix);
 	const std::string subnet = Str(env, broadcast);
 	if (!subnet.empty() && subnet != "255.255.255.255")
 		options.beaconTargets.push_back(subnet);

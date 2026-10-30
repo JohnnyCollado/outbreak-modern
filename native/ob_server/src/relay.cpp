@@ -32,6 +32,8 @@ namespace ob::server
 			Clock::time_point heard = Clock::now();
 			uint32_t framesSent = 0; // since the last stats line
 			Clock::time_point connectedAt = Clock::now();
+			size_t passedOn = 0;
+			Clock::time_point passOnWindow{};
 		};
 
 		Accounts* accounts = nullptr;
@@ -186,6 +188,21 @@ namespace ob::server
 						auto frame = c.in.nextFrame();
 						if (!frame)
 							break;
+						if (s.config.passOnBytesPerSecond != 0)
+						{
+							const auto at = Clock::now();
+							if (at - c.passOnWindow >= std::chrono::seconds(1))
+							{
+								c.passOnWindow = at;
+								c.passedOn = 0;
+							}
+							c.passedOn += frame->size();
+							if (c.passedOn > s.config.passOnBytesPerSecond)
+							{
+								s.drop(c, "passing on too much, disconnected");
+								break;
+							}
+						}
 						s.relay(c, *frame);
 						c.framesSent++;
 					}

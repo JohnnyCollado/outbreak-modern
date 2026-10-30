@@ -185,6 +185,7 @@ namespace ob::server
 			*error = mbedError(("bind " + address + ":" + portText).c_str(), rc);
 			return false;
 		}
+		mbedtls_net_set_nonblock(&s->listen); // run() polls, so stop() can join it before closing the socket
 		sockaddr_storage bound{};
 		socklen_t length = sizeof(bound);
 		if (getsockname(s->listen.fd, reinterpret_cast<sockaddr*>(&bound), &length) == 0)
@@ -208,9 +209,9 @@ namespace ob::server
 			m_state.reset();
 			return;
 		}
-		mbedtls_net_free(&m_state->listen); // unblocks accept
 		if (m_thread.joinable())
-			m_thread.join();
+			m_thread.join(); // run() polls m_running: its accept doesn't block
+		mbedtls_net_free(&m_state->listen);
 		m_state.reset();
 	}
 
@@ -234,8 +235,10 @@ namespace ob::server
 			if (mbedtls_net_accept(&s->listen, &client, ip, sizeof(ip), &ipLength) != 0)
 			{
 				mbedtls_net_free(&client);
-				continue; // stop() closed the socket, or a failed accept: m_running decides
+				std::this_thread::sleep_for(std::chrono::milliseconds(20)); // nothing waiting: m_running decides
+				continue;
 			}
+			mbedtls_net_set_block(&client);
 			std::string address;
 			if (ipLength == 4)
 				address = std::to_string(static_cast<unsigned char>(ip[0])) + "." +
@@ -265,8 +268,9 @@ namespace ob::server
 				std::string bytes;
 				std::chrono::steady_clock::time_point deadline;
 				const std::atomic<bool>* running;
-			} recorded{&client, {}, std::chrono::steady_clock::now() + std::chrono::seconds(m_config.connectionSeconds),
-				&m_running};
+			} recorded{&client, {}, std::chrono::steady_clock::now() +
+				std::chrono::seconds((std::min)(m_config.handshakeSeconds, m_config.connectionSeconds)), &m_running};
+			const auto wholeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(m_config.connectionSeconds);
 			mbedtls_ssl_set_bio(&ssl, &recorded, [](void* c, const unsigned char* b, size_t n) {
 				return mbedtls_net_send(static_cast<Recorded*>(c)->net, b, n); }, nullptr,
 				[](void* c, unsigned char* b, size_t n, uint32_t timeout) {
@@ -291,6 +295,7 @@ namespace ob::server
 			while (ok && (rc = mbedtls_ssl_handshake(&ssl)) != 0)
 				if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
 					ok = false;
+			recorded.deadline = wholeDeadline;
 			if (!ok)
 			{
 				m_failed++;

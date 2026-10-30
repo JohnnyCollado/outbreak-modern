@@ -34,6 +34,10 @@ namespace ob::server
 		int loginSeconds = 15;
 		size_t maxOutBytes = 256 * 1024;
 		int closeGraceMs = 2000;
+		// Security queue 2: log lines one client can cause (L1), and bytes a client may pass on to others per second
+		// (M3): past it the sender is dropped, so a flood can't push others over their output cap. 0 = no limit.
+		int clientLogLines = 200;
+		size_t passOnBytesPerSecond = 64 * 1024;
 		// Security review S6: a session is accepted only from the address its account is named for (quick login names
 		// the account by the device's address, ob_server.cpp), so a sniffed or guessed number is useless elsewhere.
 		bool sessionsByAddress = true;

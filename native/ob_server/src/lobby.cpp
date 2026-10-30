@@ -97,6 +97,9 @@ namespace ob::server
 			uint32_t game = 0;
 			Clock::time_point connectedAt = Clock::now(), closingSince{};
 			int unhandledLogged = 0;
+			int logLines = 0;
+			size_t passedOn = 0;
+			Clock::time_point passOnWindow{};
 		};
 
 		void putHandle(std::vector<uint8_t>& out, const Handle& h)
@@ -130,8 +133,12 @@ namespace ob::server
 		Clock::time_point nextHeartbeat, nextConnCheck;
 		LobbyServer* owner = nullptr;
 
+		Client* logging = nullptr; // the client whose packets are being handled: its lines count against its budget
+
 		void log(const std::string& line) const
 		{
+			if (logging && ++logging->logLines > config.clientLogLines)
+				return;
 			if (config.log)
 				config.log("[lobby] " + line);
 		}
@@ -374,6 +381,24 @@ namespace ob::server
 		void handleLoggedIn(Client& c, const Packet& q);
 		void tick();
 		void dropClient(Client& c);
+		// Counts bytes this client passes on to others; past the per-second budget it is dropped (security queue 2, M3).
+		bool mayPassOn(Client& c, size_t bytes)
+		{
+			if (config.passOnBytesPerSecond == 0)
+				return true;
+			const auto now = Clock::now();
+			if (now - c.passOnWindow >= std::chrono::seconds(1))
+			{
+				c.passOnWindow = now;
+				c.passedOn = 0;
+			}
+			c.passedOn += bytes;
+			if (c.passedOn <= config.passOnBytesPerSecond)
+				return true;
+			log(c.address + ": passing on too much, disconnected");
+			dropClient(c);
+			return false;
+		}
 	};
 
 	void LobbyServer::Impl::dropClient(Client& c)
@@ -476,8 +501,8 @@ namespace ob::server
 			else if (q.cmd == CHATIN)
 			{
 				const auto text = readScrambledString(p, 0, key, nullptr, kMaxChat);
-				if (!text)
-					return; // over the cap: not passed on
+				if (!text || !mayPassOn(c, text->size()))
+					return; // over the cap or the sender's budget: not passed on
 				std::vector<uint8_t> out;
 				putHandle(out, c.handle);
 				putString(out, text.value_or(""));
@@ -573,14 +598,17 @@ namespace ob::server
 		case AREASELECT:
 		{
 			if (nr >= 1 && nr <= kAreas)
+			{
+				leaveSlot(c); // security queue 2, M1: a slot left behind would stay locked for good
 				c.area = nr, c.room = 0, c.slot = 0;
+			}
 			std::vector<uint8_t> a;
 			putU16(a, static_cast<uint16_t>(nr));
 			answer(c, q, a);
 			broadcast([&](const Client& o) { return o.area == 0 || (o.area == nr && o.room == 0); }, AREAPLAYERCNT, areaPlayerCount(nr));
 			break;
 		}
-		case EXITAREA: c.area = 0, c.room = 0; answer(c, q); break;
+		case EXITAREA: leaveSlot(c); c.area = 0, c.room = 0; answer(c, q); break;
 		case ROOMSCOUNT: { std::vector<uint8_t> a; putU16(a, kRooms); answer(c, q, a); break; }
 		case ROOMNAME:
 		{
@@ -596,7 +624,10 @@ namespace ob::server
 		case ENTERROOM:
 		{
 			if (nr >= 1 && nr <= kRooms)
+			{
+				leaveSlot(c);
 				c.room = nr, c.slot = 0;
+			}
 			std::vector<uint8_t> a;
 			putU16(a, static_cast<uint16_t>(nr));
 			answer(c, q, a);
@@ -723,7 +754,7 @@ namespace ob::server
 				broadcast(inRoom, SLOTSCENTYPE, slotScene(area, room, slot));
 				broadcast([&](const Client& o) { return o.area == area && o.room == room && o.slot == slot; }, PLAYEROK,
 					{0, static_cast<uint8_t>(c.playerNumber), 0, 0});
-				log(c.address + ": opened game slot " + std::to_string(slot) + " '" + s->name + "'");
+				log(c.address + ": opened game slot " + std::to_string(slot) + " '" + logSafe(s->name) + "'");
 			}
 			break;
 		}
@@ -863,6 +894,8 @@ namespace ob::server
 				answerError(c, q, "<LF=6><BODY><CENTER>not possible<END>");
 				break;
 			}
+			if (!mayPassOn(c, event->size()))
+				break;
 			std::vector<uint8_t> a;
 			putString(a, *to);
 			answer(c, q, a);
@@ -982,8 +1015,9 @@ namespace ob::server
 					const net::PollEntry& e = entries[i++];
 					if (e.failed)
 						s.dropClient(c);
-					if (c.closing && e.readable)
-						net::receiveSome(c.socket, buffer.data(), buffer.size()); // discarded: no busy poll on unread input
+					// Input from a closing client is discarded (no busy poll on unread data); one that hung up gets nothing more.
+					if (c.closing && e.readable && net::receiveSome(c.socket, buffer.data(), buffer.size()) < 0)
+						c.out.clear();
 					if (!c.closing && e.readable)
 					{
 						const long n = net::receiveSome(c.socket, buffer.data(), buffer.size());
@@ -992,8 +1026,16 @@ namespace ob::server
 						else if (n > 0)
 						{
 							c.in.feed(buffer.data(), static_cast<size_t>(n));
-							while (auto packet = c.in.next())
+							s.logging = &c;
+							// Nothing after a LOGOUT or a drop in the same read (security queue 2, M1).
+							while (!c.closing)
+							{
+								auto packet = c.in.next();
+								if (!packet)
+									break;
 								s.handle(c, *packet);
+							}
+							s.logging = nullptr;
 							if (c.in.overflowed())
 								s.dropClient(c);
 						}

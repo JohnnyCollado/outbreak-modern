@@ -375,3 +375,105 @@ void TestLobbyLogFlood()
 	lobby.stop();
 	Check(unhandled <= 10, "log flood: at most 10 lines for 50 unknown questions");
 }
+
+// Security queue 2: M1, a peer that created a slot and walked away locked it for good; L1 + M3, log and flood budgets.
+void TestLobbySlotsAndFloods()
+{
+	Accounts accounts;
+	const uint32_t sA = accounts.mintSession("A"), sB = accounts.mintSession("B");
+	std::mutex logMutex;
+	int unhandled = 0;
+	LobbyServer lobby;
+	LobbyConfig config;
+	config.sessionsByAddress = false;
+	config.clientLogLines = 8;
+	config.passOnBytesPerSecond = 1000;
+	config.log = [&](const std::string& line) {
+		std::lock_guard<std::mutex> lock(logMutex);
+		unhandled += line.find("unhandled question") != std::string::npos;
+	};
+	std::string error;
+	Check(lobby.start(accounts, config, "127.0.0.1", 0, &error), "slots: the lobby starts");
+	GameClient a, b;
+	Check(a.connect(lobby.port()) && b.connect(lobby.port()) && a.login(sA, "A").size() == 6 && b.login(sB, "B").size() == 6, "slots: two log in");
+	a.ask(0x6207, u16(1));
+	a.ask(0x6305, u16(1));
+	Check(a.ask(0x6407, u16(1)) != nullptr, "slots: A creates slot 1 of room 1");
+	a.ask(0x6305, u16(2)); // walks to room 2 without leaving
+	b.ask(0x6207, u16(1));
+	b.ask(0x6305, u16(1));
+	const Packet* status = b.ask(0x6404, u16(1));
+	Check(status && status->payload.size() == 3 && status->payload[2] == 1, "slots: changing room frees the created slot");
+	a.ask(0x6305, u16(1));
+	a.ask(0x6407, u16(2));
+	a.ask(0x6209, {}); // EXITAREA
+	const Packet* status2 = b.ask(0x6404, u16(2));
+	Check(status2 && status2->payload.size() == 3 && status2->payload[2] == 1, "slots: leaving the area frees it too");
+
+	for (int i = 0; i < 40; i++)
+		b.ask(0x6FF0, {});
+	{
+		std::lock_guard<std::mutex> lock(logMutex);
+		Check(unhandled <= 8, "log budget: lines a client can cause stop at its budget");
+	}
+
+	// Chat flood past the pass-on budget: the sender is dropped, the others stay.
+	std::vector<uint8_t> chat;
+	GameClient::putScrambled(chat, std::string(100, 'x'), 200);
+	for (int i = 0; i < 30; i++)
+		b.sendPacket(Kind::Broadcast, 0x6701, 200, chat);
+	bool closed = false;
+	uint8_t buffer[512];
+	for (int i = 0; i < 100 && !closed; i++)
+	{
+		const long n = net::receiveSome(b.s, buffer, sizeof(buffer));
+		if (n < 0)
+			closed = true;
+		else if (n == 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	Check(closed, "flood: a sender past its pass-on budget is dropped");
+	Check(a.ask(0x6203, {}) != nullptr, "flood: another player stays connected");
+	lobby.stop();
+}
+
+// M1's second route: packets after LOGOUT in the same read are not handled.
+void TestLobbyNothingAfterLogout()
+{
+	Accounts accounts;
+	const uint32_t sA = accounts.mintSession("A"), sB = accounts.mintSession("B");
+	LobbyServer lobby;
+	LobbyConfig config;
+	config.sessionsByAddress = false;
+	std::string error;
+	lobby.start(accounts, config, "127.0.0.1", 0, &error);
+	GameClient a, b;
+	Check(a.connect(lobby.port()) && b.connect(lobby.port()) && a.login(sA, "A").size() == 6 && b.login(sB, "B").size() == 6, "logout: two log in");
+	a.ask(0x6207, u16(1));
+	a.ask(0x6305, u16(1));
+	b.ask(0x6207, u16(1));
+	b.ask(0x6305, u16(1));
+	Packet out, create;
+	out.who = create.who = static_cast<uint8_t>(Who::Client);
+	out.kind = create.kind = static_cast<uint8_t>(Kind::Query);
+	out.cmd = 0x6006;
+	out.pid = 300;
+	create.cmd = 0x6407;
+	create.pid = 301;
+	create.payload = u16(3);
+	std::vector<uint8_t> both = encode(out);
+	const std::vector<uint8_t> second = encode(create);
+	both.insert(both.end(), second.begin(), second.end());
+	size_t sent = 0;
+	while (sent < both.size())
+	{
+		const long n = net::sendSome(a.s, both.data() + sent, both.size() - sent);
+		if (n < 0)
+			break;
+		sent += static_cast<size_t>(n);
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
+	const Packet* status = b.ask(0x6404, u16(3));
+	Check(status && status->payload.size() == 3 && status->payload[2] == 1, "logout: a create in the same read leaves no slot");
+	lobby.stop();
+}

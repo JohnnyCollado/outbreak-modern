@@ -103,6 +103,18 @@ static void TestBeaconListAgesOut()
 	}
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 	Check(listener.hosts().size() == kMaxListedHosts, "beacon aging: 32 fake hosts fill the list");
+	// L2: while the 32 are still fresh, a new host takes the oldest place.
+	{
+		const net::Socket s = net::openUdp("127.0.0.50", 0, false, nullptr, &error);
+		const std::string newcomer = encodeBeacon(BeaconInfo{"Newcomer", 443, 8300, 0});
+		net::sendUdp(s, "127.0.0.1", listener.port(), reinterpret_cast<const uint8_t*>(newcomer.data()), newcomer.size());
+		net::closeSocket(s);
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		bool listed = false;
+		for (const FoundHost& h : listener.hosts())
+			listed |= h.info.name == "Newcomer";
+		Check(listed && listener.hosts().size() == kMaxListedHosts, "beacon aging: a full list gives its oldest place to a new host");
+	}
 	std::this_thread::sleep_for(std::chrono::milliseconds(400)); // they go quiet past the stale time
 	BeaconSender real;
 	real.start(BeaconInfo{"Real host", 18443, 8300, 1}, {"127.0.0.1"}, listener.port(), 100, &error);
