@@ -428,11 +428,14 @@ PS2ExternalUi* ps2CreateExternalUi()
 #if !defined(__ANDROID__)
 	// Called before anything picks the GS: a double-click has no environment (report entry 69).
 	if (obui::playerWantsVulkan(std::getenv("PS2X_GS"), std::getenv("PS2X_HIDDEN"), std::getenv("PS2X_LAUNCHER")))
+	{
+		obuiStartCrashCapture(); // a person's run; scripted runs keep their own output (report entry 71)
 #if defined(_WIN32)
 		_putenv_s("PS2X_GS", "pcsx2-vk");
 #else
 		setenv("PS2X_GS", "pcsx2-vk", 1);
 #endif
+	}
 #endif
 	static ObExternalUi s_ui;
 	return &s_ui;

@@ -1,0 +1,120 @@
+From 4474573bd0c99e026b46caaa67ceac088c705306 Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 19:29:09 -0400
+Subject: [PATCH] Runtime: a texture folder chosen inside the pack still finds
+ it
+
+The game adds its serial to the chosen folder, so choosing <root>/<serial> looked in <root>/<serial>/<serial>/replacements
+and quietly played without the pack, while the start-up line promised a load. textureRootFor takes <root>/<serial> or its
+replacements folder as <root>, and the line says NOT FOUND when there is nothing there.
+---
+ ps2xRuntime/include/runtime/ps2_game_source.h |  2 ++
+ ps2xRuntime/src/lib/ps2_game_source.cpp       | 18 ++++++++++++-
+ ps2xRuntime/src/main.cpp                      |  5 +++-
+ ps2xTest/src/ps2_game_source_tests.cpp        | 26 +++++++++++++++++++
+ 4 files changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_game_source.h b/ps2xRuntime/include/runtime/ps2_game_source.h
+index 5671b92..6b22bf8 100644
+--- a/ps2xRuntime/include/runtime/ps2_game_source.h
++++ b/ps2xRuntime/include/runtime/ps2_game_source.h
+@@ -81,6 +81,8 @@ namespace ps2game
+     std::filesystem::path settingsDirectory();
+     // <textures>/<serial>/replacements (PCSX2's texture replacement layout); empty when textures is not set.
+     std::filesystem::path textureReplacementDirectory(std::string_view serial);
++    // The root PCSX2's layout needs, when the player chose a folder inside it: <root>/<serial> or its "replacements".
++    std::filesystem::path textureRootFor(const std::filesystem::path &chosen, std::string_view serial);
+ 
+     // The memory card folder (patch 0072): PS2X_SAVES when set (scripted runs), else the settings file's saves, else
+     // <settings folder>/memcards (Windows: beside the exe; Android: the activity's external files dir). source says
+diff --git a/ps2xRuntime/src/lib/ps2_game_source.cpp b/ps2xRuntime/src/lib/ps2_game_source.cpp
+index 81590bf..2aefca1 100644
+--- a/ps2xRuntime/src/lib/ps2_game_source.cpp
++++ b/ps2xRuntime/src/lib/ps2_game_source.cpp
+@@ -333,12 +333,28 @@ namespace ps2game
+         return "[settings] gpu_driver=" + settings.gpuDriver + " ignored: custom GPU drivers are Android only";
+     }
+ 
++    std::filesystem::path textureRootFor(const std::filesystem::path &chosen, std::string_view serial)
++    {
++        if (chosen.empty() || serial.empty())
++            return chosen;
++        const std::filesystem::path id{std::string(serial)};
++        std::error_code ec;
++        if (std::filesystem::exists(chosen / id, ec) || std::filesystem::exists(chosen / (std::string(serial) + ".zip"), ec))
++            return chosen;
++        const std::filesystem::path folder = chosen.has_filename() ? chosen : chosen.parent_path();
++        if (folder.filename() == id && std::filesystem::is_directory(folder, ec))
++            return folder.parent_path();
++        if (folder.filename() == "replacements" && folder.parent_path().filename() == id && std::filesystem::is_directory(folder, ec))
++            return folder.parent_path().parent_path();
++        return chosen;
++    }
++
+     std::filesystem::path textureReplacementDirectory(std::string_view serial)
+     {
+         const Settings &settings = activeSettings();
+         if (settings.textures.empty() || serial.empty())
+             return {};
+-        return settings.textures / std::string(serial) / "replacements";
++        return textureRootFor(settings.textures, serial) / std::string(serial) / "replacements";
+     }
+ 
+     std::filesystem::path memoryCardDirectory(const char *env, const Settings &settings,
+diff --git a/ps2xRuntime/src/main.cpp b/ps2xRuntime/src/main.cpp
+index 0e43d60..e88cbc4 100644
+--- a/ps2xRuntime/src/main.cpp
++++ b/ps2xRuntime/src/main.cpp
+@@ -228,8 +228,11 @@ int main(int argc, char *argv[])
+         ps2game::setActiveGameSerial(source.serial);
+         if (const std::filesystem::path textures = ps2game::textureReplacementDirectory(source.serial); !textures.empty())
+         {
++            std::error_code missing;
++            const bool found = std::filesystem::exists(textures, missing);
+             std::cout << "[settings] texture replacements for " << source.serial << ": " << textures.string()
+-                      << " (loaded by an external GS that supports them)" << std::endl;
++                      << (found ? " (loaded by an external GS that supports them)" : " NOT FOUND: playing with the game's own textures")
++                      << std::endl;
+         }
+         // <mods>/<serial>/*.pnach (patch 0051): read before the window opens (gsaspectratio sizes it).
+         ps2game::loadPnachAtStartup(ps2game::activeSettings().mods, source.serial);
+diff --git a/ps2xTest/src/ps2_game_source_tests.cpp b/ps2xTest/src/ps2_game_source_tests.cpp
+index 2fa6558..2752ff7 100644
+--- a/ps2xTest/src/ps2_game_source_tests.cpp
++++ b/ps2xTest/src/ps2_game_source_tests.cpp
+@@ -388,6 +388,32 @@ void register_ps2_game_source_tests()
+             t.IsTrue(ps2game::textureReplacementDirectory("SLPM-65428").empty(), "no textures root, no directory");
+         });
+ 
++        tc.Run("textures: a folder chosen inside the pack still finds it", [](TestCase &t)
++        {
++            TempDir temp;
++            const std::filesystem::path root = temp.base / "textures";
++            const std::filesystem::path pack = root / "SLPM-65428" / "replacements";
++            std::filesystem::create_directories(pack);
++            std::filesystem::create_directories(temp.base / "other" / "replacements");
++            std::filesystem::create_directories(temp.base / "zipped");
++            std::ofstream(temp.base / "zipped" / "SLPM-65428.zip") << "x";
++
++            t.IsTrue(ps2game::textureRootFor(root, "SLPM-65428") == root, "the root stays");
++            t.IsTrue(ps2game::textureRootFor(root / "SLPM-65428", "SLPM-65428") == root, "the serial's folder");
++            t.IsTrue(ps2game::textureRootFor(pack, "SLPM-65428") == root, "the replacements folder");
++            t.IsTrue(ps2game::textureRootFor(root, "SLES-00000") == root, "another game's pack: nothing to find, unchanged");
++            t.IsTrue(ps2game::textureRootFor(temp.base / "other", "SLPM-65428") == temp.base / "other",
++                     "a folder not named for this game is not taken for it");
++            t.IsTrue(ps2game::textureRootFor(temp.base / "zipped", "SLPM-65428") == temp.base / "zipped", "a zipped pack's root");
++            t.IsTrue(ps2game::textureRootFor({}, "SLPM-65428").empty(), "no folder stays none");
++
++            ps2game::Settings s;
++            s.textures = root / "SLPM-65428";
++            ps2game::setActiveSettings(s);
++            t.IsTrue(ps2game::textureReplacementDirectory("SLPM-65428") == pack, "the log line names the real folder");
++            ps2game::setActiveSettings({});
++        });
++
+         tc.Run("settings: saves picks the memory card folder; PS2X_SAVES wins; default <settings folder>/memcards", [](TestCase &t)
+         {
+             const std::filesystem::path base = std::filesystem::path("C:/games");
+-- 
+2.46.2.windows.1
+

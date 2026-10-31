@@ -18,6 +18,11 @@ namespace ObUiPadKey
 		L2, R2, L3, R3 };
 }
 
+// A release's log file and crash dump (crash_capture.cpp, report entry 71). Start: before anything prints that matters.
+void obuiStartCrashCapture();
+// The logs and dumps in one .zip, home folder hidden. False with `error` set when it cannot be made.
+bool obuiSaveCrashReport(std::string& savedTo, std::string& error);
+
 // One frame of host input, sampled on the main thread after raylib polled it.
 struct ObUiInput
 {

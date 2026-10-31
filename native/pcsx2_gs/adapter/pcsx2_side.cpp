@@ -324,7 +324,9 @@ namespace
 #if defined(__ANDROID__)
 		Log::SetFileOutputLevel(LOGLEVEL_DEV, Path::Combine(EmuFolders::AppRoot, "pcsx2-gs.log").c_str());
 #else
-		Log::SetFileOutputLevel(LOGLEVEL_DEV, "pcsx2-gs.log");
+		// A person's run has its own file (crash_capture.cpp, report entry 73): this name is replaced at every start.
+		const char* const runLog = std::getenv("PS2X_GS_LOG");
+		Log::SetFileOutputLevel(LOGLEVEL_DEV, runLog && *runLog ? runLog : "pcsx2-gs.log");
 #endif
 		const GSVSyncMode vsync = !(s_child && s_visible) ? GSVSyncMode::Disabled
 			: s_vsync_pref == 0 ? GSVSyncMode::Disabled : s_vsync_pref == 2 ? GSVSyncMode::FIFO : GSVSyncMode::Mailbox;

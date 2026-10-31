@@ -1254,6 +1254,72 @@ Developer's choice: (b), the game's code, no fan data. The chain, NETWK splat as
   unchanged. Test first (header missing): ob_ui 209/209. Checked for real: started with no environment, it reached
   `[gs] backend=pcsx2-vk`, `[ui] launcher`. Whether a double-click itself opens it: for the developer to confirm.
 
+### 70. Opening the status screen froze the game (a GS readback ran as VIF commands)
+
+- **Seen (developer, 2026-10-30):** picked up the iron pipe, pressed the inventory button: last frame stays, no sound, the
+  game ignores input; the FPS counter (60) and the F1 menu keep working. First seen on the `dist` build, fast VU1 (mvu).
+- **Evidence:** the game thread sat in `func_0018D0E0` in two dumps 4 s apart (spins until the DMA queue's count at
+  0x281B04/08 reaches 0). `pcsx2-gs.log`: 23 "microVU1: Unknown Micro VU opcode called" within about 2 ms at 465.98 s
+  (a73e94af, 8b406be6...) in that run; the crossplay log had none. That log was overwritten by a later run.
+- **First theory, wrong:** VU1 never finishes. The VU1 runs inside the VIF1 call with a 3,000,000-cycle budget
+  (`native/pcsx2_vu/adapter/hook.cpp:168`), so a bad program returns; the dumps did not show the thread in it.
+- **Cause (from reading the code; not yet shown in a run):** the DMA queue's GS FINISH handler `func_0018C830` sets
+  VIF1_STAT.FDR and BUSDIR, then calls `sceDmaRecvN` to read the image back (`docs/android-port-map.md:54`). The
+  stub clears DIR (`Stubs/DMA.cpp:182`), but the start path in `ps2_memory.cpp` never looked at DIR, so the destination
+  buffer ran as a VIF stream: old pixels became VIF codes, program uploads and VU1 starts. How exactly that left the queue
+  stuck was not traced. The reports show no earlier run through this readback.
+- **Fix:** PS2Recomp 0106: with FDR set, DIR clear and normal mode, the image goes to MADR (limited to RAM) and the
+  channel ends as usual. Gating on FDR keeps the existing sends that start with DIR clear. Test first (failed without):
+  ps2x 578/578, 0 warnings in the build.
+- **Not verified:** the freeze itself needs the developer's run, and Android has the fix in its APK but no run either.
+- **Take-away:** log files in `dist/windows` are replaced at each start; copy the log before the next run.
+
+### 71. Full crash in the build before 0106: cause still open, and a release keeps no log
+
+- **Seen (developer, 2026-10-30):** the game "worked for a bit" and then crashed, in the build before the rebuild with 0106.
+- **Dump** (`OutbreakModern.exe.25172.dmp`, 13:34, read with a small parser and the 13:13 `/MAP`, a relink of the same
+  code): fast-fail 7 (`abort`) on the main thread, through the terminate logger. `std::thread`'s destructor and
+  `PS2Runtime::run` are on the stack, with unwind data for `ObExternalUi::hostFrame`. So an exception most likely left
+  `run()` while `gameThread` (`ps2_runtime.cpp:2981`) was still joinable, which ends the program. Not proven: the stack
+  was scanned for addresses, not unwound.
+- **Clues:** the fragment "lock would occur" and "##tab-Network" on the stack; these may be leftovers. The thrower is unknown.
+- **Why it stays open:** the exe is `/SUBSYSTEM:WINDOWS` (`ps2xRuntime/CMakeLists.txt:608-611`), so the terminate logger's
+  message on stderr (`main.cpp:93`) goes nowhere. Windows' local dump holds no copy of it.
+- **Next:** a log file and crash report in the release (plan shown to the developer, waiting for approval).
+
+### 72. Logs and crash reports in a release
+
+- **Asked (developer, 2026-10-30):** "a way to trace logs in the release so that I can help others debug when they get crashes".
+- **Windows (`native/ob_ui/ui/crash_capture.cpp`):** a person's run sends stdout and stderr through a pipe to
+  `logs/outbreak-<time>.log` beside the exe (local app data if that is read-only), last 5 runs, 64 MiB cap; a `[build]` line
+  names the build. A crash adds a `[crash]` line and a stack-only dump. Advanced > Crash report > Save makes one zip with the
+  home folder masked (ASCII and UTF-16, size kept) and no `net.env`. Scripted runs keep their own output, so the gate is untouched.
+- **Android (`CrashReport.kt`):** Advanced > Save crash report (launcher only): logcat, exit records, tombstones on Android
+  12+, to a place the player picks. Changed from the plan: no log file in app storage; logcat is a ring, so a chatty phone may
+  have lost the oldest lines. No home-folder masking (no such path there).
+- **Reading them:** `tools/dist.sh` keeps each build's map in `dist-symbols/<build id>/`; `tools/crash/read-dump.py` names a dump's stack.
+- **Bug the end-to-end test caught:** replacing the top-level exception filter also replaced the C runtime's, so an uncaught
+  C++ exception died without reaching the terminate logger and its message was lost. The filter now passes those on.
+- **Tests:** ob_ui 236/236 (failed first against empty stubs), Kotlin 75/75 (failed first),
+  `tools/crash/capture-test.sh`: a probe program ends by exit, abort, throw and fault; each leaves the expected files.
+- **Not verified:** the game itself writing a log (needs the developer's launch), the Android row on a device, and the speed
+  cost in play, since scripted speed runs skip the capture.
+
+### 73. A full scenario's log: the pack not loading, the readback not run, the graphics log overwritten
+
+- **Run (developer, 2026-10-30):** 108,000 vsyncs (about 30 minutes), quit from the menu, no dump. Picked up the iron pipe and
+  opened the inventory: no freeze. Switched to borderless from F1 mid-game: no crash.
+- **Texture pack not loaded:** `replacements=none` at every GS open. The setting named `textures\SLPM-65428`, so the runner
+  looked in `...\SLPM-65428\SLPM-65428\replacements`, and its log line still promised a load. **Fix:** PS2Recomp 0107 finds
+  the root from the serial's folder or its `replacements`; the line says NOT FOUND when there is nothing. ps2x 579/579.
+- **Correction to entry 70:** `sync waits 0` for the whole run (`gs_ring.h:163` counts every read-back): this run's inventory
+  did not read the frame back. So 0106's bug is real, but opening the inventory does not always reach it, and this run does not
+  show that 0106 stopped the freeze. The freeze's trigger is open.
+- **Graphics log overwritten:** `pcsx2-gs.log` is replaced at each start, so this run's copy was gone, and the crash report
+  saved next carried the new start's. **Fix:** a person's run has `logs/outbreak-<time>-gs.log` (`PS2X_GS_LOG`), pruned with
+  its run and in the report. Tests failed first: ob_ui.
+- **Open:** four minutes of identical GS load per interval (vsync 36,000 to 50,400); the cause was not settled.
+
 ## Mistakes and corrections
 
 | Claimed | What was true | How it was caught | Corrected in |

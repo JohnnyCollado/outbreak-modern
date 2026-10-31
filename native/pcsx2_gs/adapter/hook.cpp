@@ -83,7 +83,9 @@ namespace
 		ob_gs_set_display(ps2game::activeSettings().upscale,
 			aspect == "16:9" ? ObGsAspect::R16_9 : aspect == "4:3" ? ObGsAspect::R4_3 : ObGsAspect::Auto);
 		// outbreak.ini textures + the game's serial (0052): PCSX2 texture replacement, <textures>/<serial>/replacements.
-		ob_gs_set_textures(ps2game::activeSettings().textures.string().c_str(), ps2game::activeGameSerial().c_str());
+		// A folder chosen inside the pack counts (0107); the launcher, with no serial yet, passes it as it is.
+		ob_gs_set_textures(ps2game::textureRootFor(ps2game::activeSettings().textures, ps2game::activeGameSerial()).string().c_str(),
+			ps2game::activeGameSerial().c_str());
 	}
 
 	void Pcsx2ExternalGS::settingsChanged()

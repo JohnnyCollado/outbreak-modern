@@ -47,3 +47,9 @@ build/
 
 # build-all.bat output
 dist/
+dist-symbols/
+dist-user-data/
+
+# Crash reports written by the game (crash_capture.cpp, CrashReport.kt): they hold this machine's paths and state
+crash-report-*.zip
+outbreak-crash-report.zip

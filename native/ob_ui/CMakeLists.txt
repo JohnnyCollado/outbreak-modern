@@ -11,10 +11,19 @@ add_library(ob_ui_core STATIC
     core/touch_pad.cpp
     core/widescreen.cpp
     core/net_choice.cpp
-    core/safe_text.cpp)
+    core/safe_text.cpp
+    core/crash_log.cpp)
 target_include_directories(ob_ui_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/core")
 if(MSVC)
     target_compile_options(ob_ui_core PRIVATE /EHsc) # the including directory strips /EHsc for PCSX2
+endif()
+
+if(WIN32)
+    # tools/crash/capture-test.sh: the release's crash capture without the game.
+    add_executable(ob_crash_capture_probe tests/crash_capture_probe.cpp ui/crash_capture.cpp)
+    target_include_directories(ob_crash_capture_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ui")
+    target_link_libraries(ob_crash_capture_probe PRIVATE ob_ui_core)
+    target_compile_options(ob_crash_capture_probe PRIVATE /EHsc)
 endif()
 
 if(NOT ANDROID)
@@ -29,7 +38,7 @@ endif()
 # ob_pcsx2_gs) through ob_gs_bridge.h's ob_gs_ui_present; its own file/folder browser (controller-friendly). Linked into ps2x_external_gs (native/pcsx2_gs) with the hook
 # that feeds it raylib's input (adapter/ui_hook.cpp). Only with the runner (ps2_runtime) in the same build.
 if(TARGET ps2_runtime)
-    add_library(ob_ui STATIC ui/settings_ui.cpp ui/file_dialog.cpp)
+    add_library(ob_ui STATIC ui/settings_ui.cpp ui/file_dialog.cpp ui/crash_capture.cpp)
     target_include_directories(ob_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/ui"
         PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../pcsx2_gs/adapter")
     target_link_libraries(ob_ui PUBLIC ob_ui_core PRIVATE ob_pcsx2_gs_adapter)

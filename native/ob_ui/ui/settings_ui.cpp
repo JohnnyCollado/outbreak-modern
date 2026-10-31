@@ -1119,8 +1119,11 @@ namespace
 						Set("textures", p, "texture pack");
 						s->gsChanged = true;
 						std::error_code ec;
+						// The serial's own folder or its "replacements" work too: the runner finds the root from them.
 						if (!fs::exists(fs::u8path(p) / s->host.gameSerial, ec) &&
-							!fs::exists(fs::u8path(p) / (s->host.gameSerial + ".zip"), ec))
+							!fs::exists(fs::u8path(p) / (s->host.gameSerial + ".zip"), ec) &&
+							fs::u8path(p).filename() != fs::u8path(s->host.gameSerial) &&
+							fs::u8path(p).filename() != fs::u8path("replacements"))
 							Note("No " + s->host.gameSerial + " pack in that folder. The game plays with its own textures.");
 					});
 #endif
@@ -1872,6 +1875,15 @@ namespace
 			Set("vu1", i == 1 ? "mvu" : i == 2 ? "interp" : "", "VU1 engine");
 		LaunchOnlyNote();
 		Hint("The PS2's vector unit that transforms the 3D. Recompiler = fast (mvu), Interpreter = the reference. PS2X_VU1 wins over this.");
+#if !defined(__ANDROID__)
+		const char* const report[] = {"Save"};
+		if (Actions("Crash report", report, 1) == 0)
+		{
+			std::string savedTo, error;
+			Note(obuiSaveCrashReport(savedTo, error) ? "Saved: " + savedTo : error);
+		}
+		Hint("Puts the logs of the last runs in one .zip to send to whoever helps you debug. Your home folder is hidden, but server addresses may be in it: send it privately.");
+#endif
 		EndCard();
 	}
 

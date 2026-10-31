@@ -11,6 +11,7 @@
 // - game screen: menu layout before the game task and while the menu byte is set, play layout otherwise, the
 //   controller type, the attached RAM read live;
 // - network: strict addresses, the game's settings from the Network page's choices, no injection.
+#include "crash_log.h"
 #include "disc_check.h"
 #include "game_screen.h"
 #include "ini_file.h"
@@ -889,6 +890,116 @@ static void SafeTextTests()
 	Check(obui::javaSafeText("\xED\xA0\x80") == "???", "safe text: an encoded surrogate");
 }
 
+static std::string SlurpBytes(const std::filesystem::path& p)
+{
+	std::ifstream f(p, std::ios::binary);
+	return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+static void SpitBytes(const std::filesystem::path& p, const std::string& text)
+{
+	std::ofstream f(p, std::ios::binary);
+	f << text;
+}
+
+static uint32_t Le32(const std::string& s, size_t at)
+{
+	uint32_t v = 0;
+	for (int i = 3; i >= 0; --i)
+		v = (v << 8) | static_cast<unsigned char>(s[at + i]);
+	return v;
+}
+
+static void CrashLogTests()
+{
+	namespace fs = std::filesystem;
+	std::tm when{};
+	when.tm_year = 126;
+	when.tm_mon = 9;
+	when.tm_mday = 30;
+	when.tm_hour = 18;
+	when.tm_min = 26;
+	when.tm_sec = 7;
+	Check(obui::logFileName(when) == "outbreak-20261030-182607.log", "log name: sorts by time");
+
+	obui::LogCap cap(10);
+	Check(cap.accept(6) == 6, "log cap: under the limit passes");
+	Check(cap.accept(6) == 4, "log cap: cut at the limit");
+	Check(cap.accept(6) == 0, "log cap: nothing after the limit");
+
+	std::string text = "open C:\\Users\\Pat\\game.iso and c:/users/pat/x; D:\\Other stays";
+	obui::maskHome(text, "C:\\Users\\Pat");
+	Check(text.find("Pat") == std::string::npos && text.find("pat") == std::string::npos, "mask: any case, either slash");
+	Check(text.find("~") != std::string::npos && text.find("D:\\Other stays") != std::string::npos, "mask: the rest stays");
+	Check(text.size() == std::string("open C:\\Users\\Pat\\game.iso and c:/users/pat/x; D:\\Other stays").size(), "mask: size kept");
+	std::string wide;
+	for (char c : std::string("x C:\\Users\\Pat y"))
+	{
+		wide.push_back(c);
+		wide.push_back('\0');
+	}
+	const size_t wideSize = wide.size();
+	obui::maskHome(wide, "C:\\Users\\Pat");
+	Check(wide.find(std::string("P\0a\0t", 5)) == std::string::npos && wide.size() == wideSize, "mask: UTF-16 in a dump");
+	std::string untouched = "abc";
+	obui::maskHome(untouched, "");
+	Check(untouched == "abc", "mask: no home, nothing changes");
+
+	const std::string zip = obui::zipStored({{"a.txt", "hello"}});
+	Check(zip.size() > 30 && Le32(zip, 0) == 0x04034b50u, "zip: local header");
+	Check(Le32(zip, 14) == 0x3610a686u, "zip: CRC-32 of the data");
+	Check(zip.find("hello") != std::string::npos && zip.find("a.txt") != std::string::npos, "zip: name and data");
+	const size_t end = zip.size() - 22;
+	Check(Le32(zip, end) == 0x06054b50u, "zip: end record");
+	Check((Le32(zip, end + 8) & 0xFFFFu) == 1u, "zip: one entry");
+	Check(Le32(zip, Le32(zip, end + 16)) == 0x02014b50u, "zip: the end record points at the directory");
+
+	const fs::path dir = fs::temp_directory_path() / "ob_ui_crash_log_test";
+	std::error_code ec;
+	fs::remove_all(dir, ec);
+	fs::create_directories(dir);
+	for (const char* n : {"outbreak-1.log", "outbreak-1.dmp", "outbreak-2.log", "outbreak-3.log", "outbreak-3.dmp", "outbreak-0.dmp", "keep.txt"})
+		SpitBytes(dir / n, "x");
+	obui::pruneLogs(dir, 2);
+	Check(!fs::exists(dir / "outbreak-1.log") && !fs::exists(dir / "outbreak-1.dmp"), "prune: the oldest log and its dump go");
+	Check(fs::exists(dir / "outbreak-2.log") && fs::exists(dir / "outbreak-3.log") && fs::exists(dir / "outbreak-3.dmp"), "prune: the newest stay");
+	Check(!fs::exists(dir / "outbreak-0.dmp"), "prune: a dump without a log goes");
+	Check(fs::exists(dir / "keep.txt"), "prune: other files stay");
+
+	// A run's graphics log (<name>-gs.log) lives and dies with its run, and does not count as a run.
+	const fs::path gsDir = dir / "gs";
+	fs::create_directories(gsDir);
+	for (const char* n : {"outbreak-1.log", "outbreak-1-gs.log", "outbreak-2.log", "outbreak-2-gs.log", "outbreak-3.log", "outbreak-3-gs.log", "outbreak-0-gs.log"})
+		SpitBytes(gsDir / n, "x");
+	obui::pruneLogs(gsDir, 2);
+	Check(!fs::exists(gsDir / "outbreak-1-gs.log"), "prune: a pruned run's graphics log goes");
+	Check(fs::exists(gsDir / "outbreak-2.log") && fs::exists(gsDir / "outbreak-2-gs.log"), "prune: graphics logs do not use up the runs kept");
+	Check(fs::exists(gsDir / "outbreak-3-gs.log"), "prune: the newest run's graphics log stays");
+	Check(!fs::exists(gsDir / "outbreak-0-gs.log"), "prune: a graphics log without a run goes");
+	Check(obui::gsLogName("outbreak-20261030-182607.log") == "outbreak-20261030-182607-gs.log", "graphics log: named for its run");
+	fs::remove_all(gsDir, ec);
+
+	SpitBytes(dir / "outbreak-3-gs.log", "graphics of run 3");
+	SpitBytes(dir / "outbreak-2.log", "path C:\\Users\\Pat\\game");
+	SpitBytes(dir / "net.env", "secret-settings");
+	SpitBytes(dir / "pcsx2-gs.log", "gs log from C:\\Users\\Pat");
+	const fs::path out = dir / "report.zip";
+	std::string error;
+	Check(obui::writeCrashReport(dir, {dir / "pcsx2-gs.log", dir / "net.env", dir / "missing.log"}, "C:\\Users\\Pat", out, error), "report: written");
+	const std::string report = SlurpBytes(out);
+	Check(report.find("outbreak-2.log") != std::string::npos && report.find("outbreak-3.dmp") != std::string::npos, "report: logs and dumps");
+	Check(report.find("gs log from") != std::string::npos, "report: the extra file");
+	Check(report.find("graphics of run 3") != std::string::npos, "report: each run's graphics log");
+	Check(report.find("secret-settings") == std::string::npos, "report: never net.env");
+	Check(report.find("keep.txt") == std::string::npos, "report: only the log files");
+	Check(report.find("Pat") == std::string::npos, "report: home hidden");
+	const fs::path empty = dir / "empty";
+	fs::create_directories(empty);
+	Check(!obui::writeCrashReport(empty, {}, "", dir / "none.zip", error) && !error.empty(), "report: nothing to send says so");
+	Check(!fs::exists(dir / "none.zip"), "report: no empty file");
+	fs::remove_all(dir, ec);
+}
+
 int main()
 {
 	IniTests();
@@ -902,6 +1013,7 @@ int main()
 	TouchTests();
 	NetTests();
 	SafeTextTests();
+	CrashLogTests();
 	std::printf("ob_ui: %d/%d\n", s_total - s_fail, s_total);
 	return s_fail ? 1 : 0;
 }

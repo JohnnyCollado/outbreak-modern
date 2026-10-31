@@ -17,6 +17,7 @@ interface PickHost {
     fun pickTree(kind: ImportKind)
     fun pickZip(kind: ImportKind)
     fun pickSaveFolder()
+    fun saveCrashReport()
 }
 
 /**
@@ -787,6 +788,10 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
 
     private fun advancedPage(): SPage {
         val v = settings.get("vu1")
+        val report = if (inGame) emptyList() else listOf(
+            SRow.Action("crash-report", "Save crash report") { host?.saveCrashReport() },
+            SRow.Info("crash-hint", "Puts this app's logs in one .zip to send to whoever helps you debug. Server addresses may be in it: send it privately.", Tone.MUTED),
+        )
         return SPage("Advanced", listOf(
             SRow.Choice("vu1", "VU1 engine", listOf("Default", "Recompiler (mvu, fast)", "Interpreter (interp, reference)"),
                 when (v) { "mvu" -> 1; "interp" -> 2; else -> 0 }) {
@@ -794,7 +799,7 @@ class SettingsModel(private val context: Context, val settings: Settings, val in
                 note("Saved: VU1 engine")
             },
             SRow.Info("vu1-hint", "The PS2's vector unit that transforms the 3D.", Tone.MUTED),
-        ))
+        ) + report)
     }
 
     companion object {

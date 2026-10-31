@@ -40,6 +40,8 @@ class LauncherActivity : ComponentActivity(), PickHost {
     private val pickSaveLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(::onSaveFolder) }
     private val pickZipLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { startZip(it) } }
 
+    private val saveReportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let(::onCrashReport) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.immersive()
@@ -207,6 +209,18 @@ class LauncherActivity : ComponentActivity(), PickHost {
     }
 
     override fun pickSaveFolder() = pickSaveLauncher.launch(null)
+
+    override fun saveCrashReport() = saveReportLauncher.launch("outbreak-crash-report.zip")
+
+    private fun onCrashReport(uri: Uri) {
+        model.note("Saving the crash report...")
+        Thread {
+            val saved = runCatching {
+                contentResolver.openOutputStream(uri)?.use { CrashReport.write(it, CrashReport.gather(this)) } ?: 0
+            }.getOrDefault(0)
+            runOnUiThread { model.note(if (saved > 0) "Crash report saved" else "Could not save the crash report") }
+        }.start()
+    }
 
     private fun onSaveFolder(uri: Uri) {
         val kept = runCatching { contentResolver.takePersistableUriPermission(uri, TreeCardFolder.FLAGS) }.isSuccess

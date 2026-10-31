@@ -1,0 +1,169 @@
+From b45d66e4faa90af01502fbdb26507b298e9c2c9c Mon Sep 17 00:00:00 2001
+From: JohnnyC96 <54557697+JohnnyC96@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 16:17:22 -0400
+Subject: [PATCH] Runtime: a VIF1 DMA towards memory takes the GS readback
+
+A VIF1 start ignored the transfer's direction, so sceDmaRecvN's destination buffer ran as a VIF stream. Resident
+Evil Outbreak reads its frame back this way when the status screen opens (func_0018C830: VIF1_STAT.FDR, BUSDIR,
+sceDmaRecvN on GS FINISH): old pixels became VIF codes and VU1 programs, and the game's DMA queue never drained.
+With FDR set and DIR clear in normal mode, the image now goes to MADR and the channel ends as usual.
+---
+ ps2xRuntime/include/runtime/ps2_memory.h |  6 +++
+ ps2xRuntime/src/lib/ps2_memory.cpp       | 36 ++++++++++++++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp      |  2 +
+ ps2xTest/src/ps2_memory_tests.cpp        | 55 ++++++++++++++++++++++++
+ 4 files changed, 99 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index e95ac90..99bdca2 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -282,6 +282,11 @@ public:
+     using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
+     void setVu1MscntCallback(Vu1MscntCallback cb) { m_vu1MscntCallback = std::move(cb); }
+ 
++    // A VIF1 DMA towards memory (VIF1_STAT.FDR set, CHCR.DIR clear) takes its data from here: the GS local-to-host
++    // transfer. Returns the bytes written. Resident Evil Outbreak reads its frame back this way for the status screen.
++    using Vif1ReadbackCallback = std::function<uint32_t(uint8_t *dst, uint32_t maxBytes)>;
++    void setVif1ReadbackCallback(Vif1ReadbackCallback cb) { m_vif1ReadbackCallback = std::move(cb); }
++
+     uint8_t *getVU1Code() { return m_vu1Code; }
+     const uint8_t *getVU1Code() const { return m_vu1Code; }
+     uint8_t *getVU1Data() { return m_vu1Data; }
+@@ -359,6 +364,7 @@ public:
+     std::vector<TLBEntry> m_tlbEntries;
+ 
+     GifPacketCallback m_gifPacketCallback;
++    Vif1ReadbackCallback m_vif1ReadbackCallback;
+     GifArbiter *m_gifArbiter = nullptr;
+     Vu1MscalCallback m_vu1MscalCallback;
+     Vu1MscntCallback m_vu1MscntCallback;
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 09386eb..2048519 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1538,6 +1538,42 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+                 return true;
+             }
+ 
++            // VIF1 towards memory: the GS sends its local-to-host image here (VIF1_STAT.FDR, set before the start;
++            // DIR clear, normal mode). MADR is where the image goes, not a VIF stream.
++            const auto vif1Stat = m_ioRegisters.find(0x10003C00u);
++            if (channelBase == 0x10009000u && (value & 0xDu) == 0u && vif1Stat != m_ioRegisters.end() &&
++                (vif1Stat->second & (1u << 23)) != 0u)
++            {
++                processPendingTransfers(); // the packets that asked for the image go first
++                uint32_t bytes = (qwc & 0xFFFFu) * 16u;
++                uint32_t phys = PS2_RAM_SIZE;
++                if (!isScratchpad(madr))
++                {
++                    try
++                    {
++                        phys = translateAddress(madr);
++                    }
++                    catch (...)
++                    {
++                    }
++                }
++                bytes = phys < PS2_RAM_SIZE ? std::min(bytes, PS2_RAM_SIZE - phys) : 0u;
++                if (bytes != 0u && m_vif1ReadbackCallback)
++                    m_vif1ReadbackCallback(m_rdram + phys, bytes);
++
++                uint32_t dstat = m_ioRegisters[0x1000E010u] | (1u << 1);
++                if (((dstat & 0x3FFu) & ((dstat >> 16) & 0x3FFu)) != 0u)
++                    dstat |= (1u << 31);
++                else
++                    dstat &= ~(1u << 31);
++                m_ioRegisters[0x1000E010u] = dstat;
++                queueCompletedDmacCause(1u);
++                m_ioRegisters[channelBase + 0x10u] = madr + bytes;
++                m_ioRegisters[channelBase + 0x20u] = 0u;
++                m_ioRegisters[channelBase + 0x00u] = value & ~0x100u;
++                return true;
++            }
++
+             if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) && (m_gsVRAM || channelBase == 0x10008000u))
+             {
+                 auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 2949fe7..372c694 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -874,6 +874,8 @@ bool PS2Runtime::syncCoreSubsystems()
+             diag->onVu1End(m_memory.getVU1Data(), after, cpuContext.vu0_vpu_stat);
+         }
+     };
++    m_memory.setVif1ReadbackCallback([this](uint8_t *dst, uint32_t maxBytes)
++                                     { return m_gs.consumeLocalToHostBytes(dst, maxBytes); });
+     m_memory.setVu1MscalCallback([this, runExternalVu1](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
+                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index c88d22a..0a725a2 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2272,6 +2272,61 @@ void register_ps2_memory_tests()
+                      "preserved TTE should deliver the tag high-half VIFcode");
+         });
+ 
++        tc.Run("VIF1 DMA towards memory takes the GS readback, not a VIF stream", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            constexpr uint32_t kVif1Ch = 0x10009000u;
++            constexpr uint32_t kDst = 0x00100000u;
++            uint8_t *rdram = mem.getRDRAM();
++
++            // The old contents read as a VIF MARK: run as a stream, they would change VIF1_MARK.
++            const uint32_t markCode = 0x07001234u;
++            std::memcpy(rdram + kDst, &markCode, sizeof(markCode));
++
++            uint32_t asked = 0u;
++            mem.setVif1ReadbackCallback([&asked](uint8_t *dst, uint32_t maxBytes)
++                                        {
++                                            asked = maxBytes;
++                                            std::memset(dst, 0xABu, maxBytes);
++                                            return maxBytes;
++                                        });
++            mem.writeIORegister(0x10003C00u, 0x00800000u); // VIF1_STAT.FDR
++            mem.writeIORegister(kVif1Ch + 0x10u, kDst);
++            mem.writeIORegister(kVif1Ch + 0x20u, 2u);
++            mem.writeIORegister(kVif1Ch + 0x00u, 0x100u); // normal mode, DIR clear, start
++
++            t.Equals(asked, 32u, "the readback is asked for QWC quadwords");
++            t.Equals(static_cast<uint32_t>(rdram[kDst]), 0xABu, "the image lands at MADR");
++            t.Equals(static_cast<uint32_t>(rdram[kDst + 31u]), 0xABu, "the whole image lands");
++            t.Equals(mem.vif1_regs.mark, 0u, "the buffer's old contents do not run as VIF codes");
++            t.Equals(mem.readIORegister(kVif1Ch + 0x00u) & 0x100u, 0u, "the channel ends");
++            t.Equals(mem.readIORegister(kVif1Ch + 0x20u), 0u, "QWC reaches 0");
++            t.Equals(mem.readIORegister(kVif1Ch + 0x10u), kDst + 32u, "MADR advances");
++            t.Equals(mem.readIORegister(0x1000E010u) & 0x2u, 0x2u, "D_STAT channel 1 is set");
++            const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
++            t.IsTrue(causes.size() == 1u && causes[0] == 1u, "the DMA-end handlers of channel 1 are queued");
++
++            // A destination past the end of RAM is refused, and the channel still ends: the game must not hang.
++            asked = 0u;
++            mem.writeIORegister(kVif1Ch + 0x10u, PS2_RAM_SIZE - 16u);
++            mem.writeIORegister(kVif1Ch + 0x20u, 2u);
++            mem.writeIORegister(kVif1Ch + 0x00u, 0x100u);
++            t.Equals(asked, 16u, "only what fits in RAM is asked for");
++            t.Equals(mem.readIORegister(kVif1Ch + 0x00u) & 0x100u, 0u, "the channel ends at the edge of RAM");
++
++            // Without FDR the same start is a send, as every existing VIF1 caller expects.
++            mem.writeIORegister(0x10003C00u, 0u);
++            mem.writeIORegister(kVif1Ch + 0x10u, kDst);
++            mem.writeIORegister(kVif1Ch + 0x20u, 1u);
++            std::memcpy(rdram + kDst, &markCode, sizeof(markCode));
++            std::memset(rdram + kDst + 4u, 0, 12u);
++            asked = 0u;
++            mem.writeIORegister(kVif1Ch + 0x00u, 0x100u);
++            t.Equals(asked, 0u, "a send does not touch the readback");
++            t.Equals(mem.vif1_regs.mark, 0x1234u, "a send runs as VIF codes");
++        });
++
+         tc.Run("sceDmaRecvN copies from scratchpad in normal mode", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+-- 
+2.46.2.windows.1
+
