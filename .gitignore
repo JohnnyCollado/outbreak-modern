@@ -53,3 +53,7 @@ dist-user-data/
 # Crash reports written by the game (crash_capture.cpp, CrashReport.kt): they hold this machine's paths and state
 crash-report-*.zip
 outbreak-crash-report.zip
+
+# Local-only: personal paths, device ids and LAN addresses from runs (kept on disk, not published)
+.claude/
+legacy/results/
