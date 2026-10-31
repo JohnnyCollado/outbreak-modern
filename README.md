@@ -119,4 +119,4 @@ Next release, when PCSX2 and PS2 players can join:
 
 - **Outbreak decomp repo:** [GalaxyNostalgia/Outbreak-decomp](https://github.com/GalaxyNostalgia/Outbreak-decomp) (CC0), the addresses, structures and functions this project is built on.
 - **PS2Recomp:** [ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp) (GPL-3.0), the recompiler and runtime this build runs on.
-- **Modern Camera Mod (RE5 Style):** [author to be credited with the release link]. The original *Resident Evil Outbreak Modern Camera* mod is by HeySnippy; see `CREDITS.md`.
+- **Modern Camera Mod (RE5 Style):** by HeySnippy, the original *Resident Evil Outbreak Modern Camera* mod: [heysnippy.com/mods/outbreak-modern-camera](https://heysnippy.com/mods/outbreak-modern-camera). See `CREDITS.md`.
